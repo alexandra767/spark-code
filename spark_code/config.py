@@ -63,7 +63,35 @@ def expand_env_vars(config: dict) -> dict:
     return result
 
 
-def load_config(project_dir: str | None = None) -> dict:
+def resolve_provider(config: dict, provider_name: str | None = None) -> dict:
+    """Resolve active provider into model config."""
+    providers = config.get("providers", {})
+    if not providers:
+        return config  # Old-style config without providers
+
+    # Pick provider
+    name = provider_name or config.get("active_provider", "ollama")
+    if name not in providers:
+        available = ", ".join(providers.keys())
+        raise ValueError(f"Unknown provider '{name}'. Available: {available}")
+
+    provider_conf = providers[name]
+
+    # Map provider config to model config
+    config["model"] = {
+        "endpoint": provider_conf.get("endpoint", "http://localhost:11434"),
+        "name": provider_conf.get("model", "qwen2.5:72b"),
+        "temperature": provider_conf.get("temperature", 0.7),
+        "max_tokens": provider_conf.get("max_tokens", 4096),
+        "context_window": provider_conf.get("context_window", 32768),
+        "api_key": provider_conf.get("api_key", ""),
+        "provider": name,
+    }
+    return config
+
+
+def load_config(project_dir: str | None = None,
+                provider: str | None = None) -> dict:
     """Load config from defaults → global → project, with env var expansion."""
     config = DEFAULT_CONFIG.copy()
 
@@ -81,7 +109,12 @@ def load_config(project_dir: str | None = None) -> dict:
                 project_conf = yaml.safe_load(f) or {}
             config = deep_merge(config, project_conf)
 
-    return expand_env_vars(config)
+    config = expand_env_vars(config)
+
+    # Resolve provider into model config
+    config = resolve_provider(config, provider)
+
+    return config
 
 
 def get(config: dict, *keys: str, default: Any = None) -> Any:

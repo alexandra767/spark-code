@@ -1,31 +1,81 @@
-"""Ollama / OpenAI-compatible API client with streaming and tool calling."""
+"""OpenAI-compatible API client with streaming and tool calling.
+
+Supports multiple providers:
+- Ollama (local, DGX Spark)
+- Google Gemini (via OpenAI-compatible API)
+- OpenAI
+- Any OpenAI-compatible endpoint
+"""
 
 import json
 import httpx
 from typing import AsyncIterator
 
 
+# Known provider configurations
+PROVIDERS = {
+    "ollama": {
+        "base_url": "http://localhost:11434",
+        "api_path": "/v1/chat/completions",
+        "needs_key": False,
+    },
+    "gemini": {
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "api_path": "/chat/completions",
+        "needs_key": True,
+    },
+    "openai": {
+        "base_url": "https://api.openai.com/v1",
+        "api_path": "/chat/completions",
+        "needs_key": True,
+    },
+}
+
+
 class ModelClient:
-    """Client for Ollama's OpenAI-compatible chat API."""
+    """Client for OpenAI-compatible chat APIs (Ollama, Gemini, OpenAI, etc.)."""
 
     def __init__(self, endpoint: str, model: str, temperature: float = 0.7,
-                 max_tokens: int = 4096):
-        self.endpoint = endpoint.rstrip("/")
+                 max_tokens: int = 4096, api_key: str = "",
+                 provider: str = "ollama"):
+        self.provider = provider
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.api_key = api_key
         self.total_input_tokens = 0
         self.total_output_tokens = 0
 
-        # Allow self-signed certs (DGX Spark uses self-signed SSL)
+        # Set up endpoint
+        if provider in PROVIDERS and endpoint == PROVIDERS[provider]["base_url"]:
+            self.endpoint = PROVIDERS[provider]["base_url"]
+        else:
+            self.endpoint = endpoint.rstrip("/")
+
+        # Build headers
+        headers = {}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        # Allow self-signed certs for local endpoints
+        verify = True
+        if "localhost" in self.endpoint or ".local" in self.endpoint:
+            verify = False
+
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(300.0, connect=10.0),
-            verify=False,
+            verify=verify,
+            headers=headers,
         )
 
     @property
     def api_url(self) -> str:
-        return f"{self.endpoint}/v1/chat/completions"
+        provider_conf = PROVIDERS.get(self.provider, {})
+        api_path = provider_conf.get("api_path", "/v1/chat/completions")
+        # Don't double up /v1 if endpoint already has it
+        if self.endpoint.endswith("/v1") and api_path.startswith("/v1"):
+            api_path = api_path[3:]
+        return f"{self.endpoint}{api_path}"
 
     def _build_tools_payload(self, tools: list[dict]) -> list[dict]:
         """Convert tool definitions to OpenAI function calling format."""

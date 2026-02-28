@@ -180,6 +180,8 @@ async def run_interactive(config: dict):
         model=get(config, "model", "name"),
         temperature=get(config, "model", "temperature", default=0.7),
         max_tokens=get(config, "model", "max_tokens", default=4096),
+        api_key=get(config, "model", "api_key", default=""),
+        provider=get(config, "model", "provider", default="ollama"),
     )
     context = Context(
         system_prompt=system_prompt,
@@ -249,18 +251,19 @@ async def run_interactive(config: dict):
 @click.command()
 @click.option("--endpoint", "-e", help="Model API endpoint URL")
 @click.option("--model", "-m", "model_name", help="Model name")
+@click.option("--provider", "-p", help="Provider: ollama, gemini, openai")
 @click.option("--trust", is_flag=True, help="Trust mode (allow all tool calls)")
 @click.option("--auto", "auto_mode", is_flag=True, help="Auto mode (allow reads, ask for writes)")
 @click.option("--version", "-v", is_flag=True, help="Show version")
 @click.argument("prompt", nargs=-1, required=False)
-def main(endpoint, model_name, trust, auto_mode, version, prompt):
+def main(endpoint, model_name, provider, trust, auto_mode, version, prompt):
     """Spark Code — Your local AI coding assistant."""
     if version:
         click.echo(f"Spark Code v{__version__}")
         return
 
-    # Load config
-    config = load_config(os.getcwd())
+    # Load config with provider selection
+    config = load_config(os.getcwd(), provider=provider)
 
     # CLI overrides
     if endpoint:
@@ -290,6 +293,8 @@ async def _one_shot(config: dict, prompt: str):
         model=get(config, "model", "name"),
         temperature=get(config, "model", "temperature", default=0.7),
         max_tokens=get(config, "model", "max_tokens", default=4096),
+        api_key=get(config, "model", "api_key", default=""),
+        provider=get(config, "model", "provider", default="ollama"),
     )
     context = Context()
     tools = build_tools()
