@@ -10,11 +10,13 @@ class Skill:
     """A skill is a pre-written prompt triggered by a slash command."""
 
     def __init__(self, name: str, description: str, prompt: str,
-                 required_tools: list[str] | None = None):
+                 required_tools: list[str] | None = None,
+                 requires_args: bool = False):
         self.name = name
         self.description = description
         self.prompt = prompt
         self.required_tools = required_tools or []
+        self.requires_args = requires_args
 
     def get_prompt(self, args: str = "") -> str:
         """Get the full prompt, optionally with user arguments."""
@@ -208,23 +210,5 @@ Steps:
 
 Be thorough — check multiple naming conventions, related files, tests.""",
         required_tools=["glob", "grep", "read_file"],
-    ),
-    Skill(
-        name="plan",
-        description="Enter plan mode — create a plan before executing",
-        prompt="""The user wants you to plan before executing. Enter plan mode.
-
-Rules in plan mode:
-1. You may ONLY use read-only tools (read_file, glob, grep, list_dir, web_search)
-2. Do NOT edit files, write files, or run bash commands
-3. Explore the codebase to understand the current state
-4. Create a numbered implementation plan with:
-   - Each step clearly described
-   - Files that will be modified/created
-   - Potential risks or trade-offs
-   - Estimated complexity
-5. Present the plan and wait for user approval
-6. Only after approval, execute the plan step by step""",
-        required_tools=["read_file", "glob", "grep", "list_dir"],
     ),
 ]

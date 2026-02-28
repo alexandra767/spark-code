@@ -29,6 +29,10 @@ Guidelines:
 - If something fails, try a different approach
 - Be concise but thorough
 - Use markdown formatting in responses
+
+Important: When the user types what looks like a shell command (e.g. "python snake.py", "npm start",
+"ls -la", "pip install X", "make build"), just run it immediately with the bash tool.
+Do NOT ask for clarification — the user expects it to run. Use the current working directory.
 """
 
 
@@ -44,6 +48,23 @@ class Context:
     def add_user(self, content: str):
         """Add a user message."""
         self.messages.append({"role": "user", "content": content})
+        self.turn_count += 1
+
+    def add_user_with_image(self, text: str, image_base64: str,
+                            mime_type: str = "image/png"):
+        """Add a user message with an embedded image (multimodal)."""
+        self.messages.append({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": text},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{mime_type};base64,{image_base64}",
+                    },
+                },
+            ],
+        })
         self.turn_count += 1
 
     def add_assistant(self, content: str):

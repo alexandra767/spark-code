@@ -12,6 +12,73 @@ import httpx
 from typing import AsyncIterator
 
 
+def _parse_tool_arguments(raw: str) -> dict:
+    """Parse tool call arguments with fallback repairs for malformed JSON."""
+    if not raw:
+        return {}
+
+    # Try direct parse first
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+
+    # Try escaping literal newlines (common with Gemini streaming)
+    try:
+        fixed = raw.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+        return json.loads(fixed)
+    except json.JSONDecodeError:
+        pass
+
+    # Try extracting first JSON object (Gemini sometimes concatenates multiple)
+    if raw.startswith("{"):
+        depth = 0
+        in_string = False
+        escape = False
+        for i, ch in enumerate(raw):
+            if escape:
+                escape = False
+                continue
+            if ch == "\\":
+                escape = True
+                continue
+            if ch == '"' and not escape:
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(raw[:i + 1])
+                    except json.JSONDecodeError:
+                        break
+
+    # Try fixing truncated JSON — add missing closing braces
+    attempt = raw.rstrip()
+    for _ in range(3):
+        attempt += "}"
+        try:
+            return json.loads(attempt)
+        except json.JSONDecodeError:
+            continue
+
+    # Try fixing truncated string values — close open quotes then braces
+    attempt = raw.rstrip()
+    if attempt.count('"') % 2 == 1:
+        attempt += '"}'
+        try:
+            return json.loads(attempt)
+        except json.JSONDecodeError:
+            pass
+
+    # Last resort — return raw string in a dict
+    return {"raw": raw}
+
+
 # Known provider configurations
 PROVIDERS = {
     "ollama": {
@@ -163,10 +230,7 @@ class ModelClient:
         # Emit buffered tool calls
         for idx in sorted(tool_calls_buffer):
             tc = tool_calls_buffer[idx]
-            try:
-                args = json.loads(tc["arguments"]) if tc["arguments"] else {}
-            except json.JSONDecodeError:
-                args = {"raw": tc["arguments"]}
+            args = _parse_tool_arguments(tc["arguments"])
             yield {"type": "tool_call", "id": tc["id"], "name": tc["name"], "arguments": args}
 
         yield {"type": "done", "usage": {
