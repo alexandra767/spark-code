@@ -11,13 +11,11 @@ from typing import Callable
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
-from prompt_toolkit.document import Document
-from prompt_toolkit.formatted_text import HTML, FormattedText, AnyFormattedText
+from prompt_toolkit.formatted_text import AnyFormattedText, FormattedText
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.styles import Style
-
 
 # ---------------------------------------------------------------------------
 # Builtin commands
@@ -28,10 +26,14 @@ _BUILTIN_COMMANDS: dict[str, str] = {
     "/clear": "Clear conversation history",
     "/compact": "Summarize conversation to save context",
     "/config": "Show current configuration",
-    "/model": "Show model information",
+    "/model": "Show model info or switch provider (/model <provider>)",
+    "/model list": "List available providers",
     "/tokens": "Show token usage",
+    "/stats": "Show session statistics",
+    "/diff": "Show git diff with syntax highlighting",
+    "/memory": "View or add to memory",
     "/image": "Send an image file with a prompt",
-    "/mode": "Switch permission mode (ask/auto/trust)",
+    "/mode": "Switch permission mode (ask/auto/trust/plan)",
     "/trust": "Switch to trust mode (allow all)",
     "/auto": "Switch to auto mode (allow reads)",
     "/ask": "Switch to ask mode (confirm all)",
@@ -39,13 +41,20 @@ _BUILTIN_COMMANDS: dict[str, str] = {
     "/plan show": "Show the current plan",
     "/plan copy": "Copy plan to clipboard",
     "/plan go": "Execute the approved plan",
+    "/publish": "Create a GitHub repo and push (auto-detects name)",
+    "/new": "Scaffold a new project with git",
     "/run": "Run the project (auto-detect or specify command)",
     "/team": "Spawn a background worker agent",
     "/tasks": "Show the shared task list",
     "/messages": "Check messages from workers",
+    "/history": "List and resume past sessions",
+    "/undo": "Undo last file write/edit",
     "/quit": "Exit Spark Code",
     "/exit": "Exit Spark Code",
 }
+
+# Mode cycle order for Shift+Tab
+_MODE_CYCLE = ["ask", "auto", "trust", "plan"]
 
 
 # ---------------------------------------------------------------------------
@@ -89,12 +98,12 @@ INPUT_STYLE = Style.from_dict({
     "prompt": "fg:#5e81ac bold",
 
     # Bottom toolbar (the persistent footer)
-    "bottom-toolbar": "bg:#2e3440 fg:#4c566a",
-    "bottom-toolbar.text": "fg:#4c566a",
-    "bottom-toolbar.info": "fg:#666666",
+    "bottom-toolbar": "bg:#2e3440 fg:#7b88a1",
+    "bottom-toolbar.text": "fg:#7b88a1",
+    "bottom-toolbar.info": "fg:#8899aa",
     "bottom-toolbar.mode": "fg:#a3be8c bold",
     "bottom-toolbar.mode-text": "fg:#d8dee9",
-    "bottom-toolbar.context": "fg:#666666",
+    "bottom-toolbar.context": "fg:#8899aa",
 
     # Team status in toolbar
     "bottom-toolbar.team": "fg:#88c0d0 bold",
@@ -103,14 +112,14 @@ INPUT_STYLE = Style.from_dict({
     "bottom-toolbar.worker-done": "fg:#a3be8c",
     "bottom-toolbar.worker-failed": "fg:#bf616a",
     "bottom-toolbar.worker-name": "fg:#d8dee9",
-    "bottom-toolbar.worker-task": "fg:#666666",
+    "bottom-toolbar.worker-task": "fg:#8899aa",
 
     # Completion menu
     "completion-menu": "bg:#2e3440 fg:#d8dee9",
     "completion-menu.completion": "bg:#2e3440 fg:#d8dee9",
     "completion-menu.completion.current": "bg:#434c5e fg:#eceff4",
     "completion.command": "fg:#88c0d0 bold",
-    "completion.description": "fg:#666666",
+    "completion.description": "fg:#8899aa",
 })
 
 
@@ -118,7 +127,10 @@ INPUT_STYLE = Style.from_dict({
 # Key bindings
 # ---------------------------------------------------------------------------
 
-def _create_bindings(team_display_callback: Callable | None = None) -> KeyBindings:
+def _create_bindings(
+    team_display_callback: Callable | None = None,
+    mode_switch_callback: Callable | None = None,
+) -> KeyBindings:
     bindings = KeyBindings()
 
     @bindings.add(Keys.Escape, Keys.Enter)
@@ -131,6 +143,12 @@ def _create_bindings(team_display_callback: Callable | None = None) -> KeyBindin
         """Ctrl+T to show team status."""
         if team_display_callback:
             team_display_callback()
+
+    @bindings.add(Keys.BackTab)
+    def _cycle_mode(event):
+        """Shift+Tab to cycle permission mode: ask → auto → trust → plan."""
+        if mode_switch_callback:
+            mode_switch_callback()
 
     return bindings
 
@@ -146,6 +164,7 @@ def create_session(
     mode_callback: Callable[[], AnyFormattedText] | None = None,
     team_callback: Callable[[], AnyFormattedText] | None = None,
     team_display_callback: Callable | None = None,
+    mode_switch_callback: Callable | None = None,
     command_descriptions: dict[str, str] | None = None,
 ) -> PromptSession:
     """Create a prompt session with slash-command autocomplete and
@@ -168,7 +187,10 @@ def create_session(
             extra_commands[name] = ""
     completer = SlashCommandCompleter(commands=extra_commands)
 
-    bindings = _create_bindings(team_display_callback=team_display_callback)
+    bindings = _create_bindings(
+        team_display_callback=team_display_callback,
+        mode_switch_callback=mode_switch_callback,
+    )
 
     # Bottom toolbar — combines callbacks into a multi-line footer
     def bottom_toolbar():

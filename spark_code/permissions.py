@@ -6,13 +6,11 @@ from typing import Any
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt
-from rich.syntax import Syntax
 from rich.text import Text
-
 
 # Nord palette
 _C_TOOL = "bold #88c0d0"
-_C_DIM = "#4c566a"
+_C_DIM = "#7b88a1"
 _C_PATH = "#d8dee9"
 _C_CMD = "#eceff4"
 _C_BRIGHT = "#eceff4"

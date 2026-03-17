@@ -1,9 +1,13 @@
 """Shared task list — JSON-backed store for team coordination."""
 
 import json
+import logging
 import os
+import shutil
 import time
 import uuid
+
+logger = logging.getLogger(__name__)
 
 
 class Task:
@@ -90,7 +94,7 @@ class TaskStore:
         """Persist tasks to disk."""
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         data = {tid: t.to_dict() for tid, t in self.tasks.items()}
-        with open(self.path, "w") as f:
+        with open(self.path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
 
     def load(self):
@@ -98,8 +102,15 @@ class TaskStore:
         if not os.path.exists(self.path):
             return
         try:
-            with open(self.path) as f:
+            with open(self.path, encoding="utf-8") as f:
                 data = json.load(f)
             self.tasks = {tid: Task.from_dict(td) for tid, td in data.items()}
-        except (json.JSONDecodeError, KeyError):
+        except (json.JSONDecodeError, KeyError) as e:
+            logger.warning("Corrupted tasks file %s: %s — backing up and resetting", self.path, e)
+            backup_path = self.path + ".corrupt"
+            try:
+                shutil.copy2(self.path, backup_path)
+                logger.info("Backed up corrupted file to %s", backup_path)
+            except OSError:
+                pass
             self.tasks = {}

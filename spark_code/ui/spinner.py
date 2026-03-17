@@ -1,10 +1,8 @@
 """Progress spinners and status indicators."""
 
 from contextlib import contextmanager
+
 from rich.console import Console
-from rich.spinner import Spinner
-from rich.live import Live
-from rich.text import Text
 
 
 @contextmanager

@@ -4,6 +4,7 @@ import asyncio
 import os
 import re
 import shutil
+
 from .base import Tool
 
 
@@ -85,6 +86,7 @@ class GrepTool(Tool):
             return f"Invalid regex: {e}"
 
         results = []
+        skipped_files = []
         max_results = 50
 
         for root, dirs, files in os.walk(path):
@@ -96,15 +98,25 @@ class GrepTool(Tool):
                     continue
                 fpath = os.path.join(root, fname)
                 try:
-                    with open(fpath, "r", errors="replace") as f:
+                    with open(fpath, "r", encoding="utf-8", errors="replace") as f:
                         for i, line in enumerate(f, 1):
                             if regex.search(line):
                                 results.append(f"{fpath}:{i}:{line.rstrip()}")
                                 if len(results) >= max_results:
-                                    return "\n".join(results) + f"\n\n... (truncated at {max_results} matches)"
+                                    output = "\n".join(results) + f"\n\n... (truncated at {max_results} matches)"
+                                    if skipped_files:
+                                        output += f"\n({len(skipped_files)} file(s) skipped due to errors)"
+                                    return output
                 except (OSError, UnicodeDecodeError):
+                    skipped_files.append(fpath)
                     continue
 
         if not results:
-            return f"No matches found for: {pattern}"
-        return "\n".join(results)
+            msg = f"No matches found for: {pattern}"
+            if skipped_files:
+                msg += f"\n({len(skipped_files)} file(s) skipped due to errors)"
+            return msg
+        output = "\n".join(results)
+        if skipped_files:
+            output += f"\n\n({len(skipped_files)} file(s) skipped due to errors)"
+        return output

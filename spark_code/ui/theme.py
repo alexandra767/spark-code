@@ -18,23 +18,23 @@ SPARK_THEME = Theme({
     "spark.tool": "bold #88c0d0",
     "spark.tool.name": "bold #88c0d0",
     "spark.tool.args": "#d8dee9",
-    "spark.tool.result": "#666666",
-    "spark.tool.connector": "#4c566a",
+    "spark.tool.result": "#8899aa",
+    "spark.tool.connector": "#7b88a1",
 
     # Permissions
     "spark.permission": "#ebcb8b",
 
     # Text
-    "spark.dim": "#666666",
+    "spark.dim": "#8899aa",
     "spark.user": "bold #eceff4",
     "spark.assistant": "#d8dee9",
     "spark.code": "#eceff4 on #2e3440",
 
     # Status
-    "spark.status": "#4c566a",
+    "spark.status": "#7b88a1",
     "spark.status.key": "#5e81ac",
-    "spark.status.value": "#888888",
-    "spark.status.sep": "#3b4252",
+    "spark.status.value": "#a0aabb",
+    "spark.status.sep": "#5a6577",
 })
 
 

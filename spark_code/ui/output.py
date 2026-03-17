@@ -13,19 +13,18 @@ Uses Nord-inspired colors matching Claude Code's palette:
 """
 
 import os
-import sys
 import time
 from typing import Any
 
-from rich.console import Console, Group
+from rich.console import Console
 from rich.live import Live
-from rich.markdown import CodeBlock, Markdown as _RichMarkdown
+from rich.markdown import CodeBlock
+from rich.markdown import Markdown as _RichMarkdown
 from rich.panel import Panel
+from rich.rule import Rule
 from rich.spinner import Spinner
 from rich.syntax import Syntax
 from rich.text import Text
-from rich.rule import Rule
-
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -41,8 +40,8 @@ _C_TOOL = "#88c0d0"       # tool name
 _C_TOOL_BOLD = "bold #88c0d0"
 _C_TEXT = "#d8dee9"        # normal text
 _C_BRIGHT = "#eceff4"     # emphasis
-_C_DIM = "#4c566a"        # dim/connector
-_C_MUTED = "#666666"      # muted info
+_C_DIM = "#7b88a1"        # dim/connector (brightened for readability)
+_C_MUTED = "#8899aa"      # muted info (brightened for readability)
 _C_GREEN = "#a3be8c"      # success / additions
 _C_RED = "#bf616a"        # error / deletions
 _C_YELLOW = "#ebcb8b"     # warning
@@ -131,10 +130,10 @@ def _format_tool_args(name: str, args: dict[str, Any]) -> Text:
         new = args.get("new_string", "")
         old_lines = old.count("\n") + (1 if old else 0)
         new_lines = new.count("\n") + (1 if new else 0)
-        text.append(f"  (", style=_C_DIM)
+        text.append("  (", style=_C_DIM)
         text.append(f"-{old_lines}", style=_C_RED)
         text.append(f" +{new_lines}", style=_C_GREEN)
-        text.append(f" lines)", style=_C_DIM)
+        text.append(" lines)", style=_C_DIM)
 
     elif name == "bash":
         command = args.get("command", "")

@@ -2,12 +2,17 @@
 
 import asyncio
 import os
+
 from .base import Tool
 
 
 class BashTool(Tool):
     name = "bash"
     description = "Execute a shell command and return its output (stdout + stderr). Use for git, npm, pip, tests, and other system commands."
+
+    @property
+    def supports_streaming(self) -> bool:
+        return True
 
     @property
     def parameters(self) -> dict:
@@ -48,6 +53,7 @@ class BashTool(Tool):
             )
         except asyncio.TimeoutError:
             process.kill()
+            await process.wait()
             return f"Error: Command timed out after {timeout}s"
         except Exception as e:
             return f"Error executing command: {e}"
@@ -87,6 +93,53 @@ class BashTool(Tool):
         if cmd in ("open", "electron", "flutter"):
             return True
         return False
+
+    async def execute_streaming(self, command: str, timeout: int = 120,
+                                callback=None, **kw) -> str:
+        """Execute command with line-by-line streaming output.
+
+        callback(line: str) is called for each output line as it arrives.
+        Still returns the full output for context.
+        """
+        try:
+            process = await asyncio.create_subprocess_shell(
+                command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                cwd=os.getcwd(),
+            )
+
+            lines = []
+            try:
+                async def read_lines():
+                    while True:
+                        line = await process.stdout.readline()
+                        if not line:
+                            break
+                        decoded = line.decode("utf-8", errors="replace").rstrip("\n")
+                        lines.append(decoded)
+                        if callback:
+                            try:
+                                callback(decoded)
+                            except Exception:
+                                pass  # Don't crash on callback failure
+
+                await asyncio.wait_for(read_lines(), timeout=timeout)
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+                return "\n".join(lines) + f"\n\nError: Command timed out after {timeout}s"
+
+            await process.wait()
+            output = "\n".join(lines)
+            exit_code = process.returncode
+            if exit_code != 0:
+                output += f"\n\nExit code: {exit_code}"
+
+            return output.strip() if output.strip() else f"Command completed (exit code {exit_code})"
+
+        except Exception as e:
+            return f"Error executing command: {e}"
 
     async def _run_background(self, command: str) -> str:
         """Launch a process detached — for GUI apps and servers."""

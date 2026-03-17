@@ -1,6 +1,7 @@
 """Web fetch tool — fetch and parse web pages."""
 
 import httpx
+
 from .base import Tool
 
 

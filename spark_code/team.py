@@ -3,6 +3,7 @@
 import asyncio
 from collections import deque
 from dataclasses import dataclass, field
+
 from rich.console import Console
 from rich.text import Text
 
@@ -13,7 +14,6 @@ from .permissions import PermissionManager
 from .task_store import TaskStore
 from .tools.base import ToolRegistry
 from .tools.send_message import SendMessageTool
-
 
 # Nord palette
 _C_TOOL = "#88c0d0"
@@ -77,6 +77,7 @@ class Worker:
     agent: Agent | None = None
     asyncio_task: asyncio.Task | None = None
     inbox: deque = field(default_factory=deque)
+    context_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 class TeamManager:
@@ -107,16 +108,17 @@ class TeamManager:
 
         if to_name == "lead":
             self.lead_inbox.append(msg)
-            return f"Message delivered to lead agent."
+            return "Message delivered to lead agent."
 
         if to_name == "broadcast":
             count = 0
             for w in self.workers.values():
                 if w.name != from_name and w.status == "running":
                     w.inbox.append(msg)
-                    # Inject message into worker's context
-                    w.agent.context.add_user(
-                        f"[Message from {from_name}]: {message}")
+                    # Queue message injection — will be picked up between agent rounds
+                    if w.agent:
+                        w.agent.context.add_user(
+                            f"[Message from {from_name}]: {message}")
                     count += 1
             self.lead_inbox.append(msg)  # Lead also sees broadcasts
             return f"Message broadcast to {count} worker(s) and the lead."

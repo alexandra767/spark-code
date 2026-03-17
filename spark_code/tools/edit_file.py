@@ -1,7 +1,8 @@
 """Edit file tool — find and replace."""
 
 import os
-from .base import Tool
+
+from .base import Tool, _backup_for_undo, _validate_path
 
 
 class EditFileTool(Tool):
@@ -35,15 +36,16 @@ class EditFileTool(Tool):
 
     async def execute(self, file_path: str, old_string: str, new_string: str,
                       replace_all: bool = False, **kw) -> str:
-        path = os.path.expanduser(file_path)
-        if not os.path.isabs(path):
-            path = os.path.abspath(path)
+        try:
+            path = _validate_path(file_path)
+        except ValueError as e:
+            return f"Error: {e}"
 
         if not os.path.exists(path):
             return f"Error: File not found: {path}"
 
         try:
-            with open(path, "r") as f:
+            with open(path, "r", encoding="utf-8") as f:
                 content = f.read()
         except Exception as e:
             return f"Error reading file: {e}"
@@ -62,8 +64,11 @@ class EditFileTool(Tool):
             new_content = content.replace(old_string, new_string, 1)
             replacements = 1
 
+        # Backup for /undo
+        _backup_for_undo(path)
+
         try:
-            with open(path, "w") as f:
+            with open(path, "w", encoding="utf-8") as f:
                 f.write(new_content)
             return f"Successfully replaced {replacements} occurrence(s) in {path}"
         except Exception as e:

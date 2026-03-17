@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=68.0", "wheel"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "spark-code"
@@ -26,10 +26,36 @@ dependencies = [
 
 [project.optional-dependencies]
 mcp = ["mcp>=1.0"]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+    "ruff>=0.4",
+]
 
 [project.scripts]
 spark = "spark_code.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["spark_code*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
+
+[tool.coverage.run]
+source = ["spark_code"]
+omit = ["spark_code/ui/*", "spark_code/mcp/*", "spark_code/cli.py"]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true

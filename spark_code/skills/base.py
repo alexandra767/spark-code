@@ -1,9 +1,9 @@
 """Skill system — slash commands that inject specialized prompts."""
 
 import os
-import yaml
 from pathlib import Path
-from typing import Any
+
+import yaml
 
 
 class Skill:

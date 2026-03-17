@@ -1,8 +1,9 @@
 """MCP server discovery and registration."""
 
 import os
-import yaml
 from pathlib import Path
+
+import yaml
 
 
 def find_mcp_configs() -> dict:

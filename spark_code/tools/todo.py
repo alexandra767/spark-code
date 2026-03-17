@@ -1,7 +1,9 @@
 """Manages a TODO list stored in ~/.spark/todos.json."""
 import json
 import os
+
 from .base import Tool
+
 
 class TodoTool(Tool):
     name = "todo"

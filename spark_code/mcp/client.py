@@ -1,10 +1,9 @@
 """MCP client — connects to MCP servers and exposes their tools."""
 
-import asyncio
 from typing import Any
 
 from ..tools.base import Tool
-from .transport import StdioTransport, SSETransport
+from .transport import SSETransport, StdioTransport
 
 
 class MCPTool(Tool):

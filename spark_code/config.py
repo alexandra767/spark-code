@@ -1,9 +1,10 @@
 """Configuration loading for Spark Code."""
 
 import os
-import yaml
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 DEFAULT_CONFIG = {
     "model": {

@@ -7,9 +7,17 @@ Supports multiple providers:
 - Any OpenAI-compatible endpoint
 """
 
+import asyncio
 import json
-import httpx
+import logging
 from typing import AsyncIterator
+
+import httpx
+
+logger = logging.getLogger(__name__)
+
+# Retryable HTTP status codes
+_RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
 
 
 def _parse_tool_arguments(raw: str) -> dict:
@@ -104,12 +112,15 @@ class ModelClient:
 
     def __init__(self, endpoint: str, model: str, temperature: float = 0.7,
                  max_tokens: int = 4096, api_key: str = "",
-                 provider: str = "ollama"):
+                 provider: str = "ollama", timeout: float = 300.0,
+                 max_retries: int = 3):
         self.provider = provider
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.api_key = api_key
+        self.timeout = timeout
+        self.max_retries = max_retries
         self.total_input_tokens = 0
         self.total_output_tokens = 0
 
@@ -130,7 +141,7 @@ class ModelClient:
             verify = False
 
         self._client = httpx.AsyncClient(
-            timeout=httpx.Timeout(300.0, connect=10.0),
+            timeout=httpx.Timeout(timeout, connect=10.0),
             verify=verify,
             headers=headers,
         )
@@ -186,11 +197,42 @@ class ModelClient:
                 yield chunk
 
     async def _stream_request(self, payload: dict) -> AsyncIterator[dict]:
-        """Handle streaming response."""
+        """Handle streaming response with retry on transient errors."""
+        last_error = None
+        for attempt in range(self.max_retries):
+            if attempt > 0:
+                delay = 2 ** (attempt - 1)  # 1s, 2s
+                logger.info("Retry %d/%d after %ds", attempt + 1, self.max_retries, delay)
+                await asyncio.sleep(delay)
+            try:
+                async for chunk in self._stream_request_inner(payload):
+                    yield chunk
+                return
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code not in _RETRYABLE_STATUSES:
+                    yield {"type": "text", "content": f"API error ({e.response.status_code}): {e.response.text[:500]}"}
+                    yield {"type": "done", "usage": {}}
+                    return
+                last_error = e
+                logger.warning("Retryable error %d: %s", e.response.status_code, str(e)[:200])
+            except (httpx.ConnectError, httpx.ReadError, httpx.WriteError) as e:
+                last_error = e
+                logger.warning("Connection error (attempt %d): %s", attempt + 1, str(e)[:200])
+
+        yield {"type": "text", "content": f"API error after {self.max_retries} retries: {last_error}"}
+        yield {"type": "done", "usage": {}}
+
+    async def _stream_request_inner(self, payload: dict) -> AsyncIterator[dict]:
+        """Inner streaming request (single attempt)."""
         tool_calls_buffer: dict[int, dict] = {}
 
         async with self._client.stream("POST", self.api_url, json=payload) as response:
-            response.raise_for_status()
+            if response.status_code != 200:
+                body = await response.aread()
+                error_text = body.decode("utf-8", errors="replace")[:500]
+                yield {"type": "text", "content": f"API error ({response.status_code}): {error_text}"}
+                yield {"type": "done", "usage": {}}
+                return
             async for line in response.aiter_lines():
                 if not line.startswith("data: "):
                     continue
@@ -198,7 +240,11 @@ class ModelClient:
                 if data.strip() == "[DONE]":
                     break
 
-                chunk = json.loads(data)
+                try:
+                    chunk = json.loads(data)
+                except json.JSONDecodeError:
+                    logger.warning("Skipping malformed SSE chunk: %s", data[:200])
+                    continue
                 delta = chunk.get("choices", [{}])[0].get("delta", {})
 
                 # Text content
@@ -241,8 +287,18 @@ class ModelClient:
     async def _blocking_request(self, payload: dict) -> AsyncIterator[dict]:
         """Handle non-streaming response."""
         payload["stream"] = False
-        response = await self._client.post(self.api_url, json=payload)
-        response.raise_for_status()
+        try:
+            response = await self._client.post(self.api_url, json=payload)
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            error_text = e.response.text[:500] if e.response else str(e)
+            yield {"type": "text", "content": f"API error ({e.response.status_code}): {error_text}"}
+            yield {"type": "done", "usage": {}}
+            return
+        except httpx.RequestError as e:
+            yield {"type": "text", "content": f"Request error: {e}"}
+            yield {"type": "done", "usage": {}}
+            return
         data = response.json()
 
         choice = data.get("choices", [{}])[0]
@@ -274,6 +330,31 @@ class ModelClient:
             "total_input": self.total_input_tokens,
             "total_output": self.total_output_tokens,
         }}
+
+    async def ping(self) -> tuple[bool, str]:
+        """Check connectivity to the model endpoint.
+
+        Returns (success, message) tuple.
+        """
+        try:
+            # Use /models endpoint (standard OpenAI-compatible)
+            models_url = self.endpoint.rstrip("/")
+            if not models_url.endswith("/v1"):
+                models_url += "/v1"
+            models_url += "/models"
+
+            response = await self._client.get(models_url, timeout=5.0)
+            if response.status_code == 200:
+                return True, f"Connected to {self.provider} ({self.model})"
+            if response.status_code in (401, 403):
+                return False, f"Authentication failed for {self.provider} ({response.status_code}) — check your API key"
+            return True, f"Connected to {self.provider} ({self.model}) [status {response.status_code}]"
+        except httpx.ConnectError:
+            return False, f"Cannot connect to {self.endpoint} — is the server running?"
+        except httpx.TimeoutException:
+            return False, f"Connection to {self.endpoint} timed out (5s)"
+        except Exception as e:
+            return False, f"Connection check failed: {e}"
 
     async def close(self):
         await self._client.aclose()

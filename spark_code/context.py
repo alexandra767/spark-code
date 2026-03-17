@@ -3,8 +3,6 @@
 import json
 import os
 from datetime import datetime
-from pathlib import Path
-
 
 SYSTEM_PROMPT = """You are Spark Code, a local AI coding assistant running on DGX Spark.
 You help users with software engineering tasks by reading files, writing code, running commands, and searching the web.
@@ -21,6 +19,8 @@ You have access to these tools:
 - web_fetch: Fetch web pages
 
 Guidelines:
+- For greetings and casual messages (e.g. "hello", "hey", "hi", "thanks"), respond naturally and briefly. Do NOT use tools or explore files — just reply conversationally.
+- Only use tools when the user has an actual task or question about code.
 - Read files before editing them
 - Use glob/grep to find files before reading
 - Run tests after making changes
@@ -102,29 +102,36 @@ class Context:
         """Get full message list with system prompt."""
         return [{"role": "system", "content": self.system_prompt}] + self.messages
 
-    def compact(self):
+    def compact(self, keep_recent: int = 6):
         """Compact conversation by summarizing older messages."""
-        if len(self.messages) <= 6:
+        if len(self.messages) <= keep_recent:
             return
 
-        # Keep system prompt + last 6 messages, summarize the rest
-        old = self.messages[:-6]
-        recent = self.messages[-6:]
+        # Keep last N messages, summarize the rest
+        old = self.messages[:-keep_recent]
+        recent = self.messages[-keep_recent:]
 
         summary_parts = []
         for msg in old:
             role = msg["role"]
             content = msg.get("content", "")
-            if role == "user" and content:
-                summary_parts.append(f"User asked: {content[:100]}")
-            elif role == "assistant" and content:
-                summary_parts.append(f"Assistant: {content[:100]}")
+            if isinstance(content, str) and content:
+                if role == "user":
+                    summary_parts.append(f"User asked: {content[:100]}")
+                elif role == "assistant":
+                    summary_parts.append(f"Assistant: {content[:100]}")
             elif role == "tool":
                 name = msg.get("name", "tool")
                 summary_parts.append(f"Tool {name} was called")
 
         summary = "Previous conversation summary:\n" + "\n".join(summary_parts[-10:])
-        self.messages = [{"role": "user", "content": summary}] + recent
+        self.messages = [{"role": "system", "content": summary}] + recent
+
+        # Post-compact check: if still >90% of max, compact more aggressively
+        if self.max_tokens > 0:
+            tokens = self.estimate_tokens()
+            if tokens > self.max_tokens * 0.9 and keep_recent > 2:
+                self.compact(keep_recent=max(2, keep_recent // 2))
 
     def clear(self):
         """Clear all messages."""
@@ -149,14 +156,14 @@ class Context:
             "messages": self.messages,
         }
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
 
     def load(self, path: str) -> bool:
         """Load conversation from file."""
         if not os.path.exists(path):
             return False
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
         self.messages = data.get("messages", [])
         self.turn_count = data.get("turn_count", 0)

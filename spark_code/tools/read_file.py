@@ -1,7 +1,8 @@
 """Read file tool."""
 
 import os
-from .base import Tool
+
+from .base import MAX_READ_SIZE, Tool, _is_binary, _validate_path
 
 
 class ReadFileTool(Tool):
@@ -32,17 +33,30 @@ class ReadFileTool(Tool):
         }
 
     async def execute(self, file_path: str, offset: int = 1, limit: int = 0, **kw) -> str:
-        path = os.path.expanduser(file_path)
-        if not os.path.isabs(path):
-            path = os.path.abspath(path)
+        try:
+            path = _validate_path(file_path)
+        except ValueError as e:
+            return f"Error: {e}"
 
         if not os.path.exists(path):
             return f"Error: File not found: {path}"
         if os.path.isdir(path):
             return f"Error: {path} is a directory, not a file. Use list_dir instead."
 
+        # Check file size
         try:
-            with open(path, "r", errors="replace") as f:
+            size = os.path.getsize(path)
+            if size > MAX_READ_SIZE:
+                return f"Error: File too large ({size / 1024 / 1024:.1f} MB). Maximum is {MAX_READ_SIZE / 1024 / 1024:.0f} MB."
+        except OSError as e:
+            return f"Error checking file size: {e}"
+
+        # Check for binary files
+        if _is_binary(path):
+            return f"Warning: {path} appears to be a binary file. Showing first 512 bytes as hex is not supported. Use bash tool with 'xxd' or 'file' command instead."
+
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
                 lines = f.readlines()
         except Exception as e:
             return f"Error reading file: {e}"

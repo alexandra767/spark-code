@@ -1,7 +1,8 @@
 """Write file tool."""
 
 import os
-from .base import Tool
+
+from .base import Tool, _backup_for_undo, _validate_path
 
 
 class WriteFileTool(Tool):
@@ -26,17 +27,21 @@ class WriteFileTool(Tool):
         }
 
     async def execute(self, file_path: str, content: str, **kw) -> str:
-        path = os.path.expanduser(file_path)
-        if not os.path.isabs(path):
-            path = os.path.abspath(path)
+        try:
+            path = _validate_path(file_path)
+        except ValueError as e:
+            return f"Error: {e}"
 
         # Create parent directories if needed
         parent = os.path.dirname(path)
         if parent and not os.path.exists(parent):
             os.makedirs(parent, exist_ok=True)
 
+        # Backup for /undo
+        _backup_for_undo(path)
+
         try:
-            with open(path, "w") as f:
+            with open(path, "w", encoding="utf-8") as f:
                 f.write(content)
             lines = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
             return f"Successfully wrote {lines} lines to {path}"

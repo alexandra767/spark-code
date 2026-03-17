@@ -22,14 +22,14 @@ class Memory:
         """Load global MEMORY.md content."""
         mem_file = self.global_path / "MEMORY.md"
         if mem_file.exists():
-            return mem_file.read_text()
+            return mem_file.read_text(encoding="utf-8")
         return ""
 
     def load_project(self) -> str:
         """Load project-level memory."""
         mem_file = self.project_path / "MEMORY.md"
         if mem_file.exists():
-            return mem_file.read_text()
+            return mem_file.read_text(encoding="utf-8")
         return ""
 
     def load_all(self) -> str:
@@ -52,23 +52,23 @@ class Memory:
     def save_global(self, content: str):
         """Save to global MEMORY.md."""
         self.ensure_dirs()
-        (self.global_path / "MEMORY.md").write_text(content)
+        (self.global_path / "MEMORY.md").write_text(content, encoding="utf-8")
 
     def save_project(self, content: str):
         """Save to project MEMORY.md."""
         self.ensure_dirs()
-        (self.project_path / "MEMORY.md").write_text(content)
+        (self.project_path / "MEMORY.md").write_text(content, encoding="utf-8")
 
     def append_global(self, entry: str):
         """Append an entry to global memory."""
         self.ensure_dirs()
         mem_file = self.global_path / "MEMORY.md"
-        existing = mem_file.read_text() if mem_file.exists() else ""
-        mem_file.write_text(existing.rstrip() + "\n\n" + entry + "\n")
+        existing = mem_file.read_text(encoding="utf-8") if mem_file.exists() else ""
+        mem_file.write_text(existing.rstrip() + "\n\n" + entry + "\n", encoding="utf-8")
 
     def append_project(self, entry: str):
         """Append an entry to project memory."""
         self.ensure_dirs()
         mem_file = self.project_path / "MEMORY.md"
-        existing = mem_file.read_text() if mem_file.exists() else ""
-        mem_file.write_text(existing.rstrip() + "\n\n" + entry + "\n")
+        existing = mem_file.read_text(encoding="utf-8") if mem_file.exists() else ""
+        mem_file.write_text(existing.rstrip() + "\n\n" + entry + "\n", encoding="utf-8")

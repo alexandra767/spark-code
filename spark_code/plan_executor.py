@@ -7,9 +7,8 @@ go to the lead agent. No model needs to "decide" to use spawn_worker.
 
 import asyncio
 import re
-from rich.console import Console
-from rich.text import Text
 
+from rich.console import Console
 
 # Nord palette
 _C_TOOL = "#88c0d0"

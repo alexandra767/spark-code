@@ -1,76 +1,69 @@
-# Snake Game Implementation Plan
+# Plan: Build a CLI Weather App in Python
 
-**Summary:**
+## Summary
 
-This plan outlines the steps to create a classic Snake game using Python and Pygame, adhering to the specified features and design. The game will be implemented in a single file named `snake.py`.
+This plan outlines the steps to build a command-line interface (CLI) weather application using Python. The application will fetch weather data from the OpenWeatherMap API based on user-provided location input and display the current weather conditions in a user-friendly format.
 
-**Steps:**
+## Steps
 
-1.  **Initialize Pygame and Set Up the Game Window:**
-    *   Initialize Pygame.
-    *   Create the game window with a specified width and height.
-    *   Set the window title.
-    *   Define colors for the background (dark theme), snake (green), and food (red).
-    *   Define the grid size and initial snake position.
-    *   *File(s):* `snake.py` (creation)
+1.  **Set up the project environment:**
+    *   Create a virtual environment for the project.
+    *   Install the required packages: `requests` for making API calls and `python-dotenv` for managing API keys.
+    *   File(s) to be created: `.venv` (virtual environment - not directly created by tool), `requirements.txt`
 
-2.  **Define the Snake Class:**
-    *   Create a `Snake` class to represent the snake.
-    *   The class should have attributes for:
-        *   Position (list of coordinates).
-        *   Body size
-        *   Direction.
-    *   Implement methods for:
-        *   Moving the snake.
-        *   Growing the snake.
-        *   Checking for self-collision.
-    *   Drawing the snake on the screen.
-    *   *File(s):* `snake.py` (modification)
+2.  **Obtain OpenWeatherMap API Key:**
+    *   Register for a free account on OpenWeatherMap (<https://openweathermap.org/>) and obtain an API key.
+    *   Store the API key securely in a `.env` file.
+    *   File(s) to be created: `.env`
 
-3.  **Define the Food Class:**
-    *   Create a `Food` class to represent the food.
-    *   The class should have attributes for:
-        *   Position.
-    *   Implement methods for:
-        *   Spawning food at a random location on the grid.
-        *   Drawing the food on the screen.
-    *   *File(s):* `snake.py` (modification)
+3.  **Create the main application file:**
+    *   Create a Python file (e.g., `weather.py`) to house the main application logic.
+    *   Implement argument parsing using `argparse` to accept location input from the command line.
+    *   File(s) to be created: `weather.py`
 
-4.  **Implement Game Logic:**
-    *   Create functions for:
-        *   Handling user input (arrow keys for snake movement).
-        *   Updating the game state (moving the snake, checking for collisions, eating food).
-        *   Drawing the game elements (snake, food, score) on the screen.
-        *   Checking for game over conditions (hitting walls or self).
-        *   Displaying the score.
-        *   Increasing game speed based on score.
-        *   Handling game restart.
-    *   *File(s):* `snake.py` (modification)
+4.  **Implement API request functionality:**
+    *   Define a function to make API requests to OpenWeatherMap using the `requests` library.
+    *   Handle potential errors such as invalid API key, network issues, or invalid location input.
+    *   File(s) to be modified: `weather.py`
 
-5.  **Implement the Main Game Loop:**
-    *   Create the main game loop that:
-        *   Handles events (user input).
-        *   Updates the game state.
-        *   Draws the game elements.
-        *   Controls the game speed.
-    *   *File(s):* `snake.py` (modification)
+5.  **Parse API response:**
+    *   Define a function to parse the JSON response from the OpenWeatherMap API.
+    *   Extract relevant weather information such as temperature, humidity, wind speed, and weather description.
+    *   File(s) to be modified: `weather.py`
 
-6.  **Implement Game Over Screen:**
-    *   Create a function to display the "Game Over" screen with the final score and a "Press SPACE to restart" message.
-    *   *File(s):* `snake.py` (modification)
+6.  **Format and display weather data:**
+    *   Define a function to format the extracted weather data into a human-readable string.
+    *   Display the formatted weather information in the console.
+    *   File(s) to be modified: `weather.py`
 
-7.  **Testing and Refinement:**
-    *   Test the game thoroughly to ensure all features are working correctly.
-    *   Refine the game logic, graphics, and user experience as needed.
-    *   *File(s):* `snake.py` (modification)
+7.  **Implement error handling and user feedback:**
+    *   Provide informative error messages to the user in case of API errors or invalid input.
+    *   Implement input validation to ensure the location input is in the correct format.
+    *   File(s) to be modified: `weather.py`
 
-**Parallelization:**
+8.  **Add configuration file support:**
+    *   Allow users to specify a default location in a configuration file, so they don't have to enter it every time.
+    *   File(s) to be created: `config.ini` (or similar)
+    *   File(s) to be modified: `weather.py`
 
-*   Steps 2 and 3 (defining the Snake and Food classes) can be done in parallel.
+9.  **Add testing:**
+    *   Create a `tests` directory.
+    *   Write unit tests to verify the functionality of the API request, response parsing, and data formatting functions.
+    *   File(s) to be created: `tests/test_weather.py`
 
-**Risks and Considerations:**
+10. **Add documentation and usage instructions:**
+    *   Add a README file with instructions on how to install and use the application.
+    *   Include information on how to obtain an API key and configure the application.
+    *   File(s) to be created: `README.md`
 
-*   Ensuring smooth snake movement and collision detection.
-*   Balancing the game speed increase to maintain a challenging but fair experience.
-*   Properly handling edge cases and potential errors.
-*   Pygame might need to be installed (`pip install pygame`).
+## Parallelization
+
+Steps 1 and 2 can be done in parallel. Steps 9 and 10 can be started after the core functionality (steps 3-7) is complete, and can be done in parallel.
+
+## Risks and Considerations
+
+*   **API Rate Limits:** OpenWeatherMap API has rate limits for free accounts. The application should handle these limits gracefully and provide appropriate feedback to the user.
+*   **API Key Security:** The API key should be stored securely and not be exposed in the code. Using a `.env` file and not committing it to version control is recommended.
+*   **Error Handling:** Comprehensive error handling is crucial to ensure the application is robust and provides informative error messages to the user.
+*   **Input Validation:** Validate user input to prevent unexpected errors and ensure the application functions correctly.
+*   **Dependency Management:** Use a `requirements.txt` file to manage project dependencies and ensure reproducibility.
