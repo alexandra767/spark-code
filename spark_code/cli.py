@@ -166,6 +166,55 @@ def _is_shell_command(text: str) -> bool:
 
 _IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".svg")
 
+# ---------------------------------------------------------------------------
+# Provider info — shared by /providers and --setup
+# ---------------------------------------------------------------------------
+
+_PROVIDER_INFO = [
+    {
+        "name": "gemini",
+        "label": "Google Gemini",
+        "model": "gemini-2.0-flash",
+        "env_var": "GEMINI_API_KEY",
+        "signup": "https://aistudio.google.com/apikey",
+    },
+    {
+        "name": "openai",
+        "label": "OpenAI",
+        "model": "gpt-4o-mini",
+        "env_var": "OPENAI_API_KEY",
+        "signup": "https://platform.openai.com/api-keys",
+    },
+    {
+        "name": "groq",
+        "label": "Groq",
+        "model": "llama-3.3-70b-versatile",
+        "env_var": "GROQ_API_KEY",
+        "signup": "https://console.groq.com/keys",
+    },
+    {
+        "name": "deepseek",
+        "label": "DeepSeek",
+        "model": "deepseek-chat",
+        "env_var": "DEEPSEEK_API_KEY",
+        "signup": "https://platform.deepseek.com/api_keys",
+    },
+    {
+        "name": "openrouter",
+        "label": "OpenRouter",
+        "model": "anthropic/claude-sonnet-4",
+        "env_var": "OPENROUTER_API_KEY",
+        "signup": "https://openrouter.ai/keys",
+    },
+    {
+        "name": "ollama",
+        "label": "Ollama (local)",
+        "model": "qwen2.5:7b",
+        "env_var": "",
+        "signup": "https://ollama.ai",
+    },
+]
+
 
 def _is_image_drop(text: str) -> tuple[str, str]:
     """Detect if input is a dragged-in image file path.
@@ -358,6 +407,7 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
 - `/compact` — Summarize conversation to save context
 - `/config` — Show current config
 - `/model` — Show model info / `/model list` / `/model <provider>` to switch
+- `/providers` — Show API providers with signup URLs and key status
 - `/tokens` — Show token usage
 - `/stats` — Show session statistics
 - `/diff` — Show git diff with syntax highlighting
@@ -480,6 +530,37 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
 
         # Switch provider — return signal for main loop
         return f"__MODEL_SWITCH__{sub}"
+
+    elif command == "/providers":
+        table = Table(
+            title="API Providers",
+            border_style="#4c566a",
+            show_header=True,
+            header_style="bold #88c0d0",
+        )
+        table.add_column("Provider", style="#88c0d0")
+        table.add_column("Default Model", style="#d8dee9")
+        table.add_column("API Key", style="#d8dee9")
+        table.add_column("Signup URL", style="#5e81ac")
+        for p in _PROVIDER_INFO:
+            if p["env_var"]:
+                key_status = (
+                    "[#a3be8c]SET[/#a3be8c]"
+                    if os.environ.get(p["env_var"])
+                    else "[#bf616a]NOT SET[/#bf616a]"
+                )
+                key_col = f"{p['env_var']}  {key_status}"
+            else:
+                key_col = "[#8899aa]none needed[/#8899aa]"
+            table.add_row(p["label"], p["model"], key_col, p["signup"])
+        console.print(table)
+        console.print()
+        console.print("[bold #eceff4]To set a key:[/bold #eceff4]")
+        console.print("  [#88c0d0]1.[/#88c0d0] Run [bold]spark --setup[/bold] (interactive wizard)")
+        console.print("  [#88c0d0]2.[/#88c0d0] Or add to your shell profile (~/.zshrc):")
+        console.print('     [#a3be8c]export GEMINI_API_KEY="your-key-here"[/#a3be8c]')
+        console.print("     then restart your terminal or run [#a3be8c]source ~/.zshrc[/#a3be8c]")
+        return None
 
     elif command == "/tokens":
         tokens = context.estimate_tokens()
@@ -1790,63 +1871,42 @@ def _run_setup():
     console.print("[#4c566a]  ─────────────────────────────────────────[/#4c566a]")
     console.print()
 
-    # Provider presets
-    presets = {
-        "1": {
-            "name": "gemini",
+    # Provider presets — built from shared _PROVIDER_INFO with setup-specific extras
+    _SETUP_EXTRAS = {
+        "gemini": {
             "label": "Google Gemini (recommended — fast, free tier)",
             "endpoint": "https://generativelanguage.googleapis.com/v1beta/openai",
-            "model": "gemini-2.0-flash",
-            "env_var": "GEMINI_API_KEY",
-            "signup": "https://aistudio.google.com/apikey",
             "context_window": 1000000,
         },
-        "2": {
-            "name": "openai",
+        "openai": {
             "label": "OpenAI (GPT-4o, GPT-4o-mini)",
             "endpoint": "https://api.openai.com/v1",
-            "model": "gpt-4o-mini",
-            "env_var": "OPENAI_API_KEY",
-            "signup": "https://platform.openai.com/api-keys",
             "context_window": 128000,
         },
-        "3": {
-            "name": "groq",
+        "groq": {
             "label": "Groq (fast Llama 3.3 inference, free tier)",
             "endpoint": "https://api.groq.com/openai/v1",
-            "model": "llama-3.3-70b-versatile",
-            "env_var": "GROQ_API_KEY",
-            "signup": "https://console.groq.com/keys",
             "context_window": 128000,
         },
-        "4": {
-            "name": "deepseek",
+        "deepseek": {
             "label": "DeepSeek (cheap, strong at code)",
             "endpoint": "https://api.deepseek.com/v1",
-            "model": "deepseek-chat",
-            "env_var": "DEEPSEEK_API_KEY",
-            "signup": "https://platform.deepseek.com/api_keys",
             "context_window": 64000,
         },
-        "5": {
-            "name": "openrouter",
+        "openrouter": {
             "label": "OpenRouter (100+ models, one API key)",
             "endpoint": "https://openrouter.ai/api/v1",
-            "model": "anthropic/claude-sonnet-4",
-            "env_var": "OPENROUTER_API_KEY",
-            "signup": "https://openrouter.ai/keys",
             "context_window": 200000,
         },
-        "6": {
-            "name": "ollama",
+        "ollama": {
             "label": "Ollama (local, no API key needed)",
             "endpoint": "http://localhost:11434",
-            "model": "qwen2.5:7b",
-            "env_var": "",
-            "signup": "https://ollama.ai",
             "context_window": 32768,
         },
     }
+    presets = {}
+    for i, p in enumerate(_PROVIDER_INFO, 1):
+        presets[str(i)] = {**p, **_SETUP_EXTRAS[p["name"]]}
 
     console.print("  Choose a provider:\n")
     for key, preset in presets.items():

@@ -28,6 +28,7 @@ _BUILTIN_COMMANDS: dict[str, str] = {
     "/config": "Show current configuration",
     "/model": "Show model info or switch provider (/model <provider>)",
     "/model list": "List available providers",
+    "/providers": "Show API providers with signup URLs",
     "/tokens": "Show token usage",
     "/stats": "Show session statistics",
     "/diff": "Show git diff with syntax highlighting",
