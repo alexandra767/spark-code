@@ -129,6 +129,64 @@ def get(config: dict, *keys: str, default: Any = None) -> Any:
     return current
 
 
+def set_config(config: dict, key_path: str, value: str) -> tuple[bool, str]:
+    """Set a nested config value and save to global config.
+
+    key_path: dot-separated path like "model.temperature" or "permissions.mode"
+    value: string value (auto-converted to int/float/bool where appropriate)
+
+    Returns (success, message).
+    """
+    keys = key_path.split(".")
+    if len(keys) < 2:
+        return False, f"Invalid key: {key_path} (use dot notation like model.temperature)"
+
+    # Auto-convert value types
+    converted: str | int | float | bool = value
+    if value.lower() in ("true", "false"):
+        converted = value.lower() == "true"
+    else:
+        try:
+            converted = int(value)
+        except ValueError:
+            try:
+                converted = float(value)
+            except ValueError:
+                pass  # Keep as string
+
+    # Update in-memory config
+    current = config
+    for key in keys[:-1]:
+        if key not in current or not isinstance(current[key], dict):
+            current[key] = {}
+        current = current[key]
+    old_value = current.get(keys[-1])
+    current[keys[-1]] = converted
+
+    # Save to global config file (merge with existing)
+    try:
+        existing = {}
+        if GLOBAL_CONFIG_FILE.exists():
+            with open(GLOBAL_CONFIG_FILE) as f:
+                existing = yaml.safe_load(f) or {}
+
+        # Set the value in the file config too
+        file_current = existing
+        for key in keys[:-1]:
+            if key not in file_current or not isinstance(file_current[key], dict):
+                file_current[key] = {}
+            file_current = file_current[key]
+        file_current[keys[-1]] = converted
+
+        GLOBAL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        with open(GLOBAL_CONFIG_FILE, "w") as f:
+            yaml.dump(existing, f, default_flow_style=False)
+
+        return True, f"{key_path}: {old_value} → {converted}"
+    except Exception as e:
+        return False, f"Failed to save config: {e}"
+
+
 def ensure_dirs():
     """Create necessary directories."""
     GLOBAL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)

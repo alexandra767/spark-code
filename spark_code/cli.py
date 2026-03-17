@@ -18,7 +18,7 @@ from rich.text import Text
 
 from . import __version__
 from .agent import Agent
-from .config import ensure_dirs, get, load_config
+from .config import ensure_dirs, get, load_config, set_config
 from .context import SYSTEM_PROMPT, Context
 from .mcp.client import MCPClient
 from .memory import Memory
@@ -97,6 +97,49 @@ def _get_git_info() -> str:
         return f"{branch_name}{icon}"
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return ""
+
+
+def _make_session_label(context) -> str:
+    """Extract a short label from the first user message in the session."""
+    import re
+    for msg in context.messages:
+        if msg.get("role") == "user":
+            content = msg.get("content", "")
+            if isinstance(content, str) and content.strip():
+                # Clean up: remove newlines, strip, truncate
+                label = content.strip().split("\n")[0][:50]
+                # Sanitize for filename: lowercase, replace non-alnum with hyphens
+                label = re.sub(r'[^a-z0-9]+', '-', label.lower()).strip('-')
+                return label[:40]  # Keep filename reasonable
+    return ""
+
+
+def _get_latest_session() -> str:
+    """Return the path to the most recent session file, or empty string."""
+    history_dir = os.path.expanduser("~/.spark/history")
+    if not os.path.isdir(history_dir):
+        return ""
+    sessions = sorted(
+        [f for f in os.listdir(history_dir) if f.endswith(".json")],
+        reverse=True,
+    )
+    if sessions:
+        return os.path.join(history_dir, sessions[0])
+    return ""
+
+
+def _notify_done():
+    """Play a notification sound (macOS bell)."""
+    try:
+        # macOS: use afplay with system sound
+        subprocess.run(
+            ["afplay", "/System/Library/Sounds/Glass.aiff"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=3,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        # Fallback: terminal bell
+        print("\a", end="", flush=True)
 
 
 # Shell command prefixes — when user types these, run directly via bash
@@ -288,8 +331,39 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
 
     elif command == "/config":
         import yaml
-        console.print(Markdown(f"```yaml\n{yaml.dump(config, default_flow_style=False)}```"))
-        return None
+        if not args:
+            console.print(Markdown(f"```yaml\n{yaml.dump(config, default_flow_style=False)}```"))
+            return None
+
+        sub_parts = args.strip().split(maxsplit=2)
+        sub_cmd = sub_parts[0].lower()
+
+        if sub_cmd == "set":
+            if len(sub_parts) < 3:
+                console.print("[#ebcb8b]Usage: /config set <key> <value>[/#ebcb8b]")
+                console.print("[#8899aa]  /config set model.temperature 0.5[/#8899aa]")
+                console.print("[#8899aa]  /config set permissions.mode trust[/#8899aa]")
+                console.print("[#8899aa]  /config set ui.notification_sound true[/#8899aa]")
+                return None
+            key_path = sub_parts[1]
+            value = sub_parts[2]
+            ok, msg = set_config(config, key_path, value)
+            if ok:
+                console.print(f"[#a3be8c]{msg}[/#a3be8c]")
+            else:
+                console.print(f"[#bf616a]{msg}[/#bf616a]")
+            return None
+
+        elif sub_cmd == "reset":
+            from .config import DEFAULT_CONFIG
+            for key, val in DEFAULT_CONFIG.items():
+                config[key] = val
+            console.print("[#a3be8c]Config reset to defaults (in-memory only)[/#a3be8c]")
+            return None
+
+        else:
+            console.print(Markdown(f"```yaml\n{yaml.dump(config, default_flow_style=False)}```"))
+            return None
 
     elif command == "/model":
         if not args:
@@ -747,6 +821,7 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
         )
 
     elif command == "/history":
+        from datetime import datetime as _dt
         history_dir = os.path.expanduser("~/.spark/history")
         if not os.path.isdir(history_dir):
             console.print("[#8899aa]No saved sessions yet.[/#8899aa]")
@@ -767,16 +842,57 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
                 return None
             session_path = os.path.join(history_dir, matches[0])
             if context.load(session_path):
-                console.print(f"[#a3be8c]Resumed session: {matches[0]}[/#a3be8c]")
+                meta = Context.read_metadata(session_path)
+                label = meta.get("label", "")
+                label_display = f"  [#d8dee9]{label}[/#d8dee9]" if label else ""
+                console.print(f"[#a3be8c]Resumed session: {matches[0]}{label_display}[/#a3be8c]")
             else:
                 console.print("[#bf616a]Failed to load session[/#bf616a]")
             return None
-        # List recent sessions
+        # List recent sessions with metadata
         console.print("[bold #eceff4]Recent sessions:[/bold #eceff4]")
         for s in sessions[:10]:
+            session_path = os.path.join(history_dir, s)
+            meta = Context.read_metadata(session_path)
+            # Time ago
+            time_str = ""
+            ts = meta.get("timestamp", "")
+            if ts:
+                try:
+                    session_time = _dt.fromisoformat(ts)
+                    delta = _dt.now() - session_time
+                    if delta.days > 0:
+                        time_str = f"{delta.days}d ago"
+                    elif delta.seconds >= 3600:
+                        time_str = f"{delta.seconds // 3600}h ago"
+                    elif delta.seconds >= 60:
+                        time_str = f"{delta.seconds // 60}m ago"
+                    else:
+                        time_str = "just now"
+                except (ValueError, TypeError):
+                    pass
+            turns = meta.get("turn_count", 0)
+            label = meta.get("label", "")
+            cwd = meta.get("cwd", "")
+            home = os.path.expanduser("~")
+            if cwd.startswith(home):
+                cwd = "~" + cwd[len(home):]
+
+            # Build display line
+            parts = []
+            if time_str:
+                parts.append(f"[#8899aa]{time_str:<8}[/#8899aa]")
+            if turns:
+                parts.append(f"[#8899aa]{turns} turns[/#8899aa]")
+            if label:
+                parts.append(f"[#d8dee9]{label}[/#d8dee9]")
+            if cwd:
+                parts.append(f"[#4c566a]{cwd}[/#4c566a]")
+
             name = s.replace(".json", "")
-            console.print(f"  [#88c0d0]{name}[/#88c0d0]")
-        console.print("[#8899aa]Use /history <name> to resume[/#8899aa]")
+            detail = "  ·  ".join(p for p in parts) if parts else ""
+            console.print(f"  [#88c0d0]{name}[/#88c0d0]  {detail}")
+        console.print("[#8899aa]Use /history <name> to resume  ·  spark --resume to continue last[/#8899aa]")
         return None
 
     elif command == "/undo":
@@ -817,8 +933,13 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
     return None
 
 
-async def run_interactive(config: dict):
-    """Run interactive CLI session."""
+async def run_interactive(config: dict, resume_session: str = "",
+                          continue_prompt: str = ""):
+    """Run interactive CLI session.
+
+    resume_session: path to a session JSON to resume on startup
+    continue_prompt: if set, resume last session and send this prompt
+    """
     console = Console(theme=get_theme())
     ensure_dirs()
 
@@ -911,6 +1032,18 @@ async def run_interactive(config: dict):
     spawn_tool = SpawnWorkerTool()
     spawn_tool.set_team_manager(team_manager)
     tools.register(spawn_tool)
+
+    # Resume session if requested
+    if resume_session:
+        if context.load(resume_session):
+            meta = Context.read_metadata(resume_session)
+            label = meta.get("label", "")
+            turns = meta.get("turn_count", 0)
+            label_str = f" — {label}" if label else ""
+            console.print(f"  [#a3be8c]Resumed session ({turns} turns{label_str})[/#a3be8c]")
+            console.print()
+        else:
+            console.print(f"  [#ebcb8b]Could not load session: {resume_session}[/#ebcb8b]")
 
     # Callbacks for the prompt_toolkit footer (always visible below input)
     def status_callback():
@@ -1068,6 +1201,30 @@ async def run_interactive(config: dict):
         mode_switch_callback=mode_switch,
     )
 
+    # Notification sound config
+    notify_enabled = get(config, "ui", "notification_sound", default=True)
+    import time as _time
+
+    async def _run_with_notify(coro):
+        """Run a coroutine and play notification sound if it took > 5s."""
+        start = _time.monotonic()
+        result = await coro
+        if notify_enabled and (_time.monotonic() - start) > 5.0:
+            _notify_done()
+        return result
+
+    # Handle --continue prompt (send first prompt automatically)
+    if continue_prompt:
+        try:
+            team_monitor.start()
+            await _run_with_notify(agent.run(continue_prompt))
+        except KeyboardInterrupt:
+            console.print("\n[#ebcb8b]Interrupted[/#ebcb8b]")
+        except Exception as e:
+            console.print(f"\n[#bf616a]Error: {e}[/#bf616a]")
+        finally:
+            team_monitor.stop()
+
     try:
         while True:
             try:
@@ -1101,7 +1258,7 @@ async def run_interactive(config: dict):
                     # Image already added to context — run agent without add_user
                     try:
                         team_monitor.start()
-                        await agent.run_without_user_add()
+                        await _run_with_notify(agent.run_without_user_add())
                     except KeyboardInterrupt:
                         console.print("\n[#ebcb8b]Interrupted[/#ebcb8b]")
                     except Exception as e:
@@ -1136,7 +1293,7 @@ async def run_interactive(config: dict):
                     )
                     try:
                         team_monitor.start()
-                        await agent.run(run_prompt)
+                        await _run_with_notify(agent.run(run_prompt))
                     except KeyboardInterrupt:
                         console.print("\n[#ebcb8b]Interrupted[/#ebcb8b]")
                     except Exception as e:
@@ -1196,7 +1353,7 @@ async def run_interactive(config: dict):
                     user_input = result
                     try:
                         team_monitor.start()
-                        await agent.run(user_input)
+                        await _run_with_notify(agent.run(user_input))
                     except KeyboardInterrupt:
                         console.print("\n[#ebcb8b]Interrupted[/#ebcb8b]")
                     except Exception as e:
@@ -1212,7 +1369,7 @@ async def run_interactive(config: dict):
                 )
                 try:
                     team_monitor.start()
-                    await agent.run(run_prompt)
+                    await _run_with_notify(agent.run(run_prompt))
                 except KeyboardInterrupt:
                     console.print("\n[#ebcb8b]Interrupted[/#ebcb8b]")
                 except Exception as e:
@@ -1235,7 +1392,7 @@ async def run_interactive(config: dict):
                 # Run agent
                 try:
                     team_monitor.start()
-                    await agent.run(user_input)
+                    await _run_with_notify(agent.run(user_input))
                 except KeyboardInterrupt:
                     console.print("\n[#ebcb8b]Interrupted[/#ebcb8b]")
                 except Exception as e:
@@ -1257,14 +1414,20 @@ async def run_interactive(config: dict):
                 context.compact()
 
     finally:
-        # Auto-save conversation history
+        # Auto-save conversation history with label and cwd
         if context.turn_count > 0:
             try:
                 from datetime import datetime
                 history_dir = os.path.expanduser("~/.spark/history")
                 os.makedirs(history_dir, exist_ok=True)
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                context.save(os.path.join(history_dir, f"{ts}.json"))
+                label = _make_session_label(context)
+                suffix = f"_{label}" if label else ""
+                context.save(
+                    os.path.join(history_dir, f"{ts}{suffix}.json"),
+                    label=label,
+                    cwd=os.getcwd(),
+                )
             except Exception:
                 pass  # Don't crash on save failure
 
@@ -1280,9 +1443,12 @@ async def run_interactive(config: dict):
 @click.option("--provider", "-p", help="Provider: ollama, gemini, openai")
 @click.option("--trust", is_flag=True, help="Trust mode (allow all tool calls)")
 @click.option("--auto", "auto_mode", is_flag=True, help="Auto mode (allow reads, ask for writes)")
+@click.option("--resume", "-r", is_flag=True, help="Resume the most recent session")
+@click.option("--continue", "-c", "continue_prompt", default="", help="Resume last session and send a prompt")
 @click.option("--version", "-v", is_flag=True, help="Show version")
 @click.argument("prompt", nargs=-1, required=False)
-def main(endpoint, model_name, provider, trust, auto_mode, version, prompt):
+def main(endpoint, model_name, provider, trust, auto_mode, resume, continue_prompt,
+         version, prompt):
     """Spark Code — Your local AI coding assistant."""
     if version:
         click.echo(f"Spark Code v{__version__}")
@@ -1301,14 +1467,28 @@ def main(endpoint, model_name, provider, trust, auto_mode, version, prompt):
     elif auto_mode:
         config["permissions"]["mode"] = "auto"
 
-    # One-shot mode
-    if prompt:
+    # Resume / continue mode
+    resume_session = ""
+    if resume or continue_prompt:
+        resume_session = _get_latest_session()
+        if not resume_session:
+            click.echo("No previous session to resume.")
+            if not continue_prompt:
+                # Fall through to interactive mode without resume
+                pass
+
+    # One-shot mode (skip if --resume or --continue)
+    if prompt and not resume and not continue_prompt:
         prompt_text = " ".join(prompt)
         asyncio.run(_one_shot(config, prompt_text))
         return
 
     # Interactive mode
-    asyncio.run(run_interactive(config))
+    asyncio.run(run_interactive(
+        config,
+        resume_session=resume_session,
+        continue_prompt=continue_prompt,
+    ))
 
 
 async def _one_shot(config: dict, prompt: str):

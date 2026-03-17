@@ -148,11 +148,13 @@ class Context:
                 total += len(json.dumps(tc))
         return total // 4
 
-    def save(self, path: str):
-        """Save conversation to file."""
+    def save(self, path: str, label: str = "", cwd: str = ""):
+        """Save conversation to file with metadata."""
         data = {
             "timestamp": datetime.now().isoformat(),
             "turn_count": self.turn_count,
+            "label": label,
+            "cwd": cwd,
             "messages": self.messages,
         }
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -168,3 +170,18 @@ class Context:
         self.messages = data.get("messages", [])
         self.turn_count = data.get("turn_count", 0)
         return True
+
+    @staticmethod
+    def read_metadata(path: str) -> dict:
+        """Read session metadata without loading full messages."""
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            return {
+                "timestamp": data.get("timestamp", ""),
+                "turn_count": data.get("turn_count", 0),
+                "label": data.get("label", ""),
+                "cwd": data.get("cwd", ""),
+            }
+        except (json.JSONDecodeError, OSError):
+            return {}

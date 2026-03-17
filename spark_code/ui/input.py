@@ -48,6 +48,7 @@ _BUILTIN_COMMANDS: dict[str, str] = {
     "/tasks": "Show the shared task list",
     "/messages": "Check messages from workers",
     "/history": "List and resume past sessions",
+    "/config set": "Set a config value (e.g. /config set model.temperature 0.5)",
     "/undo": "Undo last file write/edit",
     "/quit": "Exit Spark Code",
     "/exit": "Exit Spark Code",
