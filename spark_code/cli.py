@@ -1778,6 +1778,165 @@ async def run_interactive(config: dict, resume_session: str = "",
         console.print("[dim]Session ended.[/dim]")
 
 
+def _run_setup():
+    """Interactive setup wizard for first-time configuration."""
+    import yaml as _yaml
+
+    from .config import GLOBAL_CONFIG_DIR, GLOBAL_CONFIG_FILE
+
+    console = Console()
+    console.print()
+    console.print("[bold #ebcb8b]  Spark Code Setup[/bold #ebcb8b]")
+    console.print("[#4c566a]  ─────────────────────────────────────────[/#4c566a]")
+    console.print()
+
+    # Provider presets
+    presets = {
+        "1": {
+            "name": "gemini",
+            "label": "Google Gemini (recommended — fast, free tier)",
+            "endpoint": "https://generativelanguage.googleapis.com/v1beta/openai",
+            "model": "gemini-2.0-flash",
+            "env_var": "GEMINI_API_KEY",
+            "signup": "https://aistudio.google.com/apikey",
+            "context_window": 1000000,
+        },
+        "2": {
+            "name": "openai",
+            "label": "OpenAI (GPT-4o, GPT-4o-mini)",
+            "endpoint": "https://api.openai.com/v1",
+            "model": "gpt-4o-mini",
+            "env_var": "OPENAI_API_KEY",
+            "signup": "https://platform.openai.com/api-keys",
+            "context_window": 128000,
+        },
+        "3": {
+            "name": "groq",
+            "label": "Groq (fast Llama 3.3 inference, free tier)",
+            "endpoint": "https://api.groq.com/openai/v1",
+            "model": "llama-3.3-70b-versatile",
+            "env_var": "GROQ_API_KEY",
+            "signup": "https://console.groq.com/keys",
+            "context_window": 128000,
+        },
+        "4": {
+            "name": "deepseek",
+            "label": "DeepSeek (cheap, strong at code)",
+            "endpoint": "https://api.deepseek.com/v1",
+            "model": "deepseek-chat",
+            "env_var": "DEEPSEEK_API_KEY",
+            "signup": "https://platform.deepseek.com/api_keys",
+            "context_window": 64000,
+        },
+        "5": {
+            "name": "openrouter",
+            "label": "OpenRouter (100+ models, one API key)",
+            "endpoint": "https://openrouter.ai/api/v1",
+            "model": "anthropic/claude-sonnet-4",
+            "env_var": "OPENROUTER_API_KEY",
+            "signup": "https://openrouter.ai/keys",
+            "context_window": 200000,
+        },
+        "6": {
+            "name": "ollama",
+            "label": "Ollama (local, no API key needed)",
+            "endpoint": "http://localhost:11434",
+            "model": "qwen2.5:7b",
+            "env_var": "",
+            "signup": "https://ollama.ai",
+            "context_window": 32768,
+        },
+    }
+
+    console.print("  Choose a provider:\n")
+    for key, preset in presets.items():
+        console.print(f"    [#88c0d0]{key}[/#88c0d0]  {preset['label']}")
+    console.print()
+
+    choice = input("  Enter number (1-6): ").strip()
+    if choice not in presets:
+        console.print("[#bf616a]  Invalid choice. Run 'spark --setup' again.[/#bf616a]")
+        return
+
+    preset = presets[choice]
+    console.print(f"\n  [#a3be8c]Selected: {preset['label']}[/#a3be8c]\n")
+
+    # Get API key
+    api_key_value = ""
+    env_var = preset["env_var"]
+    if env_var:
+        console.print(f"  Get your API key at: [#5e81ac]{preset['signup']}[/#5e81ac]\n")
+        api_key_value = input(f"  Paste your {env_var}: ").strip()
+        if not api_key_value:
+            console.print("[#ebcb8b]  No key entered. You can set it later in ~/.zshrc[/#ebcb8b]")
+    else:
+        console.print("  [#8899aa]No API key needed for local Ollama.[/#8899aa]")
+
+    # Optional: custom model
+    console.print(f"\n  Default model: [#88c0d0]{preset['model']}[/#88c0d0]")
+    custom_model = input("  Custom model (or Enter to keep default): ").strip()
+    if custom_model:
+        preset["model"] = custom_model
+
+    # Build config
+    GLOBAL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Load existing config if any
+    existing = {}
+    if GLOBAL_CONFIG_FILE.exists():
+        with open(GLOBAL_CONFIG_FILE) as f:
+            existing = _yaml.safe_load(f) or {}
+
+    # Set up provider
+    if "providers" not in existing:
+        existing["providers"] = {}
+
+    provider_conf = {
+        "endpoint": preset["endpoint"],
+        "model": preset["model"],
+        "context_window": preset["context_window"],
+        "max_tokens": 8192,
+        "temperature": 0.7,
+    }
+    if env_var:
+        provider_conf["api_key"] = f"${{{env_var}}}"
+
+    existing["providers"][preset["name"]] = provider_conf
+    existing["active_provider"] = preset["name"]
+
+    # Write config
+    with open(GLOBAL_CONFIG_FILE, "w") as f:
+        _yaml.dump(existing, f, default_flow_style=False)
+
+    console.print(f"\n  [#a3be8c]✓ Config saved to {GLOBAL_CONFIG_FILE}[/#a3be8c]")
+
+    # Set env var
+    if env_var and api_key_value:
+        shell_rc = os.path.expanduser("~/.zshrc")
+        export_line = f'export {env_var}="{api_key_value}"'
+        # Check if already set
+        try:
+            with open(shell_rc, encoding="utf-8") as f:
+                rc_content = f.read()
+            if env_var not in rc_content:
+                with open(shell_rc, "a", encoding="utf-8") as f:
+                    f.write(f"\n# Spark Code — {preset['name']}\n{export_line}\n")
+                console.print(f"  [#a3be8c]✓ {env_var} added to {shell_rc}[/#a3be8c]")
+            else:
+                console.print(f"  [#8899aa]{env_var} already in {shell_rc}[/#8899aa]")
+        except OSError:
+            console.print(f"  [#ebcb8b]Add this to your {shell_rc}:[/#ebcb8b]")
+            console.print(f"    {export_line}")
+
+        # Set for current session too
+        os.environ[env_var] = api_key_value
+
+    console.print("\n  [bold #a3be8c]Setup complete![/bold #a3be8c]")
+    console.print("  Run [bold]spark[/bold] to start coding.\n")
+    if env_var and api_key_value:
+        console.print("  [#8899aa]Run 'source ~/.zshrc' or open a new terminal first.[/#8899aa]\n")
+
+
 @click.command()
 @click.option("--endpoint", "-e", help="Model API endpoint URL")
 @click.option("--model", "-m", "model_name", help="Model name")
@@ -1787,13 +1946,18 @@ async def run_interactive(config: dict, resume_session: str = "",
 @click.option("--yolo", is_flag=True, help="Full agent mode (trust + autonomous execution)")
 @click.option("--resume", "-r", is_flag=True, help="Resume the most recent session")
 @click.option("--continue", "-c", "continue_prompt", default="", help="Resume last session and send a prompt")
+@click.option("--setup", is_flag=True, help="Run interactive setup wizard")
 @click.option("--version", "-v", is_flag=True, help="Show version")
 @click.argument("prompt", nargs=-1, required=False)
 def main(endpoint, model_name, provider, trust, auto_mode, yolo, resume,
-         continue_prompt, version, prompt):
+         continue_prompt, setup, version, prompt):
     """Spark Code — Your local AI coding assistant."""
     if version:
         click.echo(f"Spark Code v{__version__}")
+        return
+
+    if setup:
+        _run_setup()
         return
 
     # Load config with provider selection
