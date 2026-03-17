@@ -162,6 +162,38 @@ def _is_shell_command(text: str) -> bool:
     return text.startswith(_SHELL_PREFIXES)
 
 
+_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".svg")
+
+
+def _is_image_drop(text: str) -> tuple[str, str]:
+    """Detect if input is a dragged-in image file path.
+
+    macOS pastes the full path when you drag a file into the terminal.
+    Sometimes paths are quoted or escaped.
+
+    Returns (file_path, remaining_text) or ("", "") if not an image.
+    """
+    # Clean up: strip quotes, unescape spaces
+    cleaned = text.strip().strip("'\"")
+    cleaned = cleaned.replace("\\ ", " ")
+
+    # Check if it starts with a path-like string
+    # Could be absolute (/Users/...) or home-relative (~/...)
+    parts = cleaned.split(maxsplit=1)
+    candidate = parts[0] if parts else cleaned
+
+    # Also check the full cleaned string (path might have spaces)
+    for path_str in [cleaned, candidate]:
+        lower = path_str.lower()
+        if any(lower.endswith(ext) for ext in _IMAGE_EXTENSIONS):
+            expanded = os.path.expanduser(path_str)
+            if os.path.isfile(expanded):
+                remaining = parts[1] if len(parts) > 1 and path_str == candidate else ""
+                return expanded, remaining
+
+    return "", ""
+
+
 def build_tools() -> ToolRegistry:
     """Register all built-in tools."""
     registry = ToolRegistry()
@@ -1264,6 +1296,30 @@ async def run_interactive(config: dict, resume_session: str = "",
 
             user_input = user_input.strip()
             if not user_input:
+                continue
+
+            # Detect dragged-in image files
+            img_path, img_remaining = _is_image_drop(user_input)
+            if img_path:
+                img_prompt = img_remaining.strip() if img_remaining else "Describe this image and help with anything you see."
+                mime_type = mimetypes.guess_type(img_path)[0] or "image/png"
+                try:
+                    with open(img_path, "rb") as f:
+                        img_data = base64.b64encode(f.read()).decode("utf-8")
+                    size_kb = len(img_data) * 3 / 4 / 1024
+                    console.print(f"  [#88c0d0]Image[/#88c0d0] [#d8dee9]{os.path.basename(img_path)}[/#d8dee9] [#4c566a]({size_kb:.0f} KB, {mime_type})[/#4c566a]")
+                    context.add_user_with_image(img_prompt, img_data, mime_type)
+                    try:
+                        team_monitor.start()
+                        await _run_with_notify(agent.run_without_user_add())
+                    except KeyboardInterrupt:
+                        console.print("\n[#ebcb8b]Interrupted[/#ebcb8b]")
+                    except Exception as e:
+                        console.print(f"\n[#bf616a]Error: {e}[/#bf616a]")
+                    finally:
+                        team_monitor.stop()
+                except OSError as e:
+                    console.print(f"[#bf616a]Could not read image: {e}[/#bf616a]")
                 continue
 
             # Handle slash commands

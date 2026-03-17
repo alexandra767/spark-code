@@ -355,6 +355,71 @@ def test_yolo_toggle_off(console, context, config, skills, model, permissions):
     assert permissions.mode == "auto"
 
 
+# ---------------------------------------------------------------------------
+# Image drag-and-drop detection
+# ---------------------------------------------------------------------------
+
+def test_image_drop_png(tmp_dir):
+    from spark_code.cli import _is_image_drop
+    img_path = os.path.join(tmp_dir, "screenshot.png")
+    with open(img_path, "wb") as f:
+        f.write(b"\x89PNG\r\n")  # PNG magic bytes
+    path, remaining = _is_image_drop(img_path)
+    assert path == img_path
+    assert remaining == ""
+
+
+def test_image_drop_with_prompt(tmp_dir):
+    from spark_code.cli import _is_image_drop
+    img_path = os.path.join(tmp_dir, "error.jpg")
+    with open(img_path, "wb") as f:
+        f.write(b"\xff\xd8\xff")  # JPEG magic bytes
+    path, remaining = _is_image_drop(f"{img_path} fix this bug")
+    assert path == img_path
+    assert remaining == "fix this bug"
+
+
+def test_image_drop_quoted_path(tmp_dir):
+    from spark_code.cli import _is_image_drop
+    img_path = os.path.join(tmp_dir, "my screenshot.png")
+    with open(img_path, "wb") as f:
+        f.write(b"\x89PNG\r\n")
+    # macOS terminal wraps paths with spaces in quotes
+    path, remaining = _is_image_drop(f'"{img_path}"')
+    assert path == img_path
+
+
+def test_image_drop_escaped_spaces(tmp_dir):
+    from spark_code.cli import _is_image_drop
+    img_path = os.path.join(tmp_dir, "my screenshot.png")
+    with open(img_path, "wb") as f:
+        f.write(b"\x89PNG\r\n")
+    escaped = img_path.replace(" ", "\\ ")
+    path, remaining = _is_image_drop(escaped)
+    assert path == img_path
+
+
+def test_image_drop_not_image():
+    from spark_code.cli import _is_image_drop
+    path, remaining = _is_image_drop("hello world")
+    assert path == ""
+
+
+def test_image_drop_nonexistent_file():
+    from spark_code.cli import _is_image_drop
+    path, remaining = _is_image_drop("/nonexistent/image.png")
+    assert path == ""
+
+
+def test_image_drop_text_file(tmp_dir):
+    from spark_code.cli import _is_image_drop
+    txt_path = os.path.join(tmp_dir, "notes.txt")
+    with open(txt_path, "w") as f:
+        f.write("hello")
+    path, remaining = _is_image_drop(txt_path)
+    assert path == ""
+
+
 def test_agentic_prompt_exists():
     """AGENTIC_PROMPT should be defined and contain key instructions."""
     from spark_code.context import AGENTIC_PROMPT
