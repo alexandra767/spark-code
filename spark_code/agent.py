@@ -38,7 +38,8 @@ class Agent:
                  tools: ToolRegistry, permissions: PermissionManager,
                  console: Console | None = None,
                  output_prefix: str = "",
-                 stats: SessionStats | None = None):
+                 stats: SessionStats | None = None,
+                 on_tool_start: object | None = None):
         self.model = model
         self.context = context
         self.tools = tools
@@ -46,6 +47,7 @@ class Agent:
         self.console = console or Console()
         self.output_prefix = output_prefix
         self.stats = stats
+        self.on_tool_start = on_tool_start  # callback(tool_name, args)
 
     async def run_without_user_add(self) -> str:
         """Run the agent loop without adding a user message.
@@ -147,6 +149,13 @@ class Agent:
                     render_tool_denied(self.console, tc["name"])
                     self.context.add_tool_result(tc["id"], tc["name"], result)
                     continue
+
+                # Notify progress callback
+                if self.on_tool_start:
+                    try:
+                        self.on_tool_start(tc["name"], tc["arguments"])
+                    except Exception:
+                        pass
 
                 # Display tool call with styled panel
                 render_tool_call(self.console, tc["name"], tc["arguments"])

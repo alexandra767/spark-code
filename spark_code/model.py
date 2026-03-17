@@ -87,6 +87,13 @@ def _parse_tool_arguments(raw: str) -> dict:
     return {"raw": raw}
 
 
+# Approximate cost per 1K tokens by provider (USD)
+_COST_TABLE = {
+    "gemini": {"input": 0.00001875, "output": 0.000075},  # Gemini 2.0 Flash
+    "openai": {"input": 0.0005, "output": 0.0015},  # GPT-4o-mini
+    "ollama": {"input": 0.0, "output": 0.0},  # Local = free
+}
+
 # Known provider configurations
 PROVIDERS = {
     "ollama": {
@@ -123,6 +130,8 @@ class ModelClient:
         self.max_retries = max_retries
         self.total_input_tokens = 0
         self.total_output_tokens = 0
+        self._cost_per_1k_input = _COST_TABLE.get(provider, {}).get("input", 0.0)
+        self._cost_per_1k_output = _COST_TABLE.get(provider, {}).get("output", 0.0)
 
         # Set up endpoint
         if provider in PROVIDERS and endpoint == PROVIDERS[provider]["base_url"]:
@@ -330,6 +339,14 @@ class ModelClient:
             "total_input": self.total_input_tokens,
             "total_output": self.total_output_tokens,
         }}
+
+    @property
+    def estimated_cost(self) -> float:
+        """Estimated session cost in USD."""
+        return (
+            (self.total_input_tokens / 1000) * self._cost_per_1k_input
+            + (self.total_output_tokens / 1000) * self._cost_per_1k_output
+        )
 
     async def ping(self) -> tuple[bool, str]:
         """Check connectivity to the model endpoint.

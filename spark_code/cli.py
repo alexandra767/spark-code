@@ -24,9 +24,11 @@ from .mcp.client import MCPClient
 from .memory import Memory
 from .model import PROVIDERS, ModelClient
 from .permissions import PermissionManager
+from .pinned import PinnedFiles
 from .plan_executor import execute_plan
 from .project_detect import detect_project_type
 from .skills.base import SkillRegistry
+from .snippets import SnippetLibrary
 from .stats import SessionStats
 from .task_store import TaskStore
 from .team import TeamManager
@@ -194,6 +196,46 @@ def _is_image_drop(text: str) -> tuple[str, str]:
     return "", ""
 
 
+def _detect_file_mentions(text: str) -> list[str]:
+    """Extract file paths mentioned in user input for auto-reading.
+
+    Looks for patterns like: fix auth.py, look at src/main.rs, edit config.yaml
+    Returns list of existing file paths.
+    """
+    import re
+    # Match common file path patterns (word.ext or path/to/file.ext)
+    pattern = r'(?:^|\s)((?:[\w./~-]+/)?[\w.-]+\.(?:py|js|ts|jsx|tsx|rs|go|java|kt|swift|rb|c|cpp|h|hpp|css|html|yaml|yml|toml|json|md|txt|sh|sql|env))\b'
+    matches = re.findall(pattern, text)
+    found = []
+    for match in matches:
+        path = os.path.expanduser(match)
+        if not os.path.isabs(path):
+            path = os.path.abspath(path)
+        if os.path.isfile(path) and path not in found:
+            found.append(path)
+    return found
+
+
+def _is_error_paste(text: str) -> bool:
+    """Detect if pasted text looks like an error/traceback."""
+    indicators = [
+        "Traceback (most recent call last)",
+        "Error:", "error:", "ERROR:",
+        "TypeError:", "ValueError:", "KeyError:", "AttributeError:",
+        "ImportError:", "ModuleNotFoundError:", "FileNotFoundError:",
+        "SyntaxError:", "IndentationError:", "NameError:",
+        "npm ERR!", "FAIL ", "FAILED",
+        "panic:", "fatal error:",
+        "Exception in thread",
+        "at Object.<anonymous>",
+        "Cannot find module",
+        "undefined is not",
+    ]
+    line_count = text.count("\n")
+    # Multi-line text with error indicators
+    return line_count >= 2 and any(ind in text for ind in indicators)
+
+
 def build_tools() -> ToolRegistry:
     """Register all built-in tools."""
     registry = ToolRegistry()
@@ -298,7 +340,9 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
                          team_manager: TeamManager | None = None,
                          task_store: TaskStore | None = None,
                          memory: Memory | None = None,
-                         stats: SessionStats | None = None) -> str | None:
+                         stats: SessionStats | None = None,
+                         pinned: PinnedFiles | None = None,
+                         snippets: SnippetLibrary | None = None) -> str | None:
     """Handle slash commands.
     Returns None if handled (no agent needed), or a prompt string for the agent.
     Returns "__ASYNC__" for commands that schedule async work (team spawn).
@@ -338,6 +382,13 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
 - `/messages` — Check messages from workers
 - `/history` — List and resume past sessions
 - `/undo` — Undo last file write/edit
+- `/pin <file>` — Pin a file to always stay in context
+- `/unpin <file>` — Remove a pinned file
+- `/git` — Smart git commands: `/git sync`, `/git pr`
+- `/fork` — Branch the conversation (save + continue fresh)
+- `/snippet save <name> <prompt>` — Save a reusable prompt
+- `/snippet <name>` — Run a saved snippet
+- `/export` — Export session as markdown
 - `/quit` or `/exit` — Exit
 
 ## Skills"""
@@ -461,6 +512,11 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
         table.add_row("Commands run", str(stats.commands_run))
         table.add_row("Input tokens", f"{model.total_input_tokens:,}")
         table.add_row("Output tokens", f"{model.total_output_tokens:,}")
+        cost = model.estimated_cost
+        if cost > 0:
+            table.add_row("Estimated cost", f"${cost:.4f}")
+        if pinned and pinned.count > 0:
+            table.add_row("Pinned files", str(pinned.count))
         console.print(table)
         return None
 
@@ -972,6 +1028,151 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
             console.print(f"[#bf616a]Undo failed: {e}[/#bf616a]")
         return None
 
+    elif command == "/pin":
+        if not pinned:
+            console.print("[#bf616a]Pin system not available[/#bf616a]")
+            return None
+        if not args:
+            files = pinned.list()
+            if not files:
+                console.print("[#8899aa]No pinned files. Use /pin <file_path>[/#8899aa]")
+            else:
+                console.print("[bold #eceff4]Pinned files:[/bold #eceff4]")
+                home = os.path.expanduser("~")
+                for f in files:
+                    display = "~" + f[len(home):] if f.startswith(home) else f
+                    console.print(f"  [#88c0d0]{display}[/#88c0d0]")
+            return None
+        ok, msg = pinned.pin(args.strip())
+        style = "#a3be8c" if ok else "#bf616a"
+        console.print(f"[{style}]{msg}[/{style}]")
+        return None
+
+    elif command == "/unpin":
+        if not pinned:
+            console.print("[#bf616a]Pin system not available[/#bf616a]")
+            return None
+        if not args:
+            console.print("[#ebcb8b]Usage: /unpin <file_path>[/#ebcb8b]")
+            return None
+        ok, msg = pinned.unpin(args.strip())
+        style = "#a3be8c" if ok else "#bf616a"
+        console.print(f"[{style}]{msg}[/{style}]")
+        return None
+
+    elif command == "/git":
+        if not args:
+            console.print("[#ebcb8b]Usage: /git <command>[/#ebcb8b]")
+            console.print("[#8899aa]  /git sync   — pull, then push[/#8899aa]")
+            console.print("[#8899aa]  /git pr     — create a PR with AI-generated description[/#8899aa]")
+            console.print("[#8899aa]  /git stash  — stash changes[/#8899aa]")
+            console.print("[#8899aa]  /git log    — show recent commits[/#8899aa]")
+            return None
+        sub = args.strip().lower()
+        if sub == "sync":
+            return "__RUN_CMD__git pull --rebase && git push"
+        elif sub == "stash":
+            return "__RUN_CMD__git stash"
+        elif sub == "log":
+            return "__RUN_CMD__git log --oneline -15"
+        elif sub == "pr":
+            return (
+                "Create a pull request for the current branch. Steps:\n"
+                "1. Run `git branch --show-current` to get branch name\n"
+                "2. Run `git log main..HEAD --oneline` to see commits\n"
+                "3. Run `git diff main...HEAD --stat` to see changed files\n"
+                "4. Generate a concise PR title and description based on the changes\n"
+                "5. Run `gh pr create --title \"<title>\" --body \"<description>\"` to create the PR\n"
+                "6. Show the PR URL when done"
+            )
+        else:
+            # Pass through as git command
+            return f"__RUN_CMD__git {args.strip()}"
+
+    elif command == "/fork":
+        # Save current session and start fresh
+        from datetime import datetime as _dt
+        try:
+            history_dir = os.path.expanduser("~/.spark/history")
+            os.makedirs(history_dir, exist_ok=True)
+            ts = _dt.now().strftime("%Y%m%d_%H%M%S")
+            label = _make_session_label(context)
+            suffix = f"_{label}" if label else ""
+            save_path = os.path.join(history_dir, f"{ts}{suffix}_fork.json")
+            context.save(save_path, label=f"{label} (forked)", cwd=os.getcwd())
+            console.print("[#a3be8c]Session saved as fork. Starting fresh context.[/#a3be8c]")
+            console.print(f"[#8899aa]Resume the fork with /history {ts}[/#8899aa]")
+            context.clear()
+        except Exception as e:
+            console.print(f"[#bf616a]Fork failed: {e}[/#bf616a]")
+        return None
+
+    elif command == "/snippet":
+        if not snippets:
+            console.print("[#bf616a]Snippet system not available[/#bf616a]")
+            return None
+        if not args:
+            all_snippets = snippets.list()
+            if not all_snippets:
+                console.print("[#8899aa]No snippets. Use /snippet save <name> <prompt>[/#8899aa]")
+            else:
+                console.print("[bold #eceff4]Saved snippets:[/bold #eceff4]")
+                for name, prompt in all_snippets.items():
+                    preview = prompt[:60].replace("\n", " ")
+                    console.print(f"  [#88c0d0]{name}[/#88c0d0]  [#8899aa]{preview}[/#8899aa]")
+            return None
+        sub_parts = args.strip().split(maxsplit=2)
+        if sub_parts[0].lower() == "save":
+            if len(sub_parts) < 3:
+                console.print("[#ebcb8b]Usage: /snippet save <name> <prompt>[/#ebcb8b]")
+                return None
+            msg = snippets.add(sub_parts[1], sub_parts[2])
+            console.print(f"[#a3be8c]{msg}[/#a3be8c]")
+            return None
+        elif sub_parts[0].lower() == "remove":
+            if len(sub_parts) < 2:
+                console.print("[#ebcb8b]Usage: /snippet remove <name>[/#ebcb8b]")
+                return None
+            msg = snippets.remove(sub_parts[1])
+            console.print(f"[#8899aa]{msg}[/#8899aa]")
+            return None
+        else:
+            # Run a snippet by name
+            prompt = snippets.get(sub_parts[0])
+            if prompt:
+                return prompt
+            console.print(f"[#bf616a]Snippet not found: {sub_parts[0]}[/#bf616a]")
+            return None
+
+    elif command == "/export":
+        # Export session as markdown
+        if context.turn_count == 0:
+            console.print("[#8899aa]Nothing to export — no conversation yet.[/#8899aa]")
+            return None
+        lines = ["# Spark Code Session Export\n"]
+        for msg in context.messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role == "user" and isinstance(content, str):
+                lines.append(f"## User\n\n{content}\n")
+            elif role == "assistant" and isinstance(content, str) and content:
+                lines.append(f"## Assistant\n\n{content}\n")
+            elif role == "tool":
+                name = msg.get("name", "tool")
+                result_preview = (content[:200] + "...") if len(content or "") > 200 else content
+                lines.append(f"**Tool: {name}**\n```\n{result_preview}\n```\n")
+        export_text = "\n".join(lines)
+        export_path = os.path.join(os.getcwd(), "session_export.md")
+        try:
+            with open(export_path, "w", encoding="utf-8") as f:
+                f.write(export_text)
+            console.print(f"[#a3be8c]Exported to {export_path}[/#a3be8c]")
+            _copy_to_clipboard(export_text)
+            console.print("[#8899aa]Also copied to clipboard[/#8899aa]")
+        except OSError as e:
+            console.print(f"[#bf616a]Export failed: {e}[/#bf616a]")
+        return None
+
     # Check skills (skip /plan since we handle it above)
     skill = skills.get(command)
     if skill:
@@ -992,12 +1193,17 @@ async def run_interactive(config: dict, resume_session: str = "",
     resume_session: path to a session JSON to resume on startup
     continue_prompt: if set, resume last session and send this prompt
     """
-    console = Console(theme=get_theme())
+    theme_name = get(config, "ui", "theme", default="dark")
+    console = Console(theme=get_theme(theme_name))
     ensure_dirs()
 
     # Initialize skills
     skills = SkillRegistry()
     skills.load_all()
+
+    # Initialize pinned files and snippets
+    pinned = PinnedFiles()
+    snippet_lib = SnippetLibrary()
 
     # Initialize MCP
     mcp_client = MCPClient()
@@ -1077,8 +1283,29 @@ async def run_interactive(config: dict, resume_session: str = "",
         mode=get(config, "permissions", "mode", default="ask"),
         always_allow=get(config, "permissions", "always_allow", default=[]),
     )
+    # Progress tracking for toolbar
+    current_tool = {"name": "", "detail": ""}
+
+    def _on_tool_start(tool_name, args):
+        """Update toolbar with current tool being executed."""
+        detail = ""
+        if tool_name == "read_file":
+            detail = args.get("file_path", "")
+        elif tool_name == "bash":
+            cmd = args.get("command", "")
+            detail = cmd[:40] + "..." if len(cmd) > 40 else cmd
+        elif tool_name in ("glob", "grep"):
+            detail = args.get("pattern", "")
+        elif tool_name in ("write_file", "edit_file"):
+            detail = args.get("file_path", "")
+        home = os.path.expanduser("~")
+        if detail.startswith(home):
+            detail = "~" + detail[len(home):]
+        current_tool["name"] = tool_name
+        current_tool["detail"] = detail
+
     agent = Agent(model, context, tools, permissions, console,
-                  stats=session_stats)
+                  stats=session_stats, on_tool_start=_on_tool_start)
 
     # Initialize team system
     task_store = TaskStore()
@@ -1331,6 +1558,8 @@ async def run_interactive(config: dict, resume_session: str = "",
                     task_store=task_store,
                     memory=memory,
                     stats=session_stats,
+                    pinned=pinned,
+                    snippets=snippet_lib,
                 )
                 if result is None:
                     continue
@@ -1457,6 +1686,38 @@ async def run_interactive(config: dict, resume_session: str = "",
                 finally:
                     team_monitor.stop()
             else:
+                # Refresh pinned files before each turn
+                if pinned.count > 0:
+                    pinned.refresh()
+                    pinned_ctx = pinned.get_context()
+                    # Inject pinned files into the system prompt temporarily
+                    if pinned_ctx and pinned_ctx not in context.system_prompt:
+                        context.system_prompt = context.system_prompt.rstrip() + "\n\n" + pinned_ctx
+
+                # Auto-detect error pastes and enhance the prompt
+                if _is_error_paste(user_input):
+                    user_input = (
+                        f"The user pasted an error. Diagnose it and suggest a fix.\n\n"
+                        f"```\n{user_input}\n```"
+                    )
+
+                # Auto-read files mentioned in the prompt
+                mentioned = _detect_file_mentions(user_input)
+                if mentioned:
+                    file_context = []
+                    for fpath in mentioned[:3]:  # Max 3 auto-reads
+                        try:
+                            with open(fpath, encoding="utf-8", errors="replace") as f:
+                                content = f.read(10000)
+                            home = os.path.expanduser("~")
+                            display = "~" + fpath[len(home):] if fpath.startswith(home) else fpath
+                            file_context.append(f"Contents of {display}:\n```\n{content}\n```")
+                            console.print(f"  [#4c566a]Auto-read: {display}[/#4c566a]")
+                        except OSError:
+                            pass
+                    if file_context:
+                        user_input += "\n\n" + "\n\n".join(file_context)
+
                 # In plan mode, wrap prompt to plan first
                 # Skip wrapping for short conversational messages
                 if plan_mode["active"] and len(user_input.split()) > 3:

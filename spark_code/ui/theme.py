@@ -2,8 +2,8 @@
 
 from rich.theme import Theme
 
-# Claude Code's actual color palette
-SPARK_THEME = Theme({
+# Nord dark theme (default)
+DARK_THEME = Theme({
     # Banner / chrome
     "spark.banner": "bold #e0ac69",
     "spark.banner.dim": "#666666",
@@ -37,6 +37,46 @@ SPARK_THEME = Theme({
     "spark.status.sep": "#5a6577",
 })
 
+# Light theme
+LIGHT_THEME = Theme({
+    # Banner / chrome
+    "spark.banner": "bold #c08030",
+    "spark.banner.dim": "#888888",
 
-def get_theme() -> Theme:
-    return SPARK_THEME
+    # Content
+    "spark.info": "#0077aa",
+    "spark.success": "#2e7d32",
+    "spark.warning": "#c07000",
+    "spark.error": "#c62828",
+
+    # Tool display
+    "spark.tool": "bold #0077aa",
+    "spark.tool.name": "bold #0077aa",
+    "spark.tool.args": "#333333",
+    "spark.tool.result": "#555555",
+    "spark.tool.connector": "#777777",
+
+    # Permissions
+    "spark.permission": "#c07000",
+
+    # Text
+    "spark.dim": "#777777",
+    "spark.user": "bold #1a1a1a",
+    "spark.assistant": "#333333",
+    "spark.code": "#1a1a1a on #f0f0f0",
+
+    # Status
+    "spark.status": "#777777",
+    "spark.status.key": "#0055aa",
+    "spark.status.value": "#555555",
+    "spark.status.sep": "#cccccc",
+})
+
+# Keep backward compatibility
+SPARK_THEME = DARK_THEME
+
+
+def get_theme(name: str = "dark") -> Theme:
+    if name == "light":
+        return LIGHT_THEME
+    return DARK_THEME

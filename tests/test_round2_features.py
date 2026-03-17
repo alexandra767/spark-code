@@ -69,6 +69,7 @@ def model():
     m = MagicMock(spec=ModelClient)
     m.total_input_tokens = 100
     m.total_output_tokens = 200
+    m.estimated_cost = 0.001
     return m
 
 
