@@ -34,6 +34,7 @@ _BUILTIN_COMMANDS: dict[str, str] = {
     "/memory": "View or add to memory",
     "/image": "Send an image file with a prompt",
     "/mode": "Switch permission mode (ask/auto/trust/plan)",
+    "/yolo": "Toggle agent mode (autonomous + trust all)",
     "/trust": "Switch to trust mode (allow all)",
     "/auto": "Switch to auto mode (allow reads)",
     "/ask": "Switch to ask mode (confirm all)",

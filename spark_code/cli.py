@@ -19,7 +19,7 @@ from rich.text import Text
 from . import __version__
 from .agent import Agent
 from .config import ensure_dirs, get, load_config, set_config
-from .context import SYSTEM_PROMPT, Context
+from .context import AGENTIC_PROMPT, SYSTEM_PROMPT, Context
 from .mcp.client import MCPClient
 from .memory import Memory
 from .model import PROVIDERS, ModelClient
@@ -287,6 +287,7 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
 - `/diff` — Show git diff with syntax highlighting
 - `/memory` — View memory / `/memory add <entry>` / `/memory edit`
 - `/image <path> [prompt]` — Send an image with optional prompt
+- `/yolo` — Toggle agent mode (autonomous + trust all tools)
 - `/mode [ask|auto|trust]` — Switch permission mode
 - `/trust` — Switch to trust mode (allow all tools)
 - `/auto` — Switch to auto mode (allow reads, ask for writes)
@@ -502,6 +503,25 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
             memory.append_project(args.strip())
             console.print("[#a3be8c]Added to project memory[/#a3be8c]")
             return None
+
+    elif command == "/yolo":
+        # Toggle agent mode — swap system prompt and set trust
+        is_agentic = context.system_prompt.startswith("You are Spark Code, a fully autonomous")
+        if is_agentic:
+            # Switch back to normal mode
+            new_prompt = context.system_prompt.replace(AGENTIC_PROMPT, SYSTEM_PROMPT)
+            context.system_prompt = new_prompt
+            if permissions:
+                permissions.mode = "auto"
+            console.print("[#8899aa]Agent mode off — back to normal[/#8899aa]")
+        else:
+            # Switch to agent mode
+            new_prompt = context.system_prompt.replace(SYSTEM_PROMPT, AGENTIC_PROMPT)
+            context.system_prompt = new_prompt
+            if permissions:
+                permissions.mode = "trust"
+            console.print("[bold #ebcb8b]⚡ Agent mode on[/bold #ebcb8b] [#8899aa]— autonomous execution, all tools trusted[/#8899aa]")
+        return None
 
     elif command == "/image":
         if not args:
@@ -960,7 +980,8 @@ async def run_interactive(config: dict, resume_session: str = "",
         global_path=get(config, "memory", "global_path", default="~/.spark/memory"),
     )
     memory_context = memory.load_all()
-    system_prompt = SYSTEM_PROMPT
+    agentic = config.get("_agentic", False)
+    system_prompt = AGENTIC_PROMPT if agentic else SYSTEM_PROMPT
 
     # Load SPARK.md project instructions
     spark_md = load_spark_md()
@@ -1002,6 +1023,9 @@ async def run_interactive(config: dict, resume_session: str = "",
             console.print("  [#8899aa]Session will start anyway — requests may fail until server is available[/#8899aa]")
     except Exception:
         pass  # Don't block startup
+
+    if agentic:
+        console.print("  [bold #ebcb8b]⚡ Agent mode[/bold #ebcb8b] [#8899aa]— fully autonomous, trust all tools[/#8899aa]")
     console.print()
 
     # Initialize session stats
@@ -1443,12 +1467,13 @@ async def run_interactive(config: dict, resume_session: str = "",
 @click.option("--provider", "-p", help="Provider: ollama, gemini, openai")
 @click.option("--trust", is_flag=True, help="Trust mode (allow all tool calls)")
 @click.option("--auto", "auto_mode", is_flag=True, help="Auto mode (allow reads, ask for writes)")
+@click.option("--yolo", is_flag=True, help="Full agent mode (trust + autonomous execution)")
 @click.option("--resume", "-r", is_flag=True, help="Resume the most recent session")
 @click.option("--continue", "-c", "continue_prompt", default="", help="Resume last session and send a prompt")
 @click.option("--version", "-v", is_flag=True, help="Show version")
 @click.argument("prompt", nargs=-1, required=False)
-def main(endpoint, model_name, provider, trust, auto_mode, resume, continue_prompt,
-         version, prompt):
+def main(endpoint, model_name, provider, trust, auto_mode, yolo, resume,
+         continue_prompt, version, prompt):
     """Spark Code — Your local AI coding assistant."""
     if version:
         click.echo(f"Spark Code v{__version__}")
@@ -1462,10 +1487,13 @@ def main(endpoint, model_name, provider, trust, auto_mode, resume, continue_prom
         config["model"]["endpoint"] = endpoint
     if model_name:
         config["model"]["name"] = model_name
-    if trust:
+    if yolo or trust:
         config["permissions"]["mode"] = "trust"
     elif auto_mode:
         config["permissions"]["mode"] = "auto"
+
+    # Agentic mode flag
+    config["_agentic"] = yolo
 
     # Resume / continue mode
     resume_session = ""

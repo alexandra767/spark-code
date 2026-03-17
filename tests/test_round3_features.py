@@ -322,3 +322,43 @@ def test_notify_done_calls_afplay():
         mock_run.assert_called_once()
         args = mock_run.call_args[0][0]
         assert "afplay" in args
+
+
+# ---------------------------------------------------------------------------
+# Agent mode (/yolo)
+# ---------------------------------------------------------------------------
+
+def test_yolo_toggle_on(console, context, config, skills, model, permissions):
+    """'/yolo' should switch to agent mode and trust."""
+    from spark_code.context import SYSTEM_PROMPT
+    context.system_prompt = SYSTEM_PROMPT
+    result = handle_slash_command(
+        "/yolo", context, console, config, skills, model,
+        permissions=permissions,
+    )
+    assert result is None
+    assert "fully autonomous" in context.system_prompt
+    assert permissions.mode == "trust"
+
+
+def test_yolo_toggle_off(console, context, config, skills, model, permissions):
+    """'/yolo' again should switch back to normal."""
+    from spark_code.context import AGENTIC_PROMPT
+    context.system_prompt = AGENTIC_PROMPT
+    permissions.mode = "trust"
+    result = handle_slash_command(
+        "/yolo", context, console, config, skills, model,
+        permissions=permissions,
+    )
+    assert result is None
+    assert "fully autonomous" not in context.system_prompt
+    assert permissions.mode == "auto"
+
+
+def test_agentic_prompt_exists():
+    """AGENTIC_PROMPT should be defined and contain key instructions."""
+    from spark_code.context import AGENTIC_PROMPT
+    assert "autonomous" in AGENTIC_PROMPT.lower()
+    assert "spawn_worker" in AGENTIC_PROMPT
+    assert "NEVER ask" in AGENTIC_PROMPT
+    assert "Run tests" in AGENTIC_PROMPT or "run tests" in AGENTIC_PROMPT
