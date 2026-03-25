@@ -179,7 +179,7 @@ _PROVIDER_INFO = [
     {
         "name": "gemini",
         "label": "Google Gemini",
-        "model": "gemini-2.0-flash",
+        "model": "gemini-2.5-flash",
         "env_var": "GEMINI_API_KEY",
         "signup": "https://aistudio.google.com/apikey",
     },
@@ -214,7 +214,7 @@ _PROVIDER_INFO = [
     {
         "name": "ollama",
         "label": "Ollama (local)",
-        "model": "qwen2.5:7b",
+        "model": "qwen3.5:122b",
         "env_var": "",
         "signup": "https://ollama.ai",
     },
