@@ -282,7 +282,9 @@ class Context:
             parts.append(f"### Tools used: {', '.join(sorted(tools_used))}")
 
         summary = "\n".join(parts)
-        self.messages = [{"role": "system", "content": summary}] + recent
+        # Inject summary as a user message (not system — get_messages() adds system prompt)
+        self.messages = [{"role": "user", "content": summary},
+                         {"role": "assistant", "content": "Understood, I have the conversation context."}] + recent
 
         # Post-compact check
         if self.max_tokens > 0:

@@ -136,9 +136,10 @@ class Agent:
                     sequential_tcs.append(tc)
 
             # Execute parallel tool calls concurrently
+            parallel_results: list[str] = []
             if len(parallel_tcs) > 1:
-                results = await self._execute_parallel(parallel_tcs)
-                for tc, result in zip(parallel_tcs, results):
+                parallel_results = await self._execute_parallel(parallel_tcs)
+                for tc, result in zip(parallel_tcs, parallel_results):
                     self.context.add_tool_result(tc["id"], tc["name"], result)
             elif parallel_tcs:
                 # Single auto-allowed call — run normally
@@ -149,10 +150,10 @@ class Agent:
             for tc in sequential_tcs:
                 await self._execute_single_tool(tc)
 
-            # Process results for parallel calls (display after)
-            for tc, result in zip(parallel_tcs, results) if parallel_tcs else []:
-                render_tool_call(self.console, tc["name"], tc["arguments"])
-                render_tool_result(self.console, result, tool_name=tc["name"])
+            # Display results for parallel calls
+            if parallel_tcs and parallel_results:
+                for tc, result in zip(parallel_tcs, parallel_results):
+                    render_tool_result(self.console, result, tool_name=tc["name"])
 
             # Continue loop — model will process tool results
 

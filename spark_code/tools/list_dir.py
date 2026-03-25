@@ -48,7 +48,11 @@ class ListDirTool(Tool):
             if os.path.isdir(full):
                 dirs.append(f"  {entry}/")
             else:
-                size = os.path.getsize(full)
+                try:
+                    size = os.path.getsize(full)
+                except OSError:
+                    files.append(f"  {entry}  (broken link)")
+                    continue
                 if size < 1024:
                     size_str = f"{size}B"
                 elif size < 1024 * 1024:

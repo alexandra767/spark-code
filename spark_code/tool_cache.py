@@ -20,7 +20,8 @@ class ToolCache:
 
     @staticmethod
     def _key(tool_name: str, args: dict[str, Any]) -> str:
-        raw = f"{tool_name}:{sorted(args.items())}"
+        import json
+        raw = f"{tool_name}:{json.dumps(args, sort_keys=True, default=str)}"
         return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
     def get(self, tool_name: str, args: dict[str, Any]) -> str | None:
