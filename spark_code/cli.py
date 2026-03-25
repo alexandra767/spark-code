@@ -1629,16 +1629,26 @@ async def run_interactive(config: dict, resume_session: str = "",
 
     # Callbacks for the prompt_toolkit footer (always visible below input)
     def status_callback():
-        """Line 1: turns + context %."""
+        """Line 1: model + turns + context %."""
         tokens = context.estimate_tokens()
         turns = context.turn_count
         max_tok = context.max_tokens
 
         parts = []
-        if turns > 0:
-            parts.append(("class:bottom-toolbar.info", f"  {turns} turns"))
-        else:
+        # Show current model name
+        model_name = get(config, "model", "name", default="")
+        provider_name = get(config, "model", "provider", default="")
+        if model_name:
+            label = f"  {model_name}"
+            if provider_name:
+                label += f" ({provider_name})"
+            parts.append(("class:bottom-toolbar.team", label))
             parts.append(("class:bottom-toolbar.info", "  "))
+
+        if turns > 0:
+            parts.append(("class:bottom-toolbar.info", f"{turns} turns"))
+        else:
+            parts.append(("class:bottom-toolbar.info", ""))
 
         # Context percentage
         if max_tok > 0 and tokens > 0:
