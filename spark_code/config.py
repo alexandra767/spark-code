@@ -9,10 +9,10 @@ import yaml
 DEFAULT_CONFIG = {
     "model": {
         "endpoint": "http://localhost:11434",
-        "name": "qwen2.5:72b",
+        "name": "qwen3.5:122b",
         "temperature": 0.7,
-        "max_tokens": 4096,
-        "context_window": 32768,
+        "max_tokens": 8192,
+        "context_window": 262144,
     },
     "permissions": {
         "mode": "ask",  # ask | auto | trust
