@@ -1,0 +1,23 @@
+# Example Custom Skill for Spark Code
+# Place in ~/.spark/skills/ or project/.spark/skills/
+#
+# Usage: /deploy (or whatever you name the file)
+
+name: deploy
+description: Deploy the current project to production
+trigger: /deploy
+
+# System prompt injected when skill is invoked
+prompt: |
+  The user wants to deploy this project. Follow these steps:
+  1. Run the test suite first
+  2. Check for uncommitted changes
+  3. Build the production bundle
+  4. Deploy using the project's deploy script
+  5. Verify the deployment
+
+# Tools this skill needs
+required_tools:
+  - bash
+  - read_file
+  - glob
