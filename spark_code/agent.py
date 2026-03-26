@@ -32,6 +32,59 @@ if TYPE_CHECKING:
     from .tool_cache import ToolCache
 
 
+class _RepeatDetector:
+    """Detects when a model is stuck in a repetition loop.
+
+    Checks for:
+    1. Same line/sentence appearing 3+ times in accumulated text
+    2. Same chunk repeated 5+ times consecutively
+    """
+
+    REPEAT_THRESHOLD = 3      # same line appears this many times → stuck
+    CHUNK_REPEAT_THRESHOLD = 5  # same chunk in a row this many times → stuck
+    CHECK_INTERVAL = 20        # only check every N chunks (perf)
+
+    def __init__(self):
+        self._chunk_count = 0
+        self._last_chunk: str = ""
+        self._same_chunk_run: int = 0
+        self._accumulated: list[str] = []
+
+    def feed(self, chunk: str) -> bool:
+        """Feed a chunk. Returns True if repetition detected."""
+        self._chunk_count += 1
+        self._accumulated.append(chunk)
+
+        # Check consecutive identical chunks
+        if chunk == self._last_chunk and chunk.strip():
+            self._same_chunk_run += 1
+            if self._same_chunk_run >= self.CHUNK_REPEAT_THRESHOLD:
+                return True
+        else:
+            self._same_chunk_run = 1
+            self._last_chunk = chunk
+
+        # Periodic check for repeated lines in accumulated text
+        if self._chunk_count % self.CHECK_INTERVAL == 0:
+            return self._check_repeated_lines()
+
+        return False
+
+    def _check_repeated_lines(self) -> bool:
+        """Check if any non-trivial line appears 3+ times."""
+        full = "".join(self._accumulated)
+        # Split on newlines, filter out short/empty lines
+        lines = [ln.strip() for ln in full.split("\n") if len(ln.strip()) > 20]
+        if not lines:
+            return False
+        seen: dict[str, int] = {}
+        for line in lines:
+            seen[line] = seen.get(line, 0) + 1
+            if seen[line] >= self.REPEAT_THRESHOLD:
+                return True
+        return False
+
+
 class Agent:
     """The agent loop that connects the model to tools."""
 
@@ -55,6 +108,11 @@ class Agent:
         self.on_tool_start = on_tool_start  # callback(tool_name, args)
         self.tool_cache = tool_cache
         self.hooks = hooks
+        self._cancelled = False
+
+    def cancel(self):
+        """Signal the agent to stop generation (called from Ctrl+C handler)."""
+        self._cancelled = True
 
     async def run_without_user_add(self) -> str:
         """Run the agent loop without adding a user message.
@@ -76,6 +134,7 @@ class Agent:
 
         full_response = ""
         rounds = 0
+        self._cancelled = False
 
         while rounds < self.MAX_TOOL_ROUNDS:
             rounds += 1
@@ -88,20 +147,51 @@ class Agent:
             renderer = StreamingRenderer(self.console, live_mode=use_live)
             renderer.start()
 
-            async for chunk in self.model.chat(
-                messages=self.context.get_messages(),
-                tools=self.tools.schemas(),
-                stream=True,
-            ):
-                if chunk["type"] == "text":
-                    text_parts.append(chunk["content"])
-                    renderer.feed(chunk["content"])
+            repeat_detector = _RepeatDetector()
+            repeat_detected = False
 
-                elif chunk["type"] == "tool_call":
-                    tool_calls.append(chunk)
+            try:
+                async for chunk in self.model.chat(
+                    messages=self.context.get_messages(),
+                    tools=self.tools.schemas(),
+                    stream=True,
+                ):
+                    # Yield to event loop so signal handlers can fire
+                    await asyncio.sleep(0)
 
-                elif chunk["type"] == "done":
-                    pass
+                    # Check cancellation flag (set by Ctrl+C handler)
+                    if self._cancelled:
+                        break
+
+                    if chunk["type"] == "text":
+                        text_parts.append(chunk["content"])
+                        renderer.feed(chunk["content"])
+
+                        # Check for model stuck in repetition loop
+                        if repeat_detector.feed(chunk["content"]):
+                            repeat_detected = True
+                            break
+
+                    elif chunk["type"] == "tool_call":
+                        tool_calls.append(chunk)
+
+                    elif chunk["type"] == "done":
+                        pass
+            except asyncio.CancelledError:
+                self._cancelled = True
+
+            if self._cancelled:
+                # Show whatever was generated before the interrupt
+                renderer.flush()
+                partial = "".join(text_parts)
+                if partial.strip():
+                    self.context.add_assistant(partial)
+                return full_response
+
+            if repeat_detected:
+                renderer.stop()
+                render_warning(self.console, "Repetition loop detected — stopped generation. Try rephrasing or breaking your request into smaller parts.")
+                break
 
             # Finalize — final markdown render and stop live display
             renderer.flush()

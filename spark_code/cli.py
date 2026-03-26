@@ -1798,12 +1798,45 @@ async def run_interactive(config: dict, resume_session: str = "",
     import time as _time
 
     async def _run_with_notify(coro):
-        """Run a coroutine and play notification sound if it took > 5s."""
+        """Run a coroutine as a cancellable task. Ctrl+C cancels generation."""
+        import signal as _signal
+
         start = _time.monotonic()
-        result = await coro
-        if notify_enabled and (_time.monotonic() - start) > 5.0:
-            _notify_done()
-        return result
+        loop = asyncio.get_running_loop()
+        task = loop.create_task(coro)
+
+        prev_handler = _signal.getsignal(_signal.SIGINT)
+
+        def _cancel_on_sigint(sig, frame):
+            agent.cancel()
+            task.cancel()
+            loop.call_soon_threadsafe(lambda: None)
+
+        _signal.signal(_signal.SIGINT, _cancel_on_sigint)
+
+        # Ensure terminal ISIG is set so Ctrl+C generates SIGINT.
+        # prompt_toolkit may leave it cleared after session.prompt()
+        # runs in a thread via run_in_executor.
+        try:
+            import termios as _termios
+            _fd = sys.stdin.fileno()
+            _attrs = _termios.tcgetattr(_fd)
+            if not (_attrs[3] & _termios.ISIG):
+                _attrs[3] |= _termios.ISIG
+                _termios.tcsetattr(_fd, _termios.TCSANOW, _attrs)
+        except Exception:
+            pass
+
+        try:
+            result = await task
+            if notify_enabled and (_time.monotonic() - start) > 5.0:
+                _notify_done()
+            return result
+        except asyncio.CancelledError:
+            console.print("\n[#ebcb8b]Interrupted[/#ebcb8b]")
+            return ""
+        finally:
+            _signal.signal(_signal.SIGINT, prev_handler)
 
     # Handle --continue prompt (send first prompt automatically)
     if continue_prompt:
