@@ -396,9 +396,17 @@ class StreamingRenderer:
         self._live: Live | None = None
         self._last_render: float = 0.0
         self._live_mode = live_mode
+        self._start_time: float = 0.0
+
+    @property
+    def elapsed(self) -> float:
+        if self._start_time > 0:
+            return time.monotonic() - self._start_time
+        return 0.0
 
     def start(self):
         """Start the live display with a spinner."""
+        self._start_time = time.monotonic()
         if not self._live_mode:
             return
         self._live = Live(
@@ -426,6 +434,14 @@ class StreamingRenderer:
         if not self._live:
             return
         full = "".join(self._buffer)
+        if not full.strip():
+            # Still waiting for text — show timer in spinner
+            elapsed = self.elapsed
+            if elapsed > 0.5:  # Only show after half second
+                self._live.update(
+                    Spinner("dots", text=Text(f" Generating... ({elapsed:.1f}s)", style=f"bold {_C_TOOL}"))
+                )
+            return
         try:
             self._live.update(Markdown(full, code_theme="nord-darker"))
         except Exception:

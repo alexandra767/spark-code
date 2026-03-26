@@ -318,3 +318,46 @@ class TestFilesCreatedTracking:
         stats.record_file_created("/tmp/file.py")
         stats.record_file_created("/tmp/file.py")
         assert len(stats.files_created) == 1
+
+
+class TestCompactNotification:
+    def test_compact_returns_summary(self):
+        ctx = Context()
+        for i in range(20):
+            ctx.add_user(f"Message {i}")
+            ctx.add_assistant(f"Response {i}")
+        result = ctx.compact(keep_recent=6)
+        assert result is not None
+        assert isinstance(result, str)
+        assert "compact" in result.lower() or "messages" in result.lower()
+
+    def test_compact_returns_none_when_nothing_to_compact(self):
+        ctx = Context()
+        ctx.add_user("hello")
+        ctx.add_assistant("hi")
+        result = ctx.compact(keep_recent=6)
+        assert result is None
+
+
+import time as _time
+from spark_code.ui.output import StreamingRenderer
+
+
+class TestGenerationTimer:
+    def test_renderer_tracks_start_time(self):
+        import io
+        from rich.console import Console
+        console = Console(file=io.StringIO(), force_terminal=True)
+        renderer = StreamingRenderer(console, live_mode=False)
+        renderer.start()
+        assert hasattr(renderer, '_start_time')
+        assert renderer._start_time > 0
+
+    def test_renderer_elapsed_increases(self):
+        import io
+        from rich.console import Console
+        console = Console(file=io.StringIO(), force_terminal=True)
+        renderer = StreamingRenderer(console, live_mode=False)
+        renderer.start()
+        _time.sleep(0.1)
+        assert renderer.elapsed > 0.05
