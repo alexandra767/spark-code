@@ -204,7 +204,7 @@ class Context:
         combined = "\n\n".join(parts)
         return [{"role": "system", "content": combined}] + self.messages
 
-    def compact(self, keep_recent: int = 6):
+    def compact(self, keep_recent: int = 6) -> str | None:
         """Compact conversation with structured summaries.
 
         Instead of simple truncation, creates a structured summary that
@@ -212,7 +212,10 @@ class Context:
         and the overall task context.
         """
         if len(self.messages) <= keep_recent:
-            return
+            return None
+
+        before_count = len(self.messages)
+        before_tokens = self.estimate_tokens()
 
         old = self.messages[:-keep_recent]
         recent = self.messages[-keep_recent:]
@@ -301,6 +304,11 @@ class Context:
             tokens = self.estimate_tokens()
             if tokens > self.max_tokens * 0.9 and keep_recent > 2:
                 self.compact(keep_recent=max(2, keep_recent // 2))
+
+        after_count = len(self.messages)
+        after_tokens = self.estimate_tokens()
+        freed = before_tokens - after_tokens
+        return f"Context compacted: {before_count} messages → {after_count} (freed ~{freed:,} tokens)"
 
     def clear(self):
         """Clear all messages."""
