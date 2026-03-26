@@ -622,27 +622,63 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
         if not stats:
             console.print("[#8899aa]No stats available[/#8899aa]")
             return None
-        # Build stats table
         table = Table(title="Session Statistics", border_style="#4c566a",
                       show_header=True, header_style="bold #88c0d0")
         table.add_column("Metric", style="#d8dee9")
         table.add_column("Value", style="#eceff4")
+
         table.add_row("Duration", stats.format_duration())
         table.add_row("Turns", str(context.turn_count))
+
+        # Generation speed
+        speed_str = stats.format_speed()
+        if speed_str:
+            table.add_row("Generation speed", speed_str)
+
+        # Token counts
+        if stats.input_tokens > 0 or stats.output_tokens > 0:
+            table.add_row("Tokens in / out",
+                           f"{stats.input_tokens:,} / {stats.output_tokens:,}")
+        elif hasattr(model, 'total_input_tokens'):
+            table.add_row("Tokens in / out",
+                           f"{model.total_input_tokens:,} / {model.total_output_tokens:,}")
+
+        # Cost
+        cost_str = stats.format_cost()
+        if cost_str:
+            provider_name = get(config, "model", "provider", default="")
+            table.add_row("Session cost", f"{cost_str} ({provider_name})")
+        else:
+            provider_name = get(config, "model", "provider", default="local")
+            table.add_row("Session cost", f"$0.00 ({provider_name})")
+
+        # Tool breakdown
         table.add_row("Total tool calls", str(stats.total_tool_calls))
         if stats.tool_calls:
             for tool_name, count in sorted(stats.tool_calls.items(),
                                             key=lambda x: -x[1]):
                 table.add_row(f"  {tool_name}", str(count))
-        table.add_row("Files read", str(len(stats.files_read)))
-        table.add_row("Files written", str(len(stats.files_written)))
-        table.add_row("Files edited", str(len(stats.files_edited)))
+
+        # Files
+        created = len(stats.files_created) if hasattr(stats, 'files_created') else 0
+        table.add_row("Files",
+                       f"{created} created, "
+                       f"{len(stats.files_read)} read, "
+                       f"{len(stats.files_edited)} edited")
         table.add_row("Commands run", str(stats.commands_run))
-        table.add_row("Input tokens", f"{model.total_input_tokens:,}")
-        table.add_row("Output tokens", f"{model.total_output_tokens:,}")
-        cost = model.estimated_cost
-        if cost > 0:
-            table.add_row("Estimated cost", f"${cost:.4f}")
+
+        # Workers
+        if team_manager:
+            workers = team_manager.workers
+            total = len(workers)
+            if total > 0:
+                completed = sum(1 for w in workers.values() if w.status == "completed")
+                failed = sum(1 for w in workers.values() if w.status == "failed")
+                worker_str = f"{total} spawned, {completed} completed"
+                if failed:
+                    worker_str += f", {failed} failed"
+                table.add_row("Workers", worker_str)
+
         if pinned and pinned.count > 0:
             table.add_row("Pinned files", str(pinned.count))
         console.print(table)
