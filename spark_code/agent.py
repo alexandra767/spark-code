@@ -7,6 +7,10 @@ feeds results back, and repeats until the model gives a final answer.
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from rich.console import Console
@@ -30,6 +34,35 @@ if TYPE_CHECKING:
     from .hooks import HookManager
     from .stats import SessionStats
     from .tool_cache import ToolCache
+
+
+CHECKPOINT_DIR = Path.home() / ".spark" / "checkpoints"
+
+
+def save_checkpoint(path: str, messages: list, cwd: str, provider: str,
+                    model: str, round_count: int, files_created: list):
+    """Save a session checkpoint."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    data = {
+        "messages": messages,
+        "cwd": cwd,
+        "provider": provider,
+        "model": model,
+        "round_count": round_count,
+        "timestamp": datetime.now().isoformat(),
+        "files_created": files_created,
+    }
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def load_checkpoint(path: str) -> dict | None:
+    """Load a session checkpoint. Returns None if not found."""
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
 
 
 class _RepeatDetector:
@@ -271,6 +304,21 @@ class Agent:
 
         if rounds >= self.MAX_TOOL_ROUNDS:
             render_warning(self.console, "Reached maximum tool rounds")
+            try:
+                checkpoint_path = str(CHECKPOINT_DIR / "latest.json")
+                files = list(self.stats.files_created) if self.stats else []
+                save_checkpoint(
+                    checkpoint_path,
+                    self.context.messages,
+                    os.getcwd(),
+                    "", "",
+                    rounds,
+                    files,
+                )
+                from spark_code.ui.output import render_info
+                render_info(self.console, "Checkpoint saved. Use /continue to resume.")
+            except Exception:
+                pass
 
         return full_response
 

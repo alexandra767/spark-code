@@ -258,3 +258,63 @@ class TestBashSideEffects:
     def test_brew_install_detected(self):
         warnings = detect_side_effects("brew install wget")
         assert len(warnings) == 1
+
+
+import json
+import os
+import tempfile
+
+
+class TestCheckpoint:
+    def test_save_checkpoint(self):
+        from spark_code.agent import save_checkpoint
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint_path = os.path.join(tmpdir, "latest.json")
+            messages = [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "hi"},
+            ]
+            save_checkpoint(checkpoint_path, messages, "/tmp/cwd", "ollama",
+                           "qwen3.5:122b", 25, ["file1.py"])
+            assert os.path.exists(checkpoint_path)
+            data = json.loads(open(checkpoint_path).read())
+            assert data["messages"] == messages
+            assert data["cwd"] == "/tmp/cwd"
+            assert data["round_count"] == 25
+
+    def test_load_checkpoint(self):
+        from spark_code.agent import save_checkpoint, load_checkpoint
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint_path = os.path.join(tmpdir, "latest.json")
+            messages = [{"role": "user", "content": "test"}]
+            save_checkpoint(checkpoint_path, messages, "/tmp", "ollama",
+                           "model", 10, [])
+            data = load_checkpoint(checkpoint_path)
+            assert data is not None
+            assert data["messages"] == messages
+
+    def test_load_checkpoint_missing(self):
+        from spark_code.agent import load_checkpoint
+        data = load_checkpoint("/nonexistent/path.json")
+        assert data is None
+
+
+class TestFilesCreatedTracking:
+    def test_stats_has_files_created(self):
+        from spark_code.stats import SessionStats
+        stats = SessionStats()
+        assert hasattr(stats, "files_created")
+        assert isinstance(stats.files_created, set)
+
+    def test_record_new_file(self):
+        from spark_code.stats import SessionStats
+        stats = SessionStats()
+        stats.record_file_created("/tmp/new_file.py")
+        assert "/tmp/new_file.py" in stats.files_created
+
+    def test_record_does_not_duplicate(self):
+        from spark_code.stats import SessionStats
+        stats = SessionStats()
+        stats.record_file_created("/tmp/file.py")
+        stats.record_file_created("/tmp/file.py")
+        assert len(stats.files_created) == 1

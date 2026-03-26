@@ -211,4 +211,16 @@ Steps:
 Be thorough — check multiple naming conventions, related files, tests.""",
         required_tools=["glob", "grep", "read_file"],
     ),
+    Skill(
+        name="continue",
+        description="Resume from the last checkpoint after hitting the tool round limit",
+        prompt="Load the latest checkpoint and continue where you left off.",
+        required_tools=[],
+    ),
+    Skill(
+        name="clean",
+        description="Delete files created during this session",
+        prompt="List files created during this session and offer to delete them.",
+        required_tools=[],
+    ),
 ]
