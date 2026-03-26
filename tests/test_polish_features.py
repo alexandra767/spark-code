@@ -81,12 +81,12 @@ class TestRoundWarnings:
         tools = ToolRegistry()
         tools.register(_NoopTool())
         console = Console(file=io.StringIO(), force_terminal=True)
-        perms = PermissionManager(mode="trust", always_allow=[], console=console)
+        perms = PermissionManager(mode="trust", always_allow=[])
         agent = Agent(model=model, context=context, tools=tools,
                       permissions=perms, console=console)
         agent.MAX_TOOL_ROUNDS = 20
 
-        asyncio.get_event_loop().run_until_complete(agent.run("test"))
+        asyncio.run(agent.run("test"))
 
         messages = [m for m in context.messages if m.get("role") == "system"]
         warning_texts = [m["content"] for m in messages]

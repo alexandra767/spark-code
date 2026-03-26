@@ -14,6 +14,50 @@ class SessionStats:
         self.files_written: set[str] = set()
         self.files_edited: set[str] = set()
         self.commands_run: int = 0
+        self.last_tokens_per_sec: float = 0.0
+        self.input_tokens: int = 0
+        self.output_tokens: int = 0
+        self._cost_input_rate: float = 0.0
+        self._cost_output_rate: float = 0.0
+
+    def record_generation_speed(self, tokens: int, elapsed: float):
+        """Record the speed of the last generation."""
+        if elapsed > 0:
+            self.last_tokens_per_sec = tokens / elapsed
+        else:
+            self.last_tokens_per_sec = 0.0
+
+    def format_speed(self) -> str:
+        """Format speed for display. Empty string if no data."""
+        if self.last_tokens_per_sec > 0:
+            return f"{self.last_tokens_per_sec:.1f} tok/s"
+        return ""
+
+    def set_cost_rates(self, input_rate: float = 0.0, output_rate: float = 0.0):
+        """Set cost per million tokens (input and output)."""
+        self._cost_input_rate = input_rate
+        self._cost_output_rate = output_rate
+
+    def record_token_usage(self, input_tokens: int = 0, output_tokens: int = 0):
+        """Accumulate token counts."""
+        self.input_tokens += input_tokens
+        self.output_tokens += output_tokens
+
+    @property
+    def session_cost(self) -> float:
+        """Calculate session cost in dollars."""
+        input_cost = (self.input_tokens * self._cost_input_rate) / 1_000_000
+        output_cost = (self.output_tokens * self._cost_output_rate) / 1_000_000
+        return input_cost + output_cost
+
+    def format_cost(self) -> str:
+        """Format cost for display. Empty string if zero."""
+        cost = self.session_cost
+        if cost > 0:
+            if cost < 0.01:
+                return f"${cost:.4f}"
+            return f"${cost:.2f}"
+        return ""
 
     def record_tool_call(self, tool_name: str, args: dict):
         """Record a tool execution."""

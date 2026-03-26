@@ -90,6 +90,8 @@ def resolve_provider(config: dict, provider_name: str | None = None) -> dict:
     }
     resolved = config["model"]
     resolved["system_prompt"] = provider_conf.get("system_prompt", "")
+    resolved["cost_per_million_input"] = provider_conf.get("cost_per_million_input", 0)
+    resolved["cost_per_million_output"] = provider_conf.get("cost_per_million_output", 0)
     return config
 
 
