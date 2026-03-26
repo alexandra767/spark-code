@@ -1684,9 +1684,23 @@ async def run_interactive(config: dict, resume_session: str = "",
                   stats=session_stats, on_tool_start=_on_tool_start,
                   tool_cache=tool_cache, hooks=hook_manager)
 
-    # Initialize team system
+    # Initialize team system — optionally use a faster model for workers
     task_store = TaskStore()
-    team_manager = TeamManager(model, tools, console, task_store, stats=session_stats)
+    worker_model_obj = None
+    worker_model_name = get(config, "model", "worker_model", default="")
+    if worker_model_name:
+        worker_endpoint = get(config, "model", "endpoint", default="")
+        worker_model_obj = ModelClient(
+            endpoint=worker_endpoint,
+            model=worker_model_name,
+            temperature=get(config, "model", "temperature", default=0.3),
+            max_tokens=get(config, "model", "max_tokens", default=8192),
+            api_key=get(config, "model", "api_key", default=""),
+            provider=get(config, "model", "provider", default="ollama"),
+        )
+        console.print(f"  [#88c0d0]Workers will use: {worker_model_name}[/#88c0d0]")
+    team_manager = TeamManager(model, tools, console, task_store,
+                               stats=session_stats, worker_model=worker_model_obj)
 
     # Give the lead agent the ability to spawn workers
     spawn_tool = SpawnWorkerTool()

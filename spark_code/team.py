@@ -87,8 +87,9 @@ class TeamManager:
 
     def __init__(self, model: ModelClient, tools: ToolRegistry,
                  console: Console, task_store: TaskStore,
-                 stats=None):
+                 stats=None, worker_model=None):
         self.model = model
+        self.worker_model = worker_model  # separate model for workers (faster)
         self.tools = tools
         self.console = console
         self.task_store = task_store
@@ -208,8 +209,10 @@ class TeamManager:
         # Create a prefixed console wrapper for worker output
         worker_console = _PrefixedConsole(self.console, worker_name)
 
+        # Use worker_model if available (faster model for workers)
+        agent_model = self.worker_model or self.model
         agent = Agent(
-            model=self.model,
+            model=agent_model,
             context=context,
             tools=worker_tools,
             permissions=permissions,
