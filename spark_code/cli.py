@@ -2123,6 +2123,8 @@ async def run_interactive(config: dict, resume_session: str = "",
                         console.print(f"  [#a3be8c]Time to first token: {ttft:.1f}s[/#a3be8c]")
                         console.print(f"  [#a3be8c]Generation speed: {speed:.1f} tok/s[/#a3be8c]")
                         console.print(f"  [#a3be8c]Total: {token_count} tokens in {total_time:.1f}s[/#a3be8c]")
+                    except (KeyboardInterrupt, asyncio.CancelledError):
+                        console.print(f"\n  [#ebcb8b]Benchmark cancelled.[/#ebcb8b]")
                     except Exception as e:
                         console.print(f"  [#bf616a]Benchmark failed: {e}[/#bf616a]")
                     continue
