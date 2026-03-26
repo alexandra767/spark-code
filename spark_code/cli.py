@@ -1627,7 +1627,7 @@ async def run_interactive(config: dict, resume_session: str = "",
 
     # Initialize team system
     task_store = TaskStore()
-    team_manager = TeamManager(model, tools, console, task_store)
+    team_manager = TeamManager(model, tools, console, task_store, stats=session_stats)
 
     # Give the lead agent the ability to spawn workers
     spawn_tool = SpawnWorkerTool()
@@ -2308,6 +2308,7 @@ async def run_interactive(config: dict, resume_session: str = "",
                                             console.print(f"  [#bf616a]Error: {e}[/#bf616a]")
                             else:
                                 console.print("  Cancelled.")
+                    continue
 
                 elif result.startswith("__MODEL_SWITCH__"):
                     provider_name = result[len("__MODEL_SWITCH__"):]

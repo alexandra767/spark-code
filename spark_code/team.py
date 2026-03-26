@@ -85,11 +85,13 @@ class TeamManager:
     """Manages background worker agents with messaging."""
 
     def __init__(self, model: ModelClient, tools: ToolRegistry,
-                 console: Console, task_store: TaskStore):
+                 console: Console, task_store: TaskStore,
+                 stats=None):
         self.model = model
         self.tools = tools
         self.console = console
         self.task_store = task_store
+        self.stats = stats  # shared session stats for file tracking
         self.workers: dict[str, Worker] = {}
         self._counter = 0
         # Lead agent's inbox — messages from workers to "lead"
@@ -312,6 +314,9 @@ class TeamManager:
         import os
         filename = os.path.basename(file_path)
         msg_content = f"[team] {writer_name} wrote {filename} ({line_count} lines)"
+        # Track in shared stats for /clean
+        if self.stats and hasattr(self.stats, 'record_file_created'):
+            self.stats.record_file_created(file_path)
         for w in self.workers.values():
             if w.name != writer_name and w.status == "running":
                 w.inbox.append(Message(
