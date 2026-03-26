@@ -25,7 +25,8 @@ _C_TEXT = "#d8dee9"
 _C_MUTED = "#666666"
 _C_BLUE = "#5e81ac"
 
-MAX_WORKERS = 6
+MAX_WORKERS_LOCAL = 2   # Same GPU — limit contention
+MAX_WORKERS_CLOUD = 6   # Separate model or cloud API — no contention
 WORKER_TIMEOUT = 300  # 5 minutes
 
 WORKER_SYSTEM_PROMPT = """You are a Spark Code worker agent. You have ONE job — complete the task you were given.
@@ -90,6 +91,7 @@ class TeamManager:
                  stats=None, worker_model=None):
         self.model = model
         self.worker_model = worker_model  # separate model for workers (faster)
+        self.max_workers = MAX_WORKERS_CLOUD if worker_model else MAX_WORKERS_LOCAL
         self.tools = tools
         self.console = console
         self.task_store = task_store
@@ -169,9 +171,9 @@ class TeamManager:
                          style=_C_YELLOW))
                 return None
 
-        if self.active_count >= MAX_WORKERS:
+        if self.active_count >= self.max_workers:
             self.console.print(
-                Text(f"  Max workers reached ({MAX_WORKERS}). "
+                Text(f"  Max workers reached ({self.max_workers}). "
                      f"Wait for one to finish or use /team stop.",
                      style=_C_YELLOW))
             return None

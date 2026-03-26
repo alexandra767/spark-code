@@ -10,7 +10,7 @@ class SpawnWorkerTool(Tool):
     description = (
         "Spawn ONE background worker agent for ONE subtask. "
         "Call this tool multiple times (once per worker) to spawn multiple workers. "
-        "Each call creates one worker. Max 6 concurrent workers. "
+        "Each call creates one worker. Max 2 concurrent workers for local models, 6 for cloud. "
         "Do NOT combine multiple tasks into one call."
     )
     is_read_only = False
