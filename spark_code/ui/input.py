@@ -64,6 +64,8 @@ _BUILTIN_COMMANDS: dict[str, str] = {
     "/watch off": "Stop the file watcher",
     "/checkpoint": "Create a git stash checkpoint",
     "/rollback": "Restore from a checkpoint",
+    "/continue": "Resume from last checkpoint",
+    "/clean": "Delete files created this session",
     "/profile": "Benchmark model performance (TTFT, tokens/sec)",
     "/apply": "Apply code from a URL (gist, PR, diff)",
     "/teach": "Define a custom tool (/teach name desc -- command)",

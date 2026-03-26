@@ -44,12 +44,14 @@ from .tools.grep_search import GrepTool
 from .tools.list_dir import ListDirTool
 from .tools.read_file import ReadFileTool
 from .tools.spawn_worker import SpawnWorkerTool
+from .tools.wait_for_workers import WaitForWorkersTool
 from .tools.web_fetch import WebFetchTool
 from .tools.web_search import WebSearchTool
 from .tools.write_file import WriteFileTool
 from .ui.hotkeys import TeamStatusMonitor
 from .ui.input import create_session
 from .ui.theme import get_theme
+from .platform_info import format_platform_prompt
 from .watcher import FileWatcher
 
 
@@ -435,6 +437,8 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
 - `/watch <cmd>` — Auto-run command on file changes (`/watch off` to stop)
 - `/checkpoint` — Create a restorable checkpoint (git stash)
 - `/rollback [N]` — Restore from a checkpoint
+- `/continue` — Resume from last checkpoint
+- `/clean` — Delete files created this session
 - `/apply <url>` — Apply code from a URL (gist, PR, diff)
 
 **Model & Config**
@@ -1454,6 +1458,12 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
     elif command == "/analytics":
         return "__ANALYTICS__"
 
+    elif command == "/continue":
+        return "__CONTINUE__"
+
+    elif command == "/clean":
+        return "__CLEAN__"
+
     # Check skills (skip /plan since we handle it above)
     skill = skills.get(command)
     if skill:
@@ -1554,9 +1564,14 @@ async def run_interactive(config: dict, resume_session: str = "",
         output_rate=get(config, "model", "cost_per_million_output", default=0),
     )
 
+    platform_prompt = format_platform_prompt(os.getcwd())
+    provider_prompt = get(config, "model", "system_prompt", default="")
+
     context = Context(
         system_prompt=system_prompt,
         max_tokens=get(config, "model", "context_window", default=32768),
+        platform_prompt=platform_prompt,
+        provider_prompt=provider_prompt,
     )
     tools = build_tools()
 
@@ -1618,6 +1633,9 @@ async def run_interactive(config: dict, resume_session: str = "",
     spawn_tool = SpawnWorkerTool()
     spawn_tool.set_team_manager(team_manager)
     tools.register(spawn_tool)
+
+    # Register wait_for_workers tool (only useful when team is available)
+    tools.register(WaitForWorkersTool(team=team_manager))
 
     # Resume session if requested
     if resume_session:
@@ -2222,6 +2240,74 @@ async def run_interactive(config: dict, resume_session: str = "",
                             console.print()
                             console.print("  [bold #eceff4]Cache[/bold #eceff4]")
                             console.print(f"    Entries: {cs['entries']}  Hits: {cs['hits']}  Misses: {cs['misses']}  Rate: {cs['hit_rate']}")
+
+                elif result == "__CONTINUE__":
+                    from spark_code.agent import load_checkpoint, CHECKPOINT_DIR
+                    checkpoint_path = str(CHECKPOINT_DIR / "latest.json")
+                    data = load_checkpoint(checkpoint_path)
+                    if not data:
+                        console.print("  [#ebcb8b]No checkpoint found.[/#ebcb8b]")
+                    else:
+                        context.messages = data["messages"]
+                        saved_cwd = data.get("cwd", "")
+                        if saved_cwd and saved_cwd != os.getcwd():
+                            console.print(f"  [#ebcb8b]Note: CWD changed. Checkpoint was in {saved_cwd}[/#ebcb8b]")
+                        context.messages.append({
+                            "role": "system",
+                            "content": f"Session resumed from checkpoint at round {data['round_count']}/{Agent.MAX_TOOL_ROUNDS}. Continue where you left off."
+                        })
+                        console.print(f"  [#a3be8c]Checkpoint restored ({len(data['messages'])} messages). Resuming...[/#a3be8c]")
+                        try:
+                            team_monitor.start()
+                            await _run_with_notify(agent.run_without_user_add())
+                        except KeyboardInterrupt:
+                            console.print("\n[#ebcb8b]Interrupted[/#ebcb8b]")
+                        except Exception as e:
+                            console.print(f"\n[#bf616a]Error: {e}[/#bf616a]")
+                        finally:
+                            team_monitor.stop()
+
+                elif result == "__CLEAN__":
+                    if not session_stats or not session_stats.files_created:
+                        console.print("  [#ebcb8b]No files were created this session.[/#ebcb8b]")
+                    else:
+                        existing = []
+                        for f in sorted(session_stats.files_created):
+                            if os.path.exists(f):
+                                try:
+                                    lines = len(open(f).readlines())
+                                except Exception:
+                                    lines = 0
+                                existing.append((f, lines))
+                        if not existing:
+                            console.print("  [#ebcb8b]All created files have already been deleted.[/#ebcb8b]")
+                        else:
+                            console.print("  [#88c0d0]Files created this session:[/#88c0d0]")
+                            for path, lines in existing:
+                                short = path.replace(os.getcwd() + "/", "")
+                                console.print(f"    {short} ({lines} lines)")
+                            console.print()
+                            answer = await session.prompt_async("  Delete all? [y/N/select] ")
+                            answer = answer.strip().lower()
+                            if answer == "y":
+                                for path, _ in existing:
+                                    try:
+                                        os.remove(path)
+                                        console.print(f"  [#a3be8c]Deleted {os.path.basename(path)}[/#a3be8c]")
+                                    except Exception as e:
+                                        console.print(f"  [#bf616a]Error deleting {path}: {e}[/#bf616a]")
+                            elif answer == "select":
+                                for path, lines in existing:
+                                    short = path.replace(os.getcwd() + "/", "")
+                                    ans = await session.prompt_async(f"  Delete {short}? [y/N] ")
+                                    if ans.strip().lower() == "y":
+                                        try:
+                                            os.remove(path)
+                                            console.print(f"  [#a3be8c]Deleted {os.path.basename(path)}[/#a3be8c]")
+                                        except Exception as e:
+                                            console.print(f"  [#bf616a]Error: {e}[/#bf616a]")
+                            else:
+                                console.print("  Cancelled.")
 
                 elif result.startswith("__MODEL_SWITCH__"):
                     provider_name = result[len("__MODEL_SWITCH__"):]

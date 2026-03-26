@@ -341,6 +341,15 @@ class Agent:
                               "Missing arguments — response may have been truncated")
             return
 
+        # Detect bash side-effects — override auto-allow
+        if tc["name"] == "bash" and tc["arguments"]:
+            from .tools.bash import detect_side_effects
+            side_effect_warnings = detect_side_effects(tc["arguments"].get("command", ""))
+            if side_effect_warnings:
+                # Force permission prompt with warnings
+                warning_text = "\n".join(f"  ⚠ {w}" for w in side_effect_warnings)
+                self.console.print(f"[#ebcb8b]{warning_text}[/#ebcb8b]")
+
         # Show inline diff preview for edit_file before permission check
         if tc["name"] == "edit_file" and self.permissions.mode != "trust":
             try:
@@ -416,6 +425,12 @@ class Agent:
         # Record stats
         if self.stats:
             self.stats.record_tool_call(tc["name"], tc["arguments"])
+
+        # Track file creation for /clean
+        if self.stats and tc["name"] == "write_file" and "Error" not in result:
+            file_path = tc["arguments"].get("file_path", "")
+            if file_path:
+                self.stats.record_file_created(file_path)
 
         # Cache read-only results
         if (self.tool_cache
