@@ -233,7 +233,10 @@ class ModelClient:
 
     async def _stream_request_inner(self, payload: dict) -> AsyncIterator[dict]:
         """Inner streaming request (single attempt)."""
+        import time as _time
         tool_calls_buffer: dict[int, dict] = {}
+        _first_token_time = None
+        _token_count = 0
 
         async with self._client.stream("POST", self.api_url, json=payload) as response:
             if response.status_code != 200:
@@ -258,6 +261,9 @@ class ModelClient:
 
                 # Text content
                 if "content" in delta and delta["content"]:
+                    if _first_token_time is None:
+                        _first_token_time = _time.monotonic()
+                    _token_count += max(1, len(delta["content"].split()))
                     yield {"type": "text", "content": delta["content"]}
 
                 # Tool calls (streamed)
@@ -288,10 +294,11 @@ class ModelClient:
             args = _parse_tool_arguments(tc["arguments"])
             yield {"type": "tool_call", "id": tc["id"], "name": tc["name"], "arguments": args}
 
+        _elapsed = (_time.monotonic() - _first_token_time) if _first_token_time else 0
         yield {"type": "done", "usage": {
             "total_input": self.total_input_tokens,
             "total_output": self.total_output_tokens,
-        }}
+        }, "_speed": {"tokens": _token_count, "elapsed": _elapsed}}
 
     async def _blocking_request(self, payload: dict) -> AsyncIterator[dict]:
         """Handle non-streaming response."""
