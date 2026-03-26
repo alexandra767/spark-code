@@ -438,6 +438,7 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
 - `/checkpoint` — Create a restorable checkpoint (git stash)
 - `/rollback [N]` — Restore from a checkpoint
 - `/continue` — Resume from last checkpoint
+- `/retry` — Re-send the last message
 - `/clean` — Delete files created this session
 - `/apply <url>` — Apply code from a URL (gist, PR, diff)
 
@@ -446,6 +447,7 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
 - `/model` — Show model info / `/model list` / `/model <provider>`
 - `/providers` — Show API providers with signup URLs
 - `/profile` — Benchmark model (TTFT, tokens/sec)
+- `/benchmark` — Measure model speed (TTFT, tok/s)
 - `/mode [ask|auto|trust]` — Switch permission mode
 - `/trust` / `/auto` / `/ask` — Quick mode switch
 - `/yolo` — Toggle agent mode (autonomous + trust all)
@@ -489,10 +491,11 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
         return None
 
     elif command == "/compact":
-        before = context.estimate_tokens()
-        context.compact()
-        after = context.estimate_tokens()
-        console.print(f"[green]Compacted: ~{before:,} → ~{after:,} tokens[/green]")
+        compact_msg = context.compact()
+        if compact_msg:
+            console.print(f"  [#ebcb8b]⚡ {compact_msg}[/#ebcb8b]")
+        else:
+            console.print("[green]Nothing to compact.[/green]")
         return None
 
     elif command == "/config":
@@ -1406,6 +1409,9 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
         # Model performance benchmark
         return "__PROFILE__"
 
+    elif command == "/benchmark":
+        return "__BENCHMARK__"
+
     elif command == "/apply":
         if not args:
             console.print("[#ebcb8b]Usage: /apply <url> — apply code from a URL[/#ebcb8b]")
@@ -1457,6 +1463,9 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
 
     elif command == "/analytics":
         return "__ANALYTICS__"
+
+    elif command == "/retry":
+        return "__RETRY__"
 
     elif command == "/continue":
         return "__CONTINUE__"
@@ -1882,6 +1891,8 @@ async def run_interactive(config: dict, resume_session: str = "",
         finally:
             team_monitor.stop()
 
+    last_user_message = ""
+
     try:
         while True:
             try:
@@ -2034,6 +2045,37 @@ async def run_interactive(config: dict, resume_session: str = "",
                     console.print(f"  [#88c0d0]Output:[/#88c0d0] [#d8dee9]~{int(est_tokens)} tokens ({total_chars} chars)[/#d8dee9]")
                     console.print(f"  [#88c0d0]Speed:[/#88c0d0] [#a3be8c]{tps:.1f} tokens/sec[/#a3be8c]")
                     console.print(f"  [#88c0d0]Model:[/#88c0d0] [#d8dee9]{get(config, 'model', 'name')}[/#d8dee9]")
+
+                elif result == "__BENCHMARK__":
+                    import time as _btime
+                    model_name = get(config, "model", "name", default="unknown")
+                    console.print(f"  [#88c0d0]Benchmarking {model_name}...[/#88c0d0]")
+                    bench_prompt = "Write a Python function that checks if a number is prime."
+                    bench_msgs = [{"role": "user", "content": bench_prompt}]
+                    first_token_time = None
+                    token_count = 0
+                    start = _btime.monotonic()
+                    try:
+                        async for chunk in model.chat(
+                            messages=bench_msgs, tools=[], stream=True
+                        ):
+                            if chunk["type"] == "text":
+                                if first_token_time is None:
+                                    first_token_time = _btime.monotonic()
+                                token_count += max(1, len(chunk["content"].split()))
+                            elif chunk["type"] == "done":
+                                break
+                        end = _btime.monotonic()
+                        ttft = (first_token_time - start) if first_token_time else 0
+                        total_time = end - start
+                        gen_time = (end - first_token_time) if first_token_time else 0
+                        speed = token_count / gen_time if gen_time > 0 else 0
+                        console.print(f"  [#a3be8c]Time to first token: {ttft:.1f}s[/#a3be8c]")
+                        console.print(f"  [#a3be8c]Generation speed: {speed:.1f} tok/s[/#a3be8c]")
+                        console.print(f"  [#a3be8c]Total: {token_count} tokens in {total_time:.1f}s[/#a3be8c]")
+                    except Exception as e:
+                        console.print(f"  [#bf616a]Benchmark failed: {e}[/#bf616a]")
+                    continue
 
                 elif result.startswith("__TEACH__"):
                     teach_args = result[len("__TEACH__"):]
@@ -2383,6 +2425,8 @@ async def run_interactive(config: dict, resume_session: str = "",
                     if pinned_ctx and pinned_ctx not in context.system_prompt:
                         context.system_prompt = context.system_prompt.rstrip() + "\n\n" + pinned_ctx
 
+                last_user_message = user_input
+
                 # Auto-detect error pastes and enhance the prompt
                 if _is_error_paste(user_input):
                     user_input = (
@@ -2440,8 +2484,9 @@ async def run_interactive(config: dict, resume_session: str = "",
 
             # Auto-compact if getting large
             if context.estimate_tokens() > context.max_tokens * 0.8:
-                console.print("[#8899aa]Auto-compacting conversation...[/#8899aa]")
-                context.compact()
+                compact_msg = context.compact()
+                if compact_msg:
+                    console.print(f"  [#ebcb8b]⚡ {compact_msg}[/#ebcb8b]")
 
     finally:
         # Auto-save conversation history with label and cwd
