@@ -1549,6 +1549,10 @@ async def run_interactive(config: dict, resume_session: str = "",
 
     # Initialize session stats
     session_stats = SessionStats()
+    session_stats.set_cost_rates(
+        input_rate=get(config, "model", "cost_per_million_input", default=0),
+        output_rate=get(config, "model", "cost_per_million_output", default=0),
+    )
 
     context = Context(
         system_prompt=system_prompt,
@@ -1657,6 +1661,16 @@ async def run_interactive(config: dict, resume_session: str = "",
             parts.append(("class:bottom-toolbar.context", f"{spacer}Context left until auto-compact: {pct:.0f}%"))
         elif tokens > 0:
             parts.append(("class:bottom-toolbar.context", f"    {tokens:,} tokens"))
+
+        # Tokens/sec from last generation
+        if session_stats:
+            speed_str = session_stats.format_speed()
+            if speed_str:
+                parts.append(("class:bottom-toolbar.info", f"  {speed_str}"))
+
+            cost_str = session_stats.format_cost()
+            if cost_str:
+                parts.append(("class:bottom-toolbar.info", f"  {cost_str}"))
 
         return parts
 

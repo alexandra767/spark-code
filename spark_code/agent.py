@@ -189,7 +189,16 @@ class Agent:
                         tool_calls.append(chunk)
 
                     elif chunk["type"] == "done":
-                        pass
+                        usage = chunk.get("usage", {})
+                        if self.stats and usage:
+                            self.stats.record_token_usage(
+                                input_tokens=usage.get("prompt_tokens", 0),
+                                output_tokens=usage.get("completion_tokens", 0),
+                            )
+                        if self.stats and "_speed" in chunk:
+                            speed = chunk["_speed"]
+                            self.stats.record_generation_speed(
+                                speed["tokens"], speed["elapsed"])
             except asyncio.CancelledError:
                 self._cancelled = True
 
