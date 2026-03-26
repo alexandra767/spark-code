@@ -426,3 +426,45 @@ class TestWorkerTimeout:
         from spark_code.team import WORKER_TIMEOUT
         assert WORKER_TIMEOUT > 0
         assert WORKER_TIMEOUT == 300
+
+
+class TestWorkerFileSummary:
+    def test_team_tracks_file_changes(self):
+        import io
+        from rich.console import Console
+        from spark_code.tools.base import ToolRegistry
+        from spark_code.task_store import TaskStore
+        from spark_code.team import TeamManager
+        console = Console(file=io.StringIO(), force_terminal=True)
+        team = TeamManager(model=None, tools=ToolRegistry(),
+                          console=console, task_store=TaskStore())
+        assert hasattr(team, 'files_changed')
+        assert isinstance(team.files_changed, list)
+
+    def test_notify_records_file_change(self):
+        import io
+        from rich.console import Console
+        from spark_code.tools.base import ToolRegistry
+        from spark_code.task_store import TaskStore
+        from spark_code.team import TeamManager
+        console = Console(file=io.StringIO(), force_terminal=True)
+        team = TeamManager(model=None, tools=ToolRegistry(),
+                          console=console, task_store=TaskStore())
+        team.notify_file_written("worker-1", "/tmp/test.py", 50)
+        assert len(team.files_changed) == 1
+        assert team.files_changed[0]["path"] == "/tmp/test.py"
+
+    def test_format_file_summary(self):
+        import io
+        from rich.console import Console
+        from spark_code.tools.base import ToolRegistry
+        from spark_code.task_store import TaskStore
+        from spark_code.team import TeamManager
+        console = Console(file=io.StringIO(), force_terminal=True)
+        team = TeamManager(model=None, tools=ToolRegistry(),
+                          console=console, task_store=TaskStore())
+        team.notify_file_written("worker-1", "/tmp/foo.py", 29)
+        team.notify_file_written("worker-2", "/tmp/bar.py", 46)
+        summary = team.format_file_summary()
+        assert "foo.py" in summary
+        assert "bar.py" in summary

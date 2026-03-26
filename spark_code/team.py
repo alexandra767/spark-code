@@ -95,6 +95,7 @@ class TeamManager:
         self.stats = stats  # shared session stats for file tracking
         self.workers: dict[str, Worker] = {}
         self._counter = 0
+        self.files_changed: list[dict] = []
         # Lead agent's inbox — messages from workers to "lead"
         self.lead_inbox: deque[Message] = deque()
 
@@ -335,6 +336,11 @@ class TeamManager:
         # Track in shared stats for /clean
         if self.stats and hasattr(self.stats, 'record_file_created'):
             self.stats.record_file_created(file_path)
+        self.files_changed.append({
+            "path": file_path,
+            "worker": writer_name,
+            "lines": line_count,
+        })
         for w in self.workers.values():
             if w.name != writer_name and w.status == "running":
                 w.inbox.append(Message(
@@ -342,6 +348,17 @@ class TeamManager:
                     to_name=w.name,
                     content=msg_content,
                 ))
+
+    def format_file_summary(self) -> str:
+        """Format a summary of files changed by workers."""
+        if not self.files_changed:
+            return ""
+        import os
+        lines = ["  Worker File Summary:"]
+        for fc in self.files_changed:
+            filename = os.path.basename(fc["path"])
+            lines.append(f"    + {filename} ({fc['lines']} lines, by {fc['worker']})")
+        return "\n".join(lines)
 
     def get_worker(self, worker_id: str) -> Worker | None:
         return self.workers.get(worker_id)

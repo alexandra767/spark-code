@@ -73,4 +73,9 @@ class WaitForWorkersTool(Tool):
             names_str = ", ".join(w.name for w in still_running)
             lines.append(f"\nTimeout reached. Still running: {names_str}")
 
+        # Append file change summary
+        if self._team and self._team.files_changed:
+            lines.append("")
+            lines.append(self._team.format_file_summary())
+
         return "\n".join(lines)
