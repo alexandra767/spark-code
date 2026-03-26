@@ -1731,15 +1731,7 @@ async def run_interactive(config: dict, resume_session: str = "",
         else:
             parts.append(("class:bottom-toolbar.info", ""))
 
-        # Context percentage
-        if max_tok > 0 and tokens > 0:
-            pct = max(0, 100 - (tokens / max_tok * 100))
-            spacer = " " * 40
-            parts.append(("class:bottom-toolbar.context", f"{spacer}Context left until auto-compact: {pct:.0f}%"))
-        elif tokens > 0:
-            parts.append(("class:bottom-toolbar.context", f"    {tokens:,} tokens"))
-
-        # Tokens/sec from last generation
+        # Tokens/sec and cost — right after turns
         if session_stats:
             speed_str = session_stats.format_speed()
             if speed_str:
@@ -1748,6 +1740,14 @@ async def run_interactive(config: dict, resume_session: str = "",
             cost_str = session_stats.format_cost()
             if cost_str:
                 parts.append(("class:bottom-toolbar.info", f"  {cost_str}"))
+
+        # Context percentage (right side)
+        if max_tok > 0 and tokens > 0:
+            pct = max(0, 100 - (tokens / max_tok * 100))
+            spacer = " " * 10
+            parts.append(("class:bottom-toolbar.context", f"{spacer}Context: {pct:.0f}%"))
+        elif tokens > 0:
+            parts.append(("class:bottom-toolbar.context", f"    {tokens:,} tokens"))
 
         return parts
 
