@@ -361,3 +361,68 @@ class TestGenerationTimer:
         renderer.start()
         _time.sleep(0.1)
         assert renderer.elapsed > 0.05
+
+
+import asyncio
+from spark_code.tools.edit_file import EditFileTool
+
+
+class TestEditConfidence:
+    def test_not_found_shows_closest_match(self):
+        import tempfile, os
+        tool = EditFileTool()
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, dir='/tmp') as f:
+            f.write("def hello():\n    print('hello world')\n    return True\n")
+            f.flush()
+            path = f.name
+        try:
+            result = asyncio.run(tool.execute(
+                file_path=path,
+                old_string="def hello():\n    print('hello wrld')\n    return True\n",
+                new_string="replaced",
+            ))
+            assert "closest match" in result.lower() or "similar" in result.lower()
+            assert "hello" in result
+        finally:
+            os.unlink(path)
+
+    def test_not_found_no_match_shows_basic_error(self):
+        import tempfile, os
+        tool = EditFileTool()
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, dir='/tmp') as f:
+            f.write("completely different content here\n")
+            f.flush()
+            path = f.name
+        try:
+            result = asyncio.run(tool.execute(
+                file_path=path,
+                old_string="this string does not exist anywhere at all in the file whatsoever xyz abc 123",
+                new_string="replaced",
+            ))
+            assert "not found" in result.lower()
+        finally:
+            os.unlink(path)
+
+    def test_exact_match_still_works(self):
+        import tempfile, os
+        tool = EditFileTool()
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, dir='/tmp') as f:
+            f.write("line one\nline two\nline three\n")
+            f.flush()
+            path = f.name
+        try:
+            result = asyncio.run(tool.execute(
+                file_path=path,
+                old_string="line two",
+                new_string="line TWO",
+            ))
+            assert "successfully" in result.lower()
+        finally:
+            os.unlink(path)
+
+
+class TestWorkerTimeout:
+    def test_worker_timeout_constant_exists(self):
+        from spark_code.team import WORKER_TIMEOUT
+        assert WORKER_TIMEOUT > 0
+        assert WORKER_TIMEOUT == 300

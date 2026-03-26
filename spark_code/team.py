@@ -26,6 +26,7 @@ _C_MUTED = "#666666"
 _C_BLUE = "#5e81ac"
 
 MAX_WORKERS = 6
+WORKER_TIMEOUT = 300  # 5 minutes
 
 WORKER_SYSTEM_PROMPT = """You are a Spark Code worker agent running in the background.
 You are completing a specific task assigned by the lead agent.
@@ -237,7 +238,10 @@ class TeamManager:
     async def _run_worker(self, worker: Worker, task_id: str):
         """Run a worker agent to completion."""
         try:
-            result = await worker.agent.run(worker.prompt)
+            result = await asyncio.wait_for(
+                worker.agent.run(worker.prompt),
+                timeout=WORKER_TIMEOUT
+            )
             worker.status = "completed"
             worker.result = result or "(completed with no text output)"
 
@@ -254,6 +258,20 @@ class TeamManager:
 
             self.console.print(
                 Text(f"  [{worker.name}] \u2713 Completed", style=_C_GREEN))
+
+        except asyncio.TimeoutError:
+            worker.status = "failed"
+            worker.result = f"Timed out after {WORKER_TIMEOUT}s"
+            self.task_store.update(task_id, status="failed",
+                                   result=worker.result)
+            self.lead_inbox.append(Message(
+                from_name=worker.name,
+                to_name="lead",
+                content=f"[team] {worker.name} timed out after {WORKER_TIMEOUT}s"
+            ))
+            self.console.print(
+                Text(f"  [{worker.name}] \u2717 Timed out ({WORKER_TIMEOUT}s)",
+                     style=_C_RED))
 
         except asyncio.CancelledError:
             worker.status = "failed"
