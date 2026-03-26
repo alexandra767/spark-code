@@ -397,6 +397,7 @@ class StreamingRenderer:
         self._last_render: float = 0.0
         self._live_mode = live_mode
         self._start_time: float = 0.0
+        self._spinner: Spinner | None = None
 
     @property
     def elapsed(self) -> float:
@@ -409,26 +410,24 @@ class StreamingRenderer:
         self._start_time = time.monotonic()
         if not self._live_mode:
             return
+        self._spinner = Spinner("dots", text=Text(" Generating...", style=f"bold {_C_TOOL}"))
         self._live = Live(
             console=self._console,
-            refresh_per_second=4,
+            refresh_per_second=8,
             transient=True,  # Clear on stop — prevents duplication
             get_renderable=self._get_renderable,
         )
         self._live.start()
 
-    def _make_spinner(self):
-        """Create spinner with current elapsed time."""
-        elapsed = self.elapsed
-        if elapsed > 0.5:
-            return Spinner("dots", text=Text(f" Generating... ({elapsed:.1f}s)", style=f"bold {_C_TOOL}"))
-        return Spinner("dots", text=Text(" Generating...", style=f"bold {_C_TOOL}"))
-
     def _get_renderable(self):
         """Called by Live on each refresh cycle."""
         full = "".join(self._buffer)
         if not full.strip():
-            return self._make_spinner()
+            # Update spinner text with elapsed time (reuse same Spinner for animation)
+            elapsed = self.elapsed
+            if elapsed > 0.5:
+                self._spinner.update(text=Text(f" Generating... ({elapsed:.1f}s)", style=f"bold {_C_TOOL}"))
+            return self._spinner
         try:
             return Markdown(full, code_theme="nord-darker")
         except Exception:
