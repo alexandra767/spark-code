@@ -10,7 +10,7 @@ class SpawnWorkerTool(Tool):
     description = (
         "Spawn ONE background worker agent for ONE subtask. "
         "Call this tool multiple times (once per worker) to spawn multiple workers. "
-        "Each call creates one worker. Max 2 concurrent workers for local models, 6 for cloud. "
+        "Each call creates one worker. Excess workers auto-queue and start when a slot opens. "
         "Do NOT combine multiple tasks into one call."
     )
     is_read_only = False
@@ -83,7 +83,16 @@ class SpawnWorkerTool(Tool):
 
         worker = await self._team_manager.spawn(task, name=name)
         if not worker:
-            return "Error: Could not spawn worker (max workers reached)."
+            # Worker was queued (not rejected) — check if it's in the queue
+            queue_size = len(self._team_manager._spawn_queue)
+            if queue_size > 0:
+                worker_name = name or "worker"
+                return (
+                    f"Worker '{worker_name}' queued ({queue_size} in queue).\n"
+                    f"Task: {task}\n"
+                    f"It will start automatically when a running worker finishes."
+                )
+            return "Error: Could not spawn worker."
 
         return (
             f"Worker '{worker.name}' (#{worker.id}) spawned and running.\n"

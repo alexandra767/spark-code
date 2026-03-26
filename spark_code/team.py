@@ -99,6 +99,7 @@ class TeamManager:
         self.workers: dict[str, Worker] = {}
         self._counter = 0
         self.files_changed: list[dict] = []
+        self._spawn_queue: deque[tuple[str, str]] = deque()  # (prompt, name) waiting to spawn
         # Lead agent's inbox — messages from workers to "lead"
         self.lead_inbox: deque[Message] = deque()
 
@@ -172,10 +173,13 @@ class TeamManager:
                 return None
 
         if self.active_count >= self.max_workers:
+            # Queue the worker instead of rejecting
+            worker_name = name or f"worker-{self._counter + 1}"
+            self._spawn_queue.append((prompt, worker_name))
             self.console.print(
-                Text(f"  Max workers reached ({self.max_workers}). "
-                     f"Wait for one to finish or use /team stop.",
-                     style=_C_YELLOW))
+                Text(f"  [{worker_name}] Queued — will start when a slot opens "
+                     f"({len(self._spawn_queue)} in queue)",
+                     style=_C_MUTED))
             return None
 
         self._counter += 1
@@ -292,6 +296,20 @@ class TeamManager:
             self.task_store.update(task_id, status="failed", result=str(e)[:500])
             self.console.print(
                 Text(f"  [{worker.name}] \u2717 Failed: {e}", style=_C_RED))
+
+        # Auto-spawn next queued worker if there's a slot
+        await self._drain_queue()
+
+    async def _drain_queue(self):
+        """Spawn queued workers as slots become available."""
+        while self._spawn_queue and self.active_count < self.max_workers:
+            prompt, name = self._spawn_queue.popleft()
+            remaining = len(self._spawn_queue)
+            self.console.print(
+                Text(f"  [{name}] Starting from queue"
+                     + (f" ({remaining} still queued)" if remaining else ""),
+                     style=_C_TOOL))
+            await self.spawn(prompt, name)
 
     async def stop(self, worker_id: str) -> bool:
         """Stop a specific worker."""
