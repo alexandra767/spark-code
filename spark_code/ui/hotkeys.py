@@ -118,7 +118,10 @@ class TeamStatusMonitor:
         parts = []
         for w in workers:
             if w["status"] == "running":
-                parts.append(f"[#ebcb8b]⟳ {w['name']}[/#ebcb8b]")
+                label = f"⟳ {w['name']}"
+                if w.get("current_tool"):
+                    label += f" [{w['current_tool']}]"
+                parts.append(f"[#ebcb8b]{label}[/#ebcb8b]")
             elif w["status"] == "completed":
                 parts.append(f"[#a3be8c]✓ {w['name']}[/#a3be8c]")
             else:
@@ -158,7 +161,10 @@ class TeamStatusMonitor:
         parts = []
         for w in workers:
             if w["status"] == "running":
-                parts.append(f"[#ebcb8b]⟳ {w['name']}[/#ebcb8b]")
+                label = f"⟳ {w['name']}"
+                if w.get("current_tool"):
+                    label += f" [{w['current_tool']}]"
+                parts.append(f"[#ebcb8b]{label}[/#ebcb8b]")
             elif w["status"] == "completed":
                 parts.append(f"[#a3be8c]✓ {w['name']}[/#a3be8c]")
             else:

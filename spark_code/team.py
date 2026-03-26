@@ -78,6 +78,7 @@ class Worker:
     asyncio_task: asyncio.Task | None = None
     inbox: deque = field(default_factory=deque)
     context_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    current_tool: str = ""
 
 
 class TeamManager:
@@ -243,6 +244,12 @@ class TeamManager:
                 result=worker.result[:500],
             )
 
+            self.lead_inbox.append(Message(
+                from_name=worker.name,
+                to_name="lead",
+                content=f"[team] {worker.name} completed: {worker.result[:200]}"
+            ))
+
             self.console.print(
                 Text(f"  [{worker.name}] \u2713 Completed", style=_C_GREEN))
 
@@ -296,8 +303,22 @@ class TeamManager:
                 "status": w.status,
                 "prompt": w.prompt,
                 "result": w.result,
+                "current_tool": w.current_tool,
             })
         return result
+
+    def notify_file_written(self, writer_name: str, file_path: str, line_count: int):
+        """Broadcast file write notification to all other running workers."""
+        import os
+        filename = os.path.basename(file_path)
+        msg_content = f"[team] {writer_name} wrote {filename} ({line_count} lines)"
+        for w in self.workers.values():
+            if w.name != writer_name and w.status == "running":
+                w.inbox.append(Message(
+                    from_name="team",
+                    to_name=w.name,
+                    content=msg_content,
+                ))
 
     def get_worker(self, worker_id: str) -> Worker | None:
         return self.workers.get(worker_id)
