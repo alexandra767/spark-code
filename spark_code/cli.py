@@ -2283,6 +2283,22 @@ async def run_interactive(config: dict, resume_session: str = "",
                             console.print("  [bold #eceff4]Cache[/bold #eceff4]")
                             console.print(f"    Entries: {cs['entries']}  Hits: {cs['hits']}  Misses: {cs['misses']}  Rate: {cs['hit_rate']}")
 
+                elif result == "__RETRY__":
+                    if not last_user_message:
+                        console.print("  [#ebcb8b]No previous message to retry.[/#ebcb8b]")
+                    else:
+                        console.print(f"  [#88c0d0]Retrying: {last_user_message[:60]}...[/#88c0d0]")
+                        try:
+                            team_monitor.start()
+                            await _run_with_notify(agent.run(last_user_message))
+                        except KeyboardInterrupt:
+                            console.print("\n[#ebcb8b]Interrupted[/#ebcb8b]")
+                        except Exception as e:
+                            console.print(f"\n[#bf616a]Error: {e}[/#bf616a]")
+                        finally:
+                            team_monitor.stop()
+                    continue
+
                 elif result == "__CONTINUE__":
                     from spark_code.agent import load_checkpoint, CHECKPOINT_DIR
                     checkpoint_path = str(CHECKPOINT_DIR / "latest.json")
