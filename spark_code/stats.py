@@ -19,6 +19,7 @@ class SessionStats:
         self.output_tokens: int = 0
         self._cost_input_rate: float = 0.0
         self._cost_output_rate: float = 0.0
+        self.files_created: set[str] = set()
 
     def record_generation_speed(self, tokens: int, elapsed: float):
         """Record the speed of the last generation."""
@@ -77,6 +78,10 @@ class SessionStats:
                 self.files_edited.add(path)
         elif tool_name == "bash":
             self.commands_run += 1
+
+    def record_file_created(self, path: str):
+        """Record a newly created file (not an edit of existing)."""
+        self.files_created.add(path)
 
     @property
     def elapsed(self) -> float:
