@@ -88,6 +88,8 @@ def resolve_provider(config: dict, provider_name: str | None = None) -> dict:
         "api_key": provider_conf.get("api_key", ""),
         "provider": name,
     }
+    resolved = config["model"]
+    resolved["system_prompt"] = provider_conf.get("system_prompt", "")
     return config
 
 

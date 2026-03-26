@@ -131,8 +131,11 @@ Do NOT spawn workers for:
 class Context:
     """Manages conversation history and context window."""
 
-    def __init__(self, system_prompt: str = SYSTEM_PROMPT, max_tokens: int = 32768):
+    def __init__(self, system_prompt: str = SYSTEM_PROMPT, max_tokens: int = 32768,
+                 platform_prompt: str = "", provider_prompt: str = ""):
         self.system_prompt = system_prompt
+        self.platform_prompt = platform_prompt
+        self.provider_prompt = provider_prompt
         self.max_tokens = max_tokens
         self.messages: list[dict] = []
         self.turn_count = 0
@@ -191,8 +194,15 @@ class Context:
         })
 
     def get_messages(self) -> list[dict]:
-        """Get full message list with system prompt."""
-        return [{"role": "system", "content": self.system_prompt}] + self.messages
+        """Return messages with system prompt prepended."""
+        parts = []
+        if self.platform_prompt:
+            parts.append(self.platform_prompt)
+        if self.provider_prompt:
+            parts.append(self.provider_prompt)
+        parts.append(self.system_prompt)
+        combined = "\n\n".join(parts)
+        return [{"role": "system", "content": combined}] + self.messages
 
     def compact(self, keep_recent: int = 6):
         """Compact conversation with structured summaries.
