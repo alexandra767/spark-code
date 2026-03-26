@@ -2,8 +2,29 @@
 
 import asyncio
 import os
+import re
 
 from .base import Tool
+
+SIDE_EFFECT_PATTERNS = [
+    (r'\bpip\s+install\b', "Installs packages into the active Python environment"),
+    (r'\bnpm\s+install\b', "Modifies node_modules and package-lock.json"),
+    (r'\brm\s', "Deletes files or directories"),
+    (r'\bgit\s+(push|reset|checkout)\b', "Modifies git state"),
+    (r'\bbrew\s+install\b', "Installs system-level packages"),
+    (r'\bcurl\b.*\|\s*(bash|sh)\b', "Pipes remote script to shell"),
+    (r'\bsudo\b', "Runs with elevated privileges"),
+    (r'\bdocker\s+(rm|rmi|stop|kill)\b', "Modifies Docker containers/images"),
+]
+
+
+def detect_side_effects(command: str) -> list[str]:
+    """Check a command for known side-effect patterns. Returns list of warnings."""
+    warnings = []
+    for pattern, description in SIDE_EFFECT_PATTERNS:
+        if re.search(pattern, command):
+            warnings.append(description)
+    return warnings
 
 
 class BashTool(Tool):
