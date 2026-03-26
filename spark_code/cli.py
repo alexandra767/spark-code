@@ -55,6 +55,18 @@ from .platform_info import format_platform_prompt
 from .watcher import FileWatcher
 
 
+async def _warmup_model(model):
+    """Send a tiny request to force model into VRAM."""
+    try:
+        async for _ in model.chat(
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[], stream=True
+        ):
+            break  # One chunk confirms model loaded
+    except Exception:
+        pass  # Silent — don't block startup
+
+
 def _copy_to_clipboard(text: str) -> bool:
     """Copy text to system clipboard. Returns True on success."""
     try:
@@ -1556,6 +1568,8 @@ async def run_interactive(config: dict, resume_session: str = "",
         ok, msg = await model.ping()
         if ok:
             console.print(f"  [#a3be8c]{msg}[/#a3be8c]")
+            # Preload model into VRAM in background
+            asyncio.create_task(_warmup_model(model))
         else:
             console.print(f"  [#ebcb8b]{msg}[/#ebcb8b]")
             console.print("  [#8899aa]Session will start anyway — requests may fail until server is available[/#8899aa]")
