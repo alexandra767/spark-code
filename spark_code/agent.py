@@ -139,6 +139,19 @@ class Agent:
         while rounds < self.MAX_TOOL_ROUNDS:
             rounds += 1
 
+            # Inject round warnings as the limit approaches
+            remaining = self.MAX_TOOL_ROUNDS - rounds
+            if remaining == 15:
+                self.context.messages.append({
+                    "role": "system",
+                    "content": "You have 15 tool rounds remaining. Begin wrapping up — summarize progress and finish current work."
+                })
+            elif remaining == 5:
+                self.context.messages.append({
+                    "role": "system",
+                    "content": "5 tool rounds remaining. Finish immediately."
+                })
+
             # Collect response from model
             text_parts = []
             tool_calls = []
