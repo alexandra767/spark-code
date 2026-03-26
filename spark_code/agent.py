@@ -88,7 +88,7 @@ class _RepeatDetector:
 class Agent:
     """The agent loop that connects the model to tools."""
 
-    MAX_TOOL_ROUNDS = 25  # Safety limit
+    MAX_TOOL_ROUNDS = 75  # Safety limit
 
     def __init__(self, model: ModelClient, context: Context,
                  tools: ToolRegistry, permissions: PermissionManager,

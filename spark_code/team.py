@@ -25,7 +25,7 @@ _C_TEXT = "#d8dee9"
 _C_MUTED = "#666666"
 _C_BLUE = "#5e81ac"
 
-MAX_WORKERS = 3
+MAX_WORKERS = 6
 
 WORKER_SYSTEM_PROMPT = """You are a Spark Code worker agent running in the background.
 You are completing a specific task assigned by the lead agent.
@@ -153,6 +153,16 @@ class TeamManager:
 
     async def spawn(self, prompt: str, name: str = "") -> Worker | None:
         """Spawn a new worker agent with the given task."""
+        # Reject duplicate names if that worker is still running
+        if name:
+            existing = self.get_worker(name)
+            if existing and existing.status == "running":
+                self.console.print(
+                    Text(f"  Worker '{name}' is already running. "
+                         f"Use a different name or wait for it to finish.",
+                         style=_C_YELLOW))
+                return None
+
         if self.active_count >= MAX_WORKERS:
             self.console.print(
                 Text(f"  Max workers reached ({MAX_WORKERS}). "
