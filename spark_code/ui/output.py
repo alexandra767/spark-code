@@ -410,12 +410,29 @@ class StreamingRenderer:
         if not self._live_mode:
             return
         self._live = Live(
-            Spinner("dots", text=Text(" Generating...", style=f"bold {_C_TOOL}")),
             console=self._console,
-            refresh_per_second=8,
+            refresh_per_second=4,
             transient=True,  # Clear on stop — prevents duplication
+            get_renderable=self._get_renderable,
         )
         self._live.start()
+
+    def _make_spinner(self):
+        """Create spinner with current elapsed time."""
+        elapsed = self.elapsed
+        if elapsed > 0.5:
+            return Spinner("dots", text=Text(f" Generating... ({elapsed:.1f}s)", style=f"bold {_C_TOOL}"))
+        return Spinner("dots", text=Text(" Generating...", style=f"bold {_C_TOOL}"))
+
+    def _get_renderable(self):
+        """Called by Live on each refresh cycle."""
+        full = "".join(self._buffer)
+        if not full.strip():
+            return self._make_spinner()
+        try:
+            return Markdown(full, code_theme="nord-darker")
+        except Exception:
+            return Text(full)
 
     def feed(self, chunk: str):
         """Feed a text chunk — updates live markdown display."""
@@ -430,22 +447,12 @@ class StreamingRenderer:
             self._render()
 
     def _render(self):
-        """Re-render the full buffer as markdown."""
+        """Force a re-render of the live display."""
         if not self._live:
             return
-        full = "".join(self._buffer)
-        if not full.strip():
-            # Still waiting for text — show timer in spinner
-            elapsed = self.elapsed
-            if elapsed > 0.5:  # Only show after half second
-                self._live.update(
-                    Spinner("dots", text=Text(f" Generating... ({elapsed:.1f}s)", style=f"bold {_C_TOOL}"))
-                )
-            return
-        try:
-            self._live.update(Markdown(full, code_theme="nord-darker"))
-        except Exception:
-            self._live.update(Text(full))
+        # Live auto-refreshes via _get_renderable, but we force it
+        # on feed() to ensure text appears immediately
+        self._live.refresh()
 
     def stop(self):
         """Stop the live display immediately (e.g. before tool calls)."""
