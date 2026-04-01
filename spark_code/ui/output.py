@@ -433,6 +433,16 @@ class StreamingRenderer:
         except Exception:
             return Text(full)
 
+    def feed_status(self, status_text: str):
+        """Show a status message (e.g. 'Thinking...') in the spinner."""
+        if self._spinner and self._live_mode:
+            self._spinner.update(text=Text(status_text, style=f"bold {_C_TOOL}"))
+            self._render()
+
+    def clear_status(self):
+        """Clear the status message back to default."""
+        pass  # The next feed() call will replace the spinner with content
+
     def feed(self, chunk: str):
         """Feed a text chunk — updates live markdown display."""
         if self._flushed:

@@ -92,12 +92,18 @@ _COST_TABLE = {
     "gemini": {"input": 0.00001875, "output": 0.000075},  # Gemini 2.0 Flash
     "openai": {"input": 0.0005, "output": 0.0015},  # GPT-4o-mini
     "ollama": {"input": 0.0, "output": 0.0},  # Local = free
+    "sglang": {"input": 0.0, "output": 0.0},  # Local = free
 }
 
 # Known provider configurations
 PROVIDERS = {
     "ollama": {
         "base_url": "http://localhost:11434",
+        "api_path": "/v1/chat/completions",
+        "needs_key": False,
+    },
+    "sglang": {
+        "base_url": "http://192.168.1.187:30000",
         "api_path": "/v1/chat/completions",
         "needs_key": False,
     },
@@ -237,6 +243,10 @@ class ModelClient:
         tool_calls_buffer: dict[int, dict] = {}
         _first_token_time = None
         _token_count = 0
+        # Track <think>...</think> blocks so thinking tokens are hidden
+        _in_think = True  # Qwen3.5 starts in think mode (chat template adds <think>)
+        _think_buf = ""
+        _think_notified = False  # Whether we've sent a thinking indicator
 
         async with self._client.stream("POST", self.api_url, json=payload) as response:
             if response.status_code != 200:
@@ -259,12 +269,41 @@ class ModelClient:
                     continue
                 delta = chunk.get("choices", [{}])[0].get("delta", {})
 
-                # Text content
+                # Text content — filter <think>...</think> blocks
                 if "content" in delta and delta["content"]:
-                    if _first_token_time is None:
-                        _first_token_time = _time.monotonic()
-                    _token_count += max(1, len(delta["content"].split()))
-                    yield {"type": "text", "content": delta["content"]}
+                    _think_buf += delta["content"]
+                    visible = ""
+                    while _think_buf:
+                        if _in_think:
+                            # Emit a one-time thinking indicator so user knows model is active
+                            if not _think_notified:
+                                _think_notified = True
+                                yield {"type": "thinking_start"}
+                            end = _think_buf.find("</think>")
+                            if end != -1:
+                                _think_buf = _think_buf[end + 8:]
+                                _in_think = False
+                                yield {"type": "thinking_end"}
+                                continue
+                            else:
+                                _think_buf = ""
+                                break
+                        else:
+                            start = _think_buf.find("<think>")
+                            if start != -1:
+                                visible += _think_buf[:start]
+                                _think_buf = _think_buf[start + 7:]
+                                _in_think = True
+                                continue
+                            else:
+                                visible += _think_buf
+                                _think_buf = ""
+                                break
+                    if visible:
+                        if _first_token_time is None:
+                            _first_token_time = _time.monotonic()
+                        _token_count += max(1, len(visible.split()))
+                        yield {"type": "text", "content": visible}
 
                 # Tool calls (streamed)
                 if "tool_calls" in delta:

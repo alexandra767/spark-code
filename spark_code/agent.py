@@ -209,7 +209,13 @@ class Agent:
                     if self._cancelled:
                         break
 
-                    if chunk["type"] == "text":
+                    if chunk["type"] == "thinking_start":
+                        renderer.feed_status("  Thinking...")
+
+                    elif chunk["type"] == "thinking_end":
+                        renderer.clear_status()
+
+                    elif chunk["type"] == "text":
                         text_parts.append(chunk["content"])
                         renderer.feed(chunk["content"])
 
