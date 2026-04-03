@@ -1108,8 +1108,8 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
                 "- ## Parallelization — which steps can run in parallel\n"
                 "- ## Files — files to be modified or created\n"
                 "- ## Risks — any risks or considerations\n\n"
-                "You may also use the rag_search tool to find additional documentation if the "
-                "pre-researched material doesn't cover everything you need.\n\n"
+                "Do NOT use rag_search — the documentation above is already pre-researched for you. "
+                "Focus on exploring the codebase and writing the plan.\n\n"
                 "After writing projectplan.md, tell the user: Review with /projectplan show, then /projectplan go to execute."
             )
             return create_plan_prompt

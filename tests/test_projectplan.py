@@ -107,14 +107,14 @@ def test_format_references_deduplicates():
     assert output.count("[Ref") == 2  # deduplicated to 2
 
 
-def test_format_references_caps_at_eight():
+def test_format_references_caps_at_five():
     raw_results = [
         {"source": f"doc{i}.pdf", "text": f"Content {i}.", "citation": {"page": i}, "score": 0.9 - i * 0.05}
         for i in range(12)
     ]
     output = format_references(raw_results)
-    assert "[Ref 8]" in output
-    assert "[Ref 9]" not in output
+    assert "[Ref 5]" in output
+    assert "[Ref 6]" not in output
 
 
 def test_format_references_empty():

@@ -92,7 +92,7 @@ def build_rag_queries(keywords: list[str], project_type: str,
 
 
 RAG_SERVICE_URL = os.environ.get("RAG_SERVICE_URL", "http://192.168.1.187:8010")
-MAX_REFS = 8
+MAX_REFS = 5
 
 
 def format_references(raw_results: list[dict]) -> str:
@@ -152,7 +152,7 @@ def fetch_rag_context(keywords: list[str], project_type: str,
                 payload = {
                     "query": query,
                     "collection": "claude_documents",
-                    "n_results": 5,
+                    "n_results": 3,
                     "search_type": "hybrid",
                     "user_role": "owner",
                 }
