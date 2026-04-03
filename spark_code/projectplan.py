@@ -56,3 +56,81 @@ def build_rag_queries(keywords: list[str], project_type: str) -> list[str]:
             kw_str,
             f"{kw_str} best practices",
         ]
+
+
+RAG_SERVICE_URL = os.environ.get("RAG_SERVICE_URL", "http://192.168.1.187:8010")
+MAX_REFS = 8
+
+
+def format_references(raw_results: list[dict]) -> str:
+    """Format RAG results as numbered [Ref N] blocks. Deduplicates and caps at MAX_REFS."""
+    if not raw_results:
+        return ""
+
+    # Deduplicate by (source, page) keeping highest score
+    seen = {}
+    for r in raw_results:
+        source = r.get("source", "unknown")
+        page = r.get("citation", {}).get("page", "")
+        key = (source, str(page))
+        if key not in seen or r.get("score", 0) > seen[key].get("score", 0):
+            seen[key] = r
+
+    # Sort by score descending, cap at MAX_REFS
+    unique = sorted(seen.values(), key=lambda r: r.get("score", 0), reverse=True)
+    unique = unique[:MAX_REFS]
+
+    lines = ["## Reference Material\n"]
+    for i, r in enumerate(unique, 1):
+        source = r.get("source", "unknown")
+        text = r.get("text", "").strip()
+        citation = r.get("citation", {})
+        page = citation.get("page")
+        page_str = f", p.{page}" if page else ""
+        score = r.get("score", 0)
+
+        lines.append(f"[Ref {i}] **{source}{page_str}** (score: {score:.2f})")
+        lines.append(f"> {text}\n")
+
+    return "\n".join(lines)
+
+
+def fetch_rag_context(keywords: list[str], project_type: str) -> str:
+    """Fire RAG queries and return formatted reference material.
+
+    Uses synchronous httpx since this runs in the slash command handler
+    which is called from within an already-running async event loop.
+
+    Returns a formatted '## Reference Material' section string,
+    or empty string if RAG is unreachable or returns no results.
+    """
+    import httpx
+
+    queries = build_rag_queries(keywords, project_type)
+    if not queries:
+        return ""
+
+    all_results = []
+
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            for query in queries:
+                payload = {
+                    "query": query,
+                    "collection": "claude_documents",
+                    "n_results": 5,
+                    "search_type": "hybrid",
+                    "user_role": "owner",
+                }
+                try:
+                    resp = client.post(f"{RAG_SERVICE_URL}/search", json=payload)
+                    data = resp.json()
+                    all_results.extend(data.get("results", []))
+                except Exception:
+                    continue
+    except httpx.ConnectError:
+        return ""
+    except Exception:
+        return ""
+
+    return format_references(all_results)
