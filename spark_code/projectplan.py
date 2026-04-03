@@ -22,8 +22,37 @@ def extract_keywords(prompt: str) -> list[str]:
     return [w for w in words if w not in STOP_WORDS]
 
 
-def build_rag_queries(keywords: list[str], project_type: str) -> list[str]:
+def _detect_platform_from_prompt(prompt: str) -> str:
+    """Detect platform/language hints from the user's prompt text.
+
+    Returns a synthetic project_type string if a platform is mentioned,
+    or empty string if none detected.
+    """
+    lower = prompt.lower()
+    # Check for iOS/Swift hints
+    if any(kw in lower for kw in ["ios", "swiftui", "swift", "iphone", "ipad",
+                                   "xcode", "apple", "watchos", "macos", "tvos",
+                                   "uikit", "appkit", "widget"]):
+        return "Swift project"
+    # Check for Android/Kotlin hints
+    if any(kw in lower for kw in ["android", "kotlin", "jetpack", "compose"]):
+        return "Kotlin project"
+    # Check for Python hints
+    if any(kw in lower for kw in ["python", "django", "flask", "fastapi", "pytest"]):
+        return "Python project"
+    # Check for JS/TS hints
+    if any(kw in lower for kw in ["react", "nextjs", "next.js", "vue", "angular",
+                                   "typescript", "javascript", "node", "express"]):
+        return "TypeScript project"
+    return ""
+
+
+def build_rag_queries(keywords: list[str], project_type: str,
+                      prompt: str = "") -> list[str]:
     """Build RAG search queries based on keywords and detected project type.
+
+    Falls back to checking the prompt for platform hints if project_type
+    is empty (e.g. empty directory for a new project).
 
     Returns 2-4 queries tailored to the project type.
     """
@@ -32,6 +61,10 @@ def build_rag_queries(keywords: list[str], project_type: str) -> list[str]:
 
     kw_str = " ".join(keywords)
     project_lower = project_type.lower()
+
+    # If no project detected from files, check the prompt for platform hints
+    if not project_lower and prompt:
+        project_lower = _detect_platform_from_prompt(prompt).lower()
 
     if "swift" in project_lower or "xcode" in project_lower:
         return [
@@ -95,7 +128,8 @@ def format_references(raw_results: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def fetch_rag_context(keywords: list[str], project_type: str) -> str:
+def fetch_rag_context(keywords: list[str], project_type: str,
+                      prompt: str = "") -> str:
     """Fire RAG queries and return formatted reference material.
 
     Uses synchronous httpx since this runs in the slash command handler
@@ -106,7 +140,7 @@ def fetch_rag_context(keywords: list[str], project_type: str) -> str:
     """
     import httpx
 
-    queries = build_rag_queries(keywords, project_type)
+    queries = build_rag_queries(keywords, project_type, prompt=prompt)
     if not queries:
         return ""
 

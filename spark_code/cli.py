@@ -1068,7 +1068,7 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
             keywords = extract_keywords(plan_prompt)
             console.print(f"[#88c0d0]▸ Researching docs for: {', '.join(keywords) or plan_prompt}[/#88c0d0]")
 
-            rag_context = fetch_rag_context(keywords, project_type)
+            rag_context = fetch_rag_context(keywords, project_type, prompt=plan_prompt)
 
             if rag_context:
                 console.print(f"[#a3be8c]  ✓ Found relevant documentation[/#a3be8c]")

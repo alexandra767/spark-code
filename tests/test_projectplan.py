@@ -56,6 +56,29 @@ def test_build_rag_queries_no_keywords():
     assert queries == []
 
 
+def test_build_rag_queries_prompt_fallback_ios():
+    """Empty dir but prompt mentions iOS — should use iOS queries."""
+    queries = build_rag_queries(["pet", "vaccinations"], "", prompt="build an iOS app that tracks pet vaccinations")
+    assert any("HIG" in q for q in queries)
+    assert any("SwiftUI" in q for q in queries)
+    assert len(queries) >= 3
+
+
+def test_build_rag_queries_prompt_fallback_python():
+    """Empty dir but prompt mentions Django."""
+    queries = build_rag_queries(["blog", "api"], "", prompt="create a Django blog API")
+    assert any("patterns" in q.lower() for q in queries)
+    assert len(queries) >= 2
+
+
+def test_build_rag_queries_project_type_takes_precedence():
+    """If project_type is detected, prompt hints are ignored."""
+    queries = build_rag_queries(["auth"], "Python project", prompt="build an iOS auth screen")
+    # Should use Python queries since project_type is set, not iOS
+    assert not any("HIG" in q for q in queries)
+    assert any("patterns" in q.lower() for q in queries)
+
+
 from spark_code.projectplan import format_references
 
 
