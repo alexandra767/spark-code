@@ -24,6 +24,7 @@ from .context import AGENTIC_PROMPT, SYSTEM_PROMPT, Context
 from .custom_tools import CustomToolRegistry
 from .hooks import HookManager
 from .mcp.client import MCPClient
+from .mcp.registry import find_mcp_configs
 from .memory import Memory
 from .model import PROVIDERS, ModelClient
 from .permissions import PermissionManager
@@ -1075,6 +1076,27 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
                 console.print(f"[#a3be8c]  ✓ Found {ref_count} reference(s) from knowledge base[/#a3be8c]")
             else:
                 console.print(f"[#ebcb8b]  ⚠ No RAG results (service down or no matches)[/#ebcb8b]")
+            # Discover MCP tools
+            mcp_section = ""
+            mcp_configs = find_mcp_configs()
+            if mcp_configs:
+                mcp_lines = ["## Available MCP Tools\n",
+                             "These external tools are available via MCP servers. "
+                             "Include them in the plan where relevant.\n"]
+                for server_name, server_conf in mcp_configs.items():
+                    desc = server_conf.get("description", "")
+                    tools_list = server_conf.get("tools", [])
+                    mcp_lines.append(f"**{server_name}**" + (f" — {desc}" if desc else ""))
+                    if tools_list:
+                        for t in tools_list:
+                            if isinstance(t, dict):
+                                mcp_lines.append(f"  - `{t.get('name', '?')}`: {t.get('description', '')}")
+                            else:
+                                mcp_lines.append(f"  - `{t}`")
+                    mcp_lines.append("")
+                mcp_section = "\n".join(mcp_lines) + "\n"
+                console.print(f"[#a3be8c]  ✓ Found {len(mcp_configs)} MCP server(s)[/#a3be8c]")
+
             console.print(f"[#88c0d0]▸ Exploring codebase and writing projectplan.md...[/#88c0d0]")
             console.print(f"[#4c566a]  (This may take a minute with large models. Ctrl+C to cancel)[/#4c566a]")
 
@@ -1093,6 +1115,7 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
                 f"Their request: {plan_prompt}\n\n"
                 f"Detected project type: {project_type or 'unknown'}\n\n"
                 f"{rag_section}"
+                f"{mcp_section}"
                 "RULES:\n"
                 "1. Use read-only tools to explore the codebase first (read_file, glob, grep, list_dir)\n"
                 "2. Do NOT create project files yet — only create projectplan.md\n"
