@@ -1081,8 +1081,8 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
             mcp_configs = find_mcp_configs()
             if mcp_configs:
                 mcp_lines = ["## Available MCP Tools\n",
-                             "These external tools are available via MCP servers. "
-                             "Include them in the plan where relevant.\n"]
+                             "You MUST incorporate these tools into the plan steps where applicable. "
+                             "For each tool, add a step or sub-step that uses it.\n"]
                 for server_name, server_conf in mcp_configs.items():
                     desc = server_conf.get("description", "")
                     tools_list = server_conf.get("tools", [])

@@ -67,11 +67,13 @@ def build_rag_queries(keywords: list[str], project_type: str,
         project_lower = _detect_platform_from_prompt(prompt).lower()
 
     if "swift" in project_lower or "xcode" in project_lower:
+        # Use first 3 keywords max to keep queries focused
+        short_kw = " ".join(keywords[:3])
         return [
-            f"HIG {kw_str}",
-            f"SwiftUI {kw_str}",
-            f"App Store guidelines {kw_str}",
-            f"Swift {kw_str} best practices",
+            f"HIG design guidelines {short_kw}",
+            f"HIG forms lists navigation",
+            f"SwiftUI {short_kw}",
+            f"App Store guidelines {short_kw}",
         ]
     elif "python" in project_lower:
         return [
