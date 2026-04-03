@@ -29,6 +29,7 @@ from .model import PROVIDERS, ModelClient
 from .permissions import PermissionManager
 from .pinned import PinnedFiles
 from .plan_executor import execute_plan
+from .projectplan import extract_keywords, fetch_rag_context
 from .project_detect import detect_project_type
 from .skills.base import SkillRegistry
 from .snippets import SnippetLibrary
@@ -48,6 +49,7 @@ from .tools.wait_for_workers import WaitForWorkersTool
 from .tools.web_fetch import WebFetchTool
 from .tools.web_search import WebSearchTool
 from .tools.write_file import WriteFileTool
+from .tools.rag_search import RagSearchTool
 from .ui.hotkeys import TeamStatusMonitor
 from .ui.input import create_session
 from .ui.theme import get_theme
@@ -232,6 +234,13 @@ _PROVIDER_INFO = [
         "env_var": "",
         "signup": "https://ollama.ai",
     },
+    {
+        "name": "sglang",
+        "label": "SGLang (fast local)",
+        "model": "Qwen3.5-122B-A10B-NVFP4",
+        "env_var": "",
+        "signup": "https://github.com/sgl-project/sglang",
+    },
 ]
 
 
@@ -316,6 +325,7 @@ def build_tools() -> ToolRegistry:
     registry.register(ListDirTool())
     registry.register(WebSearchTool())
     registry.register(WebFetchTool())
+    registry.register(RagSearchTool())
     return registry
 
 
@@ -472,6 +482,7 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
 - `/tasks` — Show the shared task list
 - `/messages` — Check messages from workers
 - `/plan <prompt>` — Create plan.md / `/plan show` / `/plan go`
+- `/projectplan <prompt>` — RAG-researched plan / `/projectplan show` / `/projectplan go`
 
 **Project**
 - `/publish [name]` — Create GitHub repo and push
@@ -480,6 +491,9 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
 - `/git sync|pr|log|stash` — Smart git commands
 - `/memory` — View/add memory / `/memory edit`
 - `/image <path> [prompt]` — Send an image
+
+**Knowledge Base**
+- `/docs <query>` — Search indexed docs (Swift, SwiftUI, HIG, App Store Guidelines, CNN)
 
 **Extensibility**
 - `/teach <name> <desc> -- <cmd>` — Create a custom tool
@@ -990,6 +1004,110 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
                 "- Which steps can be done in parallel (mark them clearly)\n"
                 "- Any risks or considerations\n\n"
                 "After writing plan.md, tell the user: Review the plan with /plan show, then /plan go to execute."
+            )
+            return create_plan_prompt
+
+    elif command == "/projectplan":
+        if not args:
+            console.print("[#ebcb8b]Usage: /projectplan <prompt> — create a RAG-researched plan[/#ebcb8b]")
+            console.print("[#8899aa]  /projectplan show    — show current plan[/#8899aa]")
+            console.print("[#8899aa]  /projectplan copy    — copy plan to clipboard[/#8899aa]")
+            console.print("[#8899aa]  /projectplan go      — execute the approved plan[/#8899aa]")
+            return None
+
+        sub = args.strip().split(maxsplit=1)
+        sub_cmd = sub[0].lower()
+
+        pp_path = os.path.join(os.getcwd(), "projectplan.md")
+
+        if sub_cmd == "show":
+            if not os.path.exists(pp_path):
+                console.print("[#8899aa]No projectplan.md found. Create one with /projectplan <prompt>[/#8899aa]")
+                return None
+            with open(pp_path) as f:
+                content = f.read()
+            console.print()
+            console.print(Panel(
+                Markdown(content),
+                title="[bold #88c0d0] projectplan.md [/bold #88c0d0]",
+                border_style="#4c566a",
+                box=ROUNDED,
+                padding=(1, 2),
+            ))
+            _copy_to_clipboard(content)
+            console.print()
+            console.print("[#a3be8c]  ✓ Copied to clipboard  ·  /projectplan go to execute  ·  /projectplan <prompt> to redo[/#a3be8c]")
+            return None
+
+        elif sub_cmd == "copy":
+            if not os.path.exists(pp_path):
+                console.print("[#8899aa]No projectplan.md found. Create one with /projectplan <prompt>[/#8899aa]")
+                return None
+            with open(pp_path) as f:
+                content = f.read()
+            if _copy_to_clipboard(content):
+                console.print("[#a3be8c]✓ Project plan copied to clipboard[/#a3be8c]")
+            else:
+                console.print("[#bf616a]Could not copy — pbcopy not available[/#bf616a]")
+            return None
+
+        elif sub_cmd == "go":
+            if not os.path.exists(pp_path):
+                console.print("[#bf616a]No projectplan.md found. Create one first with /projectplan <prompt>[/#bf616a]")
+                return None
+            with open(pp_path) as f:
+                plan_content = f.read()
+            return f"__PLAN_EXECUTE__{plan_content}"
+
+        else:
+            # /projectplan <prompt> — research RAG, then create plan
+            plan_prompt = args
+            project_type = detect_project_type(os.getcwd())
+
+            # Extract keywords and fetch RAG context
+            keywords = extract_keywords(plan_prompt)
+            console.print(f"[#88c0d0]▸ Researching docs for: {', '.join(keywords) or plan_prompt}[/#88c0d0]")
+
+            rag_context = fetch_rag_context(keywords, project_type)
+
+            if rag_context:
+                console.print(f"[#a3be8c]  ✓ Found relevant documentation[/#a3be8c]")
+            else:
+                console.print(f"[#ebcb8b]  ⚠ No RAG results (service down or no matches)[/#ebcb8b]")
+
+            rag_section = ""
+            if rag_context:
+                rag_section = (
+                    "IMPORTANT — I have pre-researched the following documentation from the knowledge base. "
+                    "You MUST include this as the '## Reference Material' section at the top of the plan, "
+                    "and tag relevant steps with [see Ref N] markers.\n\n"
+                    f"{rag_context}\n\n"
+                    "---\n\n"
+                )
+
+            create_plan_prompt = (
+                f"The user wants you to create a detailed, RAG-informed project plan. "
+                f"Their request: {plan_prompt}\n\n"
+                f"Detected project type: {project_type or 'unknown'}\n\n"
+                f"{rag_section}"
+                "RULES:\n"
+                "1. Use read-only tools to explore the codebase first (read_file, glob, grep, list_dir)\n"
+                "2. Do NOT create project files yet — only create projectplan.md\n"
+                "3. Create a detailed implementation plan\n"
+                "4. You MUST use the write_file tool to save the plan to 'projectplan.md' in the current directory\n"
+                "   This is the ONE file you must write. Do not skip this step.\n\n"
+                "The projectplan.md MUST include (in this order):\n"
+                "- ## Reference Material — the pre-researched docs above (keep the [Ref N] format exactly)\n"
+                "- --- (horizontal rule separator)\n"
+                "- ## Summary — what will be done\n"
+                "- ## Steps — numbered steps with clear descriptions. Tag steps with [see Ref N, Ref M] "
+                "where the referenced documentation is relevant to that step's implementation\n"
+                "- ## Parallelization — which steps can run in parallel\n"
+                "- ## Files — files to be modified or created\n"
+                "- ## Risks — any risks or considerations\n\n"
+                "You may also use the rag_search tool to find additional documentation if the "
+                "pre-researched material doesn't cover everything you need.\n\n"
+                "After writing projectplan.md, tell the user: Review with /projectplan show, then /projectplan go to execute."
             )
             return create_plan_prompt
 
@@ -1517,6 +1635,13 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
 
     elif command == "/continue":
         return "__CONTINUE__"
+
+    elif command == "/docs":
+        if not args.strip():
+            console.print("[#ebcb8b]Usage: /docs <query> — search indexed knowledge base[/#ebcb8b]")
+            console.print("[#8899aa]Searches: Swift docs, SwiftUI, Apple HIG, App Store Guidelines, CNN, and more[/#8899aa]")
+            return None
+        return f"Use rag_search to find information about: {args.strip()}. Show the most relevant results with source citations."
 
     elif command == "/clean":
         return "__CLEAN__"

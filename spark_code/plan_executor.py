@@ -83,6 +83,112 @@ def parse_plan(plan_text: str) -> tuple[list[dict], set[int]]:
     return steps, parallel_nums
 
 
+def parse_references(plan_text: str) -> dict[int, dict]:
+    """Parse [Ref N] blocks from ## Reference Material section.
+
+    Returns {ref_number: {"title": str, "text": str}} dict.
+    """
+    refs = {}
+    lines = plan_text.split("\n")
+    in_ref_section = False
+    current_ref_num = None
+    current_title = ""
+    current_text_lines: list[str] = []
+
+    for line in lines:
+        stripped = line.strip()
+
+        # Detect start of reference material section
+        if stripped.startswith("## ") or stripped.startswith("# "):
+            header_lower = stripped.lower()
+            if "reference material" in header_lower:
+                in_ref_section = True
+                continue
+            elif in_ref_section:
+                # Hit the next section — save last ref and stop
+                if current_ref_num is not None:
+                    refs[current_ref_num] = {
+                        "title": current_title,
+                        "text": "\n".join(current_text_lines).strip(),
+                    }
+                break
+
+        if not in_ref_section:
+            continue
+
+        # Horizontal rule = end of ref section
+        if stripped == "---":
+            if current_ref_num is not None:
+                refs[current_ref_num] = {
+                    "title": current_title,
+                    "text": "\n".join(current_text_lines).strip(),
+                }
+            break
+
+        # Match [Ref N] header line
+        ref_match = re.match(r"\[Ref\s+(\d+)\]\s*\*{0,2}(.+?)\*{0,2}\s*(?:\(.*\))?\s*$", stripped)
+        if ref_match:
+            # Save previous ref
+            if current_ref_num is not None:
+                refs[current_ref_num] = {
+                    "title": current_title,
+                    "text": "\n".join(current_text_lines).strip(),
+                }
+            current_ref_num = int(ref_match.group(1))
+            current_title = ref_match.group(2).strip()
+            current_text_lines = []
+        elif current_ref_num is not None and stripped:
+            # Collect blockquote text (strip leading >)
+            text = stripped.lstrip("> ").strip()
+            if text:
+                current_text_lines.append(text)
+
+    # Save last ref if we didn't hit a break
+    if current_ref_num is not None and current_ref_num not in refs:
+        refs[current_ref_num] = {
+            "title": current_title,
+            "text": "\n".join(current_text_lines).strip(),
+        }
+
+    return refs
+
+
+def extract_step_refs(title: str, body: str) -> set[int]:
+    """Extract [see Ref N] numbers from a step's title and body."""
+    combined = f"{title} {body}"
+    return {int(m.group(1)) for m in re.finditer(r"Ref\s+(\d+)", combined)}
+
+
+def build_task_desc(step: dict, refs: dict[int, dict]) -> str:
+    """Build a task description for a worker, injecting matched references.
+
+    If the step has [see Ref N] tags and those refs exist, prepends a
+    '## Relevant Documentation' block. Otherwise returns a plain task desc.
+    """
+    ref_nums = extract_step_refs(step["title"], step["body"])
+    matched = {n: refs[n] for n in ref_nums if n in refs}
+
+    parts = []
+    if matched:
+        parts.append("## Relevant Documentation\n")
+        for n in sorted(matched):
+            r = matched[n]
+            parts.append(f"**[Ref {n}] {r['title']}**")
+            parts.append(f"> {r['text']}\n")
+        parts.append("---\n")
+        parts.append("Follow the documentation above when implementing this task.\n")
+
+    parts.append(f"## Task: {step['title']}\n")
+    parts.append(f"{step['body']}\n")
+    parts.append("Instructions:")
+    parts.append("- Create the file(s) described above")
+    parts.append("- Write complete, working code with imports")
+    parts.append("- Include docstrings and basic error handling")
+    parts.append("- If the task mentions tests, write real tests with pytest")
+
+    return "\n".join(parts)
+
+
 def _make_worker_name(title: str, step_num: int) -> str:
     """Create a clean worker name from a step title."""
     name = re.sub(r"[^a-z0-9]", "-", title.lower())
@@ -98,6 +204,9 @@ async def execute_plan(plan_text: str, team_manager, agent, console: Console):
     - After parallel batches, a summary is injected into the lead's context
     """
     steps, parallel_nums = parse_plan(plan_text)
+
+    # Parse references if this is a projectplan with ## Reference Material
+    refs = parse_references(plan_text) if "## Reference Material" in plan_text else {}
 
     if not steps:
         console.print(
@@ -143,16 +252,7 @@ async def execute_plan(plan_text: str, team_manager, agent, console: Console):
                 while team_manager.active_count >= 3:
                     await asyncio.sleep(1)
 
-                # Build a clear, complete task prompt for the worker
-                task_desc = (
-                    f"## Task: {s['title']}\n\n"
-                    f"{s['body']}\n\n"
-                    f"Instructions:\n"
-                    f"- Create the file(s) described above\n"
-                    f"- Write complete, working code with imports\n"
-                    f"- Include docstrings and basic error handling\n"
-                    f"- If the task mentions tests, write real tests with pytest\n"
-                )
+                task_desc = build_task_desc(s, refs)
 
                 worker_name = _make_worker_name(s["title"], s["number"])
                 worker = await team_manager.spawn(
@@ -199,13 +299,21 @@ async def execute_plan(plan_text: str, team_manager, agent, console: Console):
                 f"{step['title']}[/{_C_TOOL}]"
             )
 
-            task_desc = (
-                f"Execute this step of the project plan:\n\n"
-                f"## {step['title']}\n\n"
-                f"{step['body']}\n\n"
-                f"Complete this step fully. "
-                f"Create any files or run any commands needed."
-            )
+            if refs:
+                task_desc = (
+                    "Execute this step of the project plan:\n\n"
+                    + build_task_desc(step, refs)
+                    + "\n\nComplete this step fully. "
+                    "Create any files or run any commands needed."
+                )
+            else:
+                task_desc = (
+                    f"Execute this step of the project plan:\n\n"
+                    f"## {step['title']}\n\n"
+                    f"{step['body']}\n\n"
+                    f"Complete this step fully. "
+                    f"Create any files or run any commands needed."
+                )
 
             try:
                 await agent.run(task_desc)
