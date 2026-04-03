@@ -1114,6 +1114,16 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
                     f"{rag_context}\n\n---\n\n"
                 )
 
+            # Build MCP instruction if tools are available
+            mcp_instruction = ""
+            if mcp_section:
+                mcp_instruction = (
+                    "## MCP Tools section is REQUIRED. Add a dedicated step for each "
+                    "MCP tool that applies to this project. For example, if an image generation "
+                    "tool is available and the project involves images/photos, add a step that "
+                    "uses it.\n\n"
+                )
+
             if is_empty_dir:
                 # Lean prompt for new projects — no codebase to explore
                 create_plan_prompt = (
@@ -1121,6 +1131,7 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
                     f"Request: {plan_prompt}\n\n"
                     f"{rag_section}"
                     f"{mcp_section}"
+                    f"{mcp_instruction}"
                     "This is an EMPTY directory — do NOT explore files. "
                     "Write projectplan.md IMMEDIATELY using write_file.\n\n"
                     "Format: ## Reference Material (if docs above), ---, "
@@ -1136,6 +1147,7 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
                     f"Project type: {project_type or 'unknown'}\n\n"
                     f"{rag_section}"
                     f"{mcp_section}"
+                    f"{mcp_instruction}"
                     "RULES:\n"
                     "1. Explore the codebase first (glob, grep, read_file)\n"
                     "2. Only create projectplan.md — no other files\n"
