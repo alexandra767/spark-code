@@ -1097,44 +1097,55 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
                 mcp_section = "\n".join(mcp_lines) + "\n"
                 console.print(f"[#a3be8c]  ✓ Found {len(mcp_configs)} MCP server(s)[/#a3be8c]")
 
-            console.print(f"[#88c0d0]▸ Exploring codebase and writing projectplan.md...[/#88c0d0]")
+            # Detect if directory is empty (new project)
+            is_empty_dir = not any(
+                f for f in os.listdir(os.getcwd())
+                if not f.startswith(".") and f not in ("projectplan.md", "plan.md")
+            )
+
+            console.print(f"[#88c0d0]▸ {'Writing' if is_empty_dir else 'Exploring codebase and writing'} projectplan.md...[/#88c0d0]")
             console.print(f"[#4c566a]  (This may take a minute with large models. Ctrl+C to cancel)[/#4c566a]")
 
             rag_section = ""
             if rag_context:
                 rag_section = (
-                    "IMPORTANT — I have pre-researched the following documentation from the knowledge base. "
-                    "You MUST include this as the '## Reference Material' section at the top of the plan, "
-                    "and tag relevant steps with [see Ref N] markers.\n\n"
-                    f"{rag_context}\n\n"
-                    "---\n\n"
+                    "Pre-researched documentation — include as '## Reference Material' in the plan. "
+                    "Tag steps with [see Ref N].\n\n"
+                    f"{rag_context}\n\n---\n\n"
                 )
 
-            create_plan_prompt = (
-                f"The user wants you to create a detailed, RAG-informed project plan. "
-                f"Their request: {plan_prompt}\n\n"
-                f"Detected project type: {project_type or 'unknown'}\n\n"
-                f"{rag_section}"
-                f"{mcp_section}"
-                "RULES:\n"
-                "1. Use read-only tools to explore the codebase first (read_file, glob, grep, list_dir)\n"
-                "2. Do NOT create project files yet — only create projectplan.md\n"
-                "3. Create a detailed implementation plan\n"
-                "4. You MUST use the write_file tool to save the plan to 'projectplan.md' in the current directory\n"
-                "   This is the ONE file you must write. Do not skip this step.\n\n"
-                "The projectplan.md MUST include (in this order):\n"
-                "- ## Reference Material — the pre-researched docs above (keep the [Ref N] format exactly)\n"
-                "- --- (horizontal rule separator)\n"
-                "- ## Summary — what will be done\n"
-                "- ## Steps — numbered steps with clear descriptions. Tag steps with [see Ref N, Ref M] "
-                "where the referenced documentation is relevant to that step's implementation\n"
-                "- ## Parallelization — which steps can run in parallel\n"
-                "- ## Files — files to be modified or created\n"
-                "- ## Risks — any risks or considerations\n\n"
-                "Do NOT use rag_search — the documentation above is already pre-researched for you. "
-                "Focus on exploring the codebase and writing the plan.\n\n"
-                "After writing projectplan.md, tell the user: Review with /projectplan show, then /projectplan go to execute."
-            )
+            if is_empty_dir:
+                # Lean prompt for new projects — no codebase to explore
+                create_plan_prompt = (
+                    f"Create projectplan.md for a NEW project.\n"
+                    f"Request: {plan_prompt}\n\n"
+                    f"{rag_section}"
+                    f"{mcp_section}"
+                    "This is an EMPTY directory — do NOT explore files. "
+                    "Write projectplan.md IMMEDIATELY using write_file.\n\n"
+                    "Format: ## Reference Material (if docs above), ---, "
+                    "## Summary, ## Steps (numbered, tag with [see Ref N]), "
+                    "## Parallelization, ## Files, ## Risks\n\n"
+                    "Keep the plan concise — max 8 steps. Write the file NOW."
+                )
+            else:
+                # Full prompt for existing projects
+                create_plan_prompt = (
+                    f"Create projectplan.md for this project.\n"
+                    f"Request: {plan_prompt}\n"
+                    f"Project type: {project_type or 'unknown'}\n\n"
+                    f"{rag_section}"
+                    f"{mcp_section}"
+                    "RULES:\n"
+                    "1. Explore the codebase first (glob, grep, read_file)\n"
+                    "2. Only create projectplan.md — no other files\n"
+                    "3. Use write_file to save projectplan.md\n\n"
+                    "Format: ## Reference Material (if docs above), ---, "
+                    "## Summary, ## Steps (numbered, tag with [see Ref N]), "
+                    "## Parallelization, ## Files, ## Risks\n\n"
+                    "Do NOT use rag_search — docs are pre-researched.\n"
+                    "After writing, say: Review with /projectplan show, then /projectplan go to execute."
+                )
             return create_plan_prompt
 
     elif command == "/publish":
