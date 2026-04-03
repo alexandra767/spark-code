@@ -158,3 +158,36 @@ def test_extract_step_refs_combined():
 def test_extract_step_refs_none():
     nums = extract_step_refs("No refs here", "Just plain text")
     assert nums == set()
+
+
+from spark_code.plan_executor import build_task_desc
+
+
+def test_build_task_desc_with_refs():
+    refs = {
+        1: {"title": "HIG Settings", "text": "Use grouped lists for settings."},
+        2: {"title": "SwiftUI Nav", "text": "NavigationStack replaces NavigationView."},
+    }
+    step = {"number": 1, "title": "Create SettingsView [see Ref 1, Ref 2]", "body": "Build the UI."}
+    desc = build_task_desc(step, refs)
+    assert "## Relevant Documentation" in desc
+    assert "Use grouped lists" in desc
+    assert "NavigationStack" in desc
+    assert "## Task:" in desc
+
+
+def test_build_task_desc_no_refs():
+    refs = {
+        1: {"title": "HIG Settings", "text": "Use grouped lists."},
+    }
+    step = {"number": 2, "title": "Add data model", "body": "Create the model."}
+    desc = build_task_desc(step, refs)
+    assert "## Relevant Documentation" not in desc
+    assert "## Task:" in desc
+
+
+def test_build_task_desc_empty_refs_dict():
+    step = {"number": 1, "title": "Do something [see Ref 1]", "body": "Details."}
+    desc = build_task_desc(step, {})
+    assert "## Relevant Documentation" not in desc
+    assert "## Task:" in desc
