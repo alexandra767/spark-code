@@ -191,3 +191,79 @@ def test_build_task_desc_empty_refs_dict():
     desc = build_task_desc(step, {})
     assert "## Relevant Documentation" not in desc
     assert "## Task:" in desc
+
+
+def test_full_pipeline_ios():
+    """End-to-end: prompt -> keywords -> queries -> format refs -> plan parse -> ref inject."""
+    from spark_code.projectplan import extract_keywords, build_rag_queries, format_references
+    from spark_code.plan_executor import parse_plan, parse_references, extract_step_refs, build_task_desc
+
+    # Step 1: Extract keywords
+    keywords = extract_keywords("add a settings screen to GigLedger")
+    assert "settings" in keywords
+    assert "screen" in keywords
+
+    # Step 2: Build queries
+    queries = build_rag_queries(keywords, "Swift project")
+    assert len(queries) >= 3
+    assert any("HIG" in q for q in queries)
+
+    # Step 3: Format mock RAG results
+    mock_results = [
+        {"source": "apple-hig.pdf", "text": "Use grouped lists for settings.",
+         "citation": {"page": 42}, "score": 0.89},
+        {"source": "swiftui-docs", "text": "Use NavigationStack for navigation.",
+         "citation": {"page": 15}, "score": 0.85},
+    ]
+    ref_section = format_references(mock_results)
+    assert "[Ref 1]" in ref_section
+    assert "[Ref 2]" in ref_section
+
+    # Step 4: Build a full projectplan.md
+    plan_text = f"""# Project Plan: GigLedger Settings
+
+{ref_section}
+
+---
+
+## Summary
+Add a settings screen to GigLedger.
+
+## Steps
+
+1. **Create SettingsView** [see Ref 1, Ref 2]
+   - Build the settings screen with grouped lists
+
+2. **Add data model**
+   - Create UserPreferences SwiftData model
+
+3. **Wire to tab bar** [see Ref 2]
+   - Add settings tab
+
+## Parallelization
+- 2
+- 3
+
+## Files
+- SettingsView.swift
+"""
+
+    # Step 5: Parse the plan
+    steps, parallel_nums = parse_plan(plan_text)
+    assert len(steps) == 3
+    assert parallel_nums == {2, 3}
+
+    # Step 6: Parse references
+    refs = parse_references(plan_text)
+    assert 1 in refs
+    assert 2 in refs
+
+    # Step 7: Build ref-injected task desc for step 1
+    desc = build_task_desc(steps[0], refs)
+    assert "## Relevant Documentation" in desc
+    assert "grouped lists" in desc
+    assert "NavigationStack" in desc
+
+    # Step 8: Step 2 has no refs — no injection
+    desc2 = build_task_desc(steps[1], refs)
+    assert "## Relevant Documentation" not in desc2
