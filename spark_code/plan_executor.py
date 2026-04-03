@@ -83,6 +83,82 @@ def parse_plan(plan_text: str) -> tuple[list[dict], set[int]]:
     return steps, parallel_nums
 
 
+def parse_references(plan_text: str) -> dict[int, dict]:
+    """Parse [Ref N] blocks from ## Reference Material section.
+
+    Returns {ref_number: {"title": str, "text": str}} dict.
+    """
+    refs = {}
+    lines = plan_text.split("\n")
+    in_ref_section = False
+    current_ref_num = None
+    current_title = ""
+    current_text_lines: list[str] = []
+
+    for line in lines:
+        stripped = line.strip()
+
+        # Detect start of reference material section
+        if stripped.startswith("## ") or stripped.startswith("# "):
+            header_lower = stripped.lower()
+            if "reference material" in header_lower:
+                in_ref_section = True
+                continue
+            elif in_ref_section:
+                # Hit the next section — save last ref and stop
+                if current_ref_num is not None:
+                    refs[current_ref_num] = {
+                        "title": current_title,
+                        "text": "\n".join(current_text_lines).strip(),
+                    }
+                break
+
+        if not in_ref_section:
+            continue
+
+        # Horizontal rule = end of ref section
+        if stripped == "---":
+            if current_ref_num is not None:
+                refs[current_ref_num] = {
+                    "title": current_title,
+                    "text": "\n".join(current_text_lines).strip(),
+                }
+            break
+
+        # Match [Ref N] header line
+        ref_match = re.match(r"\[Ref\s+(\d+)\]\s*\*{0,2}(.+?)\*{0,2}\s*(?:\(.*\))?\s*$", stripped)
+        if ref_match:
+            # Save previous ref
+            if current_ref_num is not None:
+                refs[current_ref_num] = {
+                    "title": current_title,
+                    "text": "\n".join(current_text_lines).strip(),
+                }
+            current_ref_num = int(ref_match.group(1))
+            current_title = ref_match.group(2).strip()
+            current_text_lines = []
+        elif current_ref_num is not None and stripped:
+            # Collect blockquote text (strip leading >)
+            text = stripped.lstrip("> ").strip()
+            if text:
+                current_text_lines.append(text)
+
+    # Save last ref if we didn't hit a break
+    if current_ref_num is not None and current_ref_num not in refs:
+        refs[current_ref_num] = {
+            "title": current_title,
+            "text": "\n".join(current_text_lines).strip(),
+        }
+
+    return refs
+
+
+def extract_step_refs(title: str, body: str) -> set[int]:
+    """Extract [see Ref N] numbers from a step's title and body."""
+    combined = f"{title} {body}"
+    return {int(m.group(1)) for m in re.finditer(r"Ref\s+(\d+)", combined)}
+
+
 def _make_worker_name(title: str, step_num: int) -> str:
     """Create a clean worker name from a step title."""
     name = re.sub(r"[^a-z0-9]", "-", title.lower())

@@ -97,3 +97,64 @@ def test_format_references_caps_at_eight():
 def test_format_references_empty():
     output = format_references([])
     assert output == ""
+
+
+from spark_code.plan_executor import parse_references
+
+
+def test_parse_references_basic():
+    plan_text = """## Reference Material
+
+[Ref 1] **apple-hig.pdf, p.42** (score: 0.89)
+> Use grouped lists for settings. Each group should have a descriptive header.
+
+[Ref 2] **swiftui-docs, p.15** (score: 0.85)
+> NavigationStack replaces NavigationView in iOS 16+.
+
+---
+
+## Summary
+Build a settings screen.
+
+## Steps
+1. **Create SettingsView** [see Ref 1, Ref 2]
+"""
+    refs = parse_references(plan_text)
+    assert 1 in refs
+    assert 2 in refs
+    assert "grouped lists" in refs[1]["text"]
+    assert "NavigationStack" in refs[2]["text"]
+
+
+def test_parse_references_no_ref_section():
+    plan_text = """## Summary
+Build something.
+
+## Steps
+1. Do a thing
+"""
+    refs = parse_references(plan_text)
+    assert refs == {}
+
+
+from spark_code.plan_executor import extract_step_refs
+
+
+def test_extract_step_refs_from_title():
+    nums = extract_step_refs("Create SettingsView [see Ref 1, Ref 2]", "")
+    assert nums == {1, 2}
+
+
+def test_extract_step_refs_from_body():
+    nums = extract_step_refs("Do something", "Follow guidelines [see Ref 3]\nMore text")
+    assert nums == {3}
+
+
+def test_extract_step_refs_combined():
+    nums = extract_step_refs("Title [see Ref 1]", "Body [see Ref 4, Ref 5]")
+    assert nums == {1, 4, 5}
+
+
+def test_extract_step_refs_none():
+    nums = extract_step_refs("No refs here", "Just plain text")
+    assert nums == set()
