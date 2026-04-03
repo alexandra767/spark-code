@@ -1071,9 +1071,12 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
             rag_context = fetch_rag_context(keywords, project_type, prompt=plan_prompt)
 
             if rag_context:
-                console.print(f"[#a3be8c]  ✓ Found relevant documentation[/#a3be8c]")
+                ref_count = rag_context.count("[Ref ")
+                console.print(f"[#a3be8c]  ✓ Found {ref_count} reference(s) from knowledge base[/#a3be8c]")
             else:
                 console.print(f"[#ebcb8b]  ⚠ No RAG results (service down or no matches)[/#ebcb8b]")
+            console.print(f"[#88c0d0]▸ Exploring codebase and writing projectplan.md...[/#88c0d0]")
+            console.print(f"[#4c566a]  (This may take a minute with large models. Ctrl+C to cancel)[/#4c566a]")
 
             rag_section = ""
             if rag_context:
@@ -2597,6 +2600,7 @@ async def run_interactive(config: dict, resume_session: str = "",
                     console.print("[#8899aa]Conversation context preserved[/#8899aa]")
                 else:
                     # Skill returned a prompt — send to agent
+                    is_projectplan = "projectplan.md" in result
                     user_input = result
                     try:
                         team_monitor.start()
@@ -2607,6 +2611,15 @@ async def run_interactive(config: dict, resume_session: str = "",
                         console.print(f"\n[#bf616a]Error: {e}[/#bf616a]")
                     finally:
                         team_monitor.stop()
+                    # Post-run status for /projectplan
+                    if is_projectplan:
+                        pp_path = os.path.join(os.getcwd(), "projectplan.md")
+                        if os.path.exists(pp_path):
+                            console.print(f"\n[#a3be8c]▸ projectplan.md created successfully[/#a3be8c]")
+                            console.print(f"[#88c0d0]  /projectplan show  to review  ·  /projectplan go  to execute[/#88c0d0]")
+                        else:
+                            console.print(f"\n[#bf616a]▸ projectplan.md was NOT created — model may have failed[/#bf616a]")
+                            console.print(f"[#8899aa]  Try again or use /projectplan <prompt> with a simpler request[/#8899aa]")
             elif _is_shell_command(user_input):
                 # Direct shell command — run via agent with explicit instruction
                 run_prompt = (
