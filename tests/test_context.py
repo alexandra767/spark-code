@@ -102,13 +102,19 @@ class TestCompact:
         for i in range(20):
             ctx.add_user(f"message {i}")
             ctx.add_assistant(f"response {i}")
+        before = len(ctx.messages)
         ctx.compact(keep_recent=6)
-        # After compaction, should have a summary + recent messages
-        # The summary should use role "system", not "user"
+
+        # compact() injects the summary as a "user" message (not "system") because
+        # get_messages() already prepends the system prompt — see context.py:307.
         has_summary = any(
-            m["role"] == "system" for m in ctx.messages
+            "Conversation Summary" in (m.get("content") or "") for m in ctx.messages
         )
-        assert has_summary or len(ctx.messages) <= 6
+        assert has_summary, "compact() should leave a summary marker in messages"
+        assert len(ctx.messages) < before, "compact() should reduce message count"
+        # The last 6 messages should be the most recent originals (preserved verbatim)
+        assert ctx.messages[-1]["content"] == "response 19"
+        assert ctx.messages[-2]["content"] == "message 19"
 
     def test_compact_with_few_messages_does_nothing(self):
         ctx = Context(system_prompt="sys")

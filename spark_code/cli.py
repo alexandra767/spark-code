@@ -32,7 +32,7 @@ from .pinned import PinnedFiles
 from .plan_executor import execute_plan
 from .projectplan import extract_keywords, fetch_rag_context
 from .project_detect import detect_project_type
-from .skills.base import SkillRegistry
+from .skills.base import SkillRegistry, check_skill_compatibility
 from .snippets import SnippetLibrary
 from .stats import SessionStats
 from .task_store import TaskStore
@@ -1702,6 +1702,13 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
             console.print(f"[#ebcb8b]Usage: {command} <prompt>[/#ebcb8b]")
             console.print(f"[#8899aa]{skill.description}[/#8899aa]")
             return None
+        # Pre-flight compatibility check for skills that depend on external services
+        # (e.g. kuiper daemon for /app-gap-research). Warn but don't block — user can
+        # always start the service and retry, or proceed knowing it will likely fail.
+        ok, reason = check_skill_compatibility(skill)
+        if not ok:
+            console.print(f"[#ebcb8b]⚠ {reason}[/#ebcb8b]")
+            console.print(f"[#8899aa]Skill will run anyway. Start the dependency first if it needs one.[/#8899aa]")
         return skill.get_prompt(args)
 
     console.print(f"[yellow]Unknown command: {command}. Type /help for available commands.[/yellow]")
@@ -1863,7 +1870,13 @@ async def run_interactive(config: dict, resume_session: str = "",
     worker_model_obj = None
     worker_model_name = get(config, "model", "worker_model", default="")
     if worker_model_name:
-        worker_endpoint = get(config, "model", "endpoint", default="")
+        # If worker_endpoint is set in the active profile, send worker traffic there
+        # (e.g. a separate vLLM serving a code-specialist on a different port).
+        # Otherwise workers share the main endpoint.
+        worker_endpoint = (
+            get(config, "model", "worker_endpoint", default="")
+            or get(config, "model", "endpoint", default="")
+        )
         worker_model_obj = ModelClient(
             endpoint=worker_endpoint,
             model=worker_model_name,

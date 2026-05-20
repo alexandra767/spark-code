@@ -1,9 +1,25 @@
 """Skill system — slash commands that inject specialized prompts."""
 
 import os
+import re
 from pathlib import Path
 
 import yaml
+
+# Claude Code -> Spark Code tool name aliases. Claude skills reference tools
+# like `Bash`/`Read`/`Write`; Spark's registry uses snake_case equivalents.
+CLAUDE_TOOL_ALIASES = {
+    "Read": "read_file",
+    "Write": "write_file",
+    "Edit": "edit_file",
+    "Bash": "bash",
+    "Glob": "glob",
+    "Grep": "grep",
+    "LS": "list_dir",
+    "WebSearch": "web_search",
+    "WebFetch": "web_fetch",
+    "TodoWrite": "todo",
+}
 
 
 class Skill:
@@ -11,12 +27,16 @@ class Skill:
 
     def __init__(self, name: str, description: str, prompt: str,
                  required_tools: list[str] | None = None,
-                 requires_args: bool = False):
+                 requires_args: bool = False,
+                 compatibility: str | None = None,
+                 source: str = "builtin"):
         self.name = name
         self.description = description
         self.prompt = prompt
         self.required_tools = required_tools or []
         self.requires_args = requires_args
+        self.compatibility = compatibility
+        self.source = source
 
     def get_prompt(self, args: str = "") -> str:
         """Get the full prompt, optionally with user arguments."""
@@ -71,11 +91,144 @@ class SkillRegistry:
             except Exception:
                 pass  # Skip invalid skill files
 
+    def load_claude_skills_from_dir(self, directory: str):
+        """Load Claude Code skills (each in `<dir>/<name>/SKILL.md` with YAML frontmatter)."""
+        dir_path = Path(directory)
+        if not dir_path.exists():
+            return
+
+        for skill_md in dir_path.glob("*/SKILL.md"):
+            try:
+                skill = _parse_claude_skill(skill_md)
+                if skill is not None:
+                    self.register(skill)
+            except Exception:
+                pass  # Skip malformed Claude skills rather than crashing startup
+
+    def load_claude_plugin_skills_from_dir(self, plugin_cache_dir: str):
+        """Load installed Claude Code plugin skills.
+
+        Layout: <cache>/<marketplace>/<plugin>/<version>/skills/<skill>/SKILL.md.
+        Skills get namespaced as `<plugin>:<skill>` so they don't collide with
+        user-level skills of the same name (matches Claude's own convention).
+        """
+        cache = Path(plugin_cache_dir)
+        if not cache.exists():
+            return
+
+        for skill_md in cache.glob("*/*/*/skills/*/SKILL.md"):
+            try:
+                # parts: [..., marketplace, plugin, version, "skills", skillname, "SKILL.md"]
+                plugin_name = skill_md.parts[-5]
+                skill = _parse_claude_skill(skill_md, name_prefix=f"{plugin_name}:")
+                if skill is not None:
+                    skill.source = "claude-plugin"
+                    self.register(skill)
+            except Exception:
+                pass
+
     def load_all(self):
-        """Load built-in + global + project skills."""
+        """Load built-in + global + project skills + Claude Code skills + plugin skills."""
         self.load_builtin()
         self.load_from_dir(os.path.expanduser("~/.spark/skills"))
         self.load_from_dir(".spark/skills")
+        # Bridge: surface Claude Code's user-level skills (~/.claude/skills/<name>/SKILL.md)
+        # so commands like /app-gap-research work from Spark too.
+        self.load_claude_skills_from_dir(os.path.expanduser("~/.claude/skills"))
+        # Bridge: surface installed Claude Code plugin skills as /plugin:skill.
+        self.load_claude_plugin_skills_from_dir(os.path.expanduser("~/.claude/plugins/cache"))
+
+
+_FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n(.*)$", re.DOTALL)
+_URL_RE = re.compile(r"https?://[^\s)>'\"]+")
+
+
+def _parse_claude_skill(path: Path, name_prefix: str = "") -> Skill | None:
+    """Parse a Claude Code SKILL.md (YAML frontmatter + markdown body) into a Skill.
+
+    `name_prefix` is prepended to the skill name (used for plugin namespacing
+    e.g. `superpowers:test-driven-development`).
+    """
+    text = path.read_text(encoding="utf-8")
+    match = _FRONTMATTER_RE.match(text)
+    if not match:
+        return None
+
+    meta = yaml.safe_load(match.group(1)) or {}
+    body = match.group(2).strip()
+    name = meta.get("name")
+    if not name or not body:
+        return None
+    full_name = f"{name_prefix}{name}"
+
+    raw_tools = meta.get("allowed-tools") or meta.get("required_tools") or []
+    if isinstance(raw_tools, str):
+        raw_tools = [t.strip() for t in raw_tools.split(",") if t.strip()]
+    required_tools = [CLAUDE_TOOL_ALIASES.get(t, t) for t in raw_tools]
+
+    compatibility = meta.get("compatibility")
+    header_parts = [f"# Skill: {full_name} (Claude Code)"]
+    if compatibility:
+        header_parts.append(f"Compatibility: {compatibility}")
+    if raw_tools:
+        mapped = ", ".join(
+            f"{t}->{CLAUDE_TOOL_ALIASES[t]}" for t in raw_tools if t in CLAUDE_TOOL_ALIASES
+        )
+        if mapped:
+            header_parts.append(f"Tool name mapping in Spark Code: {mapped}")
+    prompt = "\n".join(header_parts) + "\n\n" + body
+
+    return Skill(
+        name=full_name,
+        description=meta.get("description", ""),
+        prompt=prompt,
+        required_tools=required_tools,
+        compatibility=compatibility,
+        source="claude",
+    )
+
+
+def check_skill_compatibility(skill: Skill, timeout: float = 2.0) -> tuple[bool, str | None]:
+    """Pre-flight a skill's compatibility requirement.
+
+    If the `compatibility` text mentions an http(s) URL, GET it with a short
+    timeout. Return (ok, reason_if_not_ok). Skills without a URL we can probe
+    are always reported OK — they'll explain themselves to the model in the prompt.
+    """
+    if not skill.compatibility:
+        return True, None
+
+    urls = _URL_RE.findall(skill.compatibility)
+    if not urls:
+        return True, None
+
+    # Skills often point to an MCP/health endpoint. Try the literal URL first;
+    # if it ends in /mcp, also try /health on the same host (kuiper convention).
+    candidates = []
+    for u in urls:
+        u = u.rstrip("/").rstrip(",;.)")
+        candidates.append(u)
+        if u.endswith("/mcp"):
+            candidates.append(u[: -len("/mcp")] + "/health")
+
+    try:
+        import httpx
+    except ImportError:
+        return True, None  # don't block if httpx missing — skill can self-report
+
+    for url in candidates:
+        try:
+            with httpx.Client(timeout=timeout) as client:
+                resp = client.get(url)
+            if resp.status_code < 500:
+                return True, None
+        except Exception:
+            continue
+
+    return False, (
+        f"Compatibility check failed: could not reach {urls[0]} "
+        f"({skill.compatibility})"
+    )
 
 
 # Built-in skills

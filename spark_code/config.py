@@ -11,7 +11,7 @@ DEFAULT_CONFIG = {
         "endpoint": "http://localhost:11434",
         "name": "qwen3.5:122b",
         "temperature": 0.7,
-        "max_tokens": 8192,
+        "max_tokens": 4096,
         "context_window": 262144,
     },
     "permissions": {
@@ -93,6 +93,7 @@ def resolve_provider(config: dict, provider_name: str | None = None) -> dict:
     resolved["cost_per_million_input"] = provider_conf.get("cost_per_million_input", 0)
     resolved["cost_per_million_output"] = provider_conf.get("cost_per_million_output", 0)
     resolved["worker_model"] = provider_conf.get("worker_model", "")
+    resolved["worker_endpoint"] = provider_conf.get("worker_endpoint", "")
     return config
 
 

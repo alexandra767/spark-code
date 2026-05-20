@@ -66,20 +66,20 @@ def _make_team(tmp_path, model=None):
 
 
 async def test_max_workers_limit(tmp_path):
-    """Spawning more than MAX_WORKERS should return None for the excess."""
+    """Spawning more than MAX_WORKERS_LOCAL should return None for the excess."""
     team = _make_team(tmp_path, model=SlowMockModel())
 
     workers = []
-    for i in range(MAX_WORKERS + 1):
+    for i in range(MAX_WORKERS_LOCAL + 1):
         w = await team.spawn(f"task {i}", name=f"w-{i}")
         workers.append(w)
 
-    # First MAX_WORKERS should succeed
-    for i in range(MAX_WORKERS):
+    # First MAX_WORKERS_LOCAL should succeed
+    for i in range(MAX_WORKERS_LOCAL):
         assert workers[i] is not None
 
     # The extra one should be None
-    assert workers[MAX_WORKERS] is None
+    assert workers[MAX_WORKERS_LOCAL] is None
 
     # Clean up
     await team.stop_all()

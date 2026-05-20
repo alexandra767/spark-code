@@ -103,7 +103,7 @@ PROVIDERS = {
         "needs_key": False,
     },
     "sglang": {
-        "base_url": "http://192.168.1.187:30000",
+        "base_url": "http://spark-4a54.local:30000",
         "api_path": "/v1/chat/completions",
         "needs_key": False,
     },

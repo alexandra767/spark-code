@@ -93,7 +93,7 @@ def build_rag_queries(keywords: list[str], project_type: str,
         ]
 
 
-RAG_SERVICE_URL = os.environ.get("RAG_SERVICE_URL", "http://192.168.1.187:8010")
+RAG_SERVICE_URL = os.environ.get("RAG_SERVICE_URL", "http://spark-4a54.local:8010")
 MAX_REFS = 5
 
 
