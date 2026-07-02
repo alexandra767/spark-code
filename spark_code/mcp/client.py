@@ -3,7 +3,8 @@
 from typing import Any
 
 from ..tools.base import Tool
-from .transport import SSETransport, StdioTransport
+from .registry import expand_mcp_env
+from .transport import HTTPTransport, StdioTransport
 
 
 class MCPTool(Tool):
@@ -59,6 +60,8 @@ class MCPClient:
 
     async def connect(self, name: str, config: dict):
         """Connect to an MCP server and discover its tools."""
+        # Expand ${VAR} references in env before spawning the server.
+        config = expand_mcp_env(config)
         transport_type = config.get("transport", "stdio")
 
         if transport_type == "stdio":
@@ -68,7 +71,8 @@ class MCPClient:
             transport = StdioTransport(command, args, env)
         elif transport_type in ("sse", "http"):
             url = config.get("url", "")
-            transport = SSETransport(url)
+            headers = config.get("headers", {})
+            transport = HTTPTransport(url, headers=headers)
         else:
             raise ValueError(f"Unknown transport: {transport_type}")
 
@@ -81,6 +85,10 @@ class MCPClient:
                 "capabilities": {},
                 "clientInfo": {"name": "spark-code", "version": "0.1.0"},
             })
+
+            # Spec-required: tell the server initialization is complete. Without
+            # this notification, compliant SDK servers reject/queue tools/list.
+            await transport.notify("notifications/initialized")
 
             # Discover tools
             result = await transport.send("tools/list")

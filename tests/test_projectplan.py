@@ -290,3 +290,70 @@ Add a settings screen to GigLedger.
     # Step 8: Step 2 has no refs — no injection
     desc2 = build_task_desc(steps[1], refs)
     assert "## Relevant Documentation" not in desc2
+
+
+# ---------------------------------------------------------------------------
+# Regression tests — parallel-step parsing (audit 2026-07-02, bug 7)
+# ---------------------------------------------------------------------------
+
+from spark_code.plan_executor import parse_plan, _parse_parallel_spec
+
+
+# The exact prose from the repo's own PLAN.md — the old parser scraped every
+# integer here and produced the dependency-violating set {1,2,3,7,9,10}.
+_PLAN_MD_PARALLEL_PROSE = """# Plan
+
+## Steps
+
+1. First step
+2. Second step
+3. Third step
+7. Seventh step
+9. Ninth step
+10. Tenth step
+
+## Parallelization
+
+Steps 1 and 2 can be done in parallel. Steps 9 and 10 can be started after the core functionality (steps 3-7) is complete, and can be done in parallel.
+
+## Risks and Considerations
+
+*   Something.
+"""
+
+
+def test_parse_plan_prose_no_false_parallelization():
+    """PLAN.md-style prose must NOT mark dependency steps (3, 7) as parallel."""
+    _steps, parallel = parse_plan(_PLAN_MD_PARALLEL_PROSE)
+    # Only the explicitly-stated "X and Y ... in parallel" groups.
+    assert parallel == {1, 2, 9, 10}
+    # The range "3-7" must never leak in as parallel steps.
+    assert 3 not in parallel
+    assert 7 not in parallel
+
+
+def test_parse_parallel_spec_explicit_marker_wins():
+    """An explicit 'Parallel:' marker is authoritative and ignores prose."""
+    nums = _parse_parallel_spec([
+        "Parallel: 1, 2, 5",
+        "Steps 8 and 9 can be done in parallel",  # ignored — marker present
+    ])
+    assert nums == {1, 2, 5}
+
+
+def test_parse_parallel_spec_bare_number_list():
+    """A bare-number list (e.g. '- 2' / '3') is treated as parallel steps."""
+    nums = _parse_parallel_spec(["- 2", "3", "* 4"])
+    assert nums == {2, 3, 4}
+
+
+def test_parse_parallel_spec_ignores_lone_numbers_in_prose():
+    """Lone numbers in prose (not an 'X and Y' group) are not parallelized."""
+    nums = _parse_parallel_spec([
+        "Step 5 depends on step 3 and must run after it.",  # no 'parallel' word
+    ])
+    assert nums == set()
+
+
+def test_parse_parallel_spec_empty():
+    assert _parse_parallel_spec([]) == set()

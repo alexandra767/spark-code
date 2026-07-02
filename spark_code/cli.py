@@ -11,6 +11,7 @@ import click
 from rich.box import ROUNDED
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.markup import escape as _esc
 from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
@@ -26,12 +27,13 @@ from .hooks import HookManager
 from .mcp.client import MCPClient
 from .mcp.registry import find_mcp_configs
 from .memory import Memory
-from .model import PROVIDERS, ModelClient
+from .model import PROVIDERS, ModelClient, resolve_real_model_name
 from .permissions import PermissionManager
 from .pinned import PinnedFiles
 from .plan_executor import execute_plan
-from .projectplan import extract_keywords, fetch_rag_context
+from .platform_info import format_platform_prompt
 from .project_detect import detect_project_type
+from .projectplan import extract_keywords, fetch_rag_context
 from .skills.base import SkillRegistry, check_skill_compatibility
 from .snippets import SnippetLibrary
 from .stats import SessionStats
@@ -44,17 +46,16 @@ from .tools.edit_file import EditFileTool
 from .tools.glob_search import GlobTool
 from .tools.grep_search import GrepTool
 from .tools.list_dir import ListDirTool
+from .tools.rag_search import RagSearchTool
 from .tools.read_file import ReadFileTool
 from .tools.spawn_worker import SpawnWorkerTool
 from .tools.wait_for_workers import WaitForWorkersTool
 from .tools.web_fetch import WebFetchTool
 from .tools.web_search import WebSearchTool
 from .tools.write_file import WriteFileTool
-from .tools.rag_search import RagSearchTool
 from .ui.hotkeys import TeamStatusMonitor
 from .ui.input import create_session
 from .ui.theme import get_theme
-from .platform_info import format_platform_prompt
 from .watcher import FileWatcher
 
 
@@ -138,9 +139,48 @@ def _make_session_label(context) -> str:
     return ""
 
 
+def _redacted_config(config: dict) -> dict:
+    """Deep-copy config with any api_key values masked, for safe display."""
+    import copy
+
+    def _mask(obj):
+        if isinstance(obj, dict):
+            return {k: ("***redacted***" if "api_key" in k.lower() and v else _mask(v))
+                    for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_mask(v) for v in obj]
+        return obj
+
+    return _mask(copy.deepcopy(config))
+
+
+def _sessions_dir(create: bool = True) -> str:
+    """Return the session-history directory, normalizing a legacy collision.
+
+    ``~/.spark/history`` was historically (mis)used as the prompt-toolkit input
+    history FILE, which shadows this DIRECTORY of session JSONs — the reason
+    --resume/--continue/history/fork silently never worked. If that stray file
+    is present, move it aside (the input history now lives at
+    ``~/.spark/input_history``) so the directory can be created.
+    """
+    d = os.path.expanduser("~/.spark/history")
+    if os.path.isfile(d):
+        legacy = os.path.expanduser("~/.spark/input_history")
+        try:
+            if not os.path.exists(legacy):
+                os.rename(d, legacy)
+            else:
+                os.remove(d)
+        except OSError:
+            pass
+    if create:
+        os.makedirs(d, exist_ok=True)
+    return d
+
+
 def _get_latest_session() -> str:
     """Return the path to the most recent session file, or empty string."""
-    history_dir = os.path.expanduser("~/.spark/history")
+    history_dir = _sessions_dir(create=False)
     if not os.path.isdir(history_dir):
         return ""
     sessions = sorted(
@@ -181,9 +221,39 @@ _SHELL_PREFIXES = (
 )
 
 
+# Prefixes that are also common English verbs — need a natural-language guard
+# so "make the tests pass" / "go through the code" aren't run as shell.
+_AMBIGUOUS_PREFIXES = {"make", "go", "cat", "cd", "rm", "cp", "mv", "ls"}
+_ENGLISH_AFTER_VERB = {
+    "the", "a", "an", "me", "my", "this", "that", "it", "them", "us", "some",
+    "your", "all", "through", "sure", "then", "again", "everything", "one",
+    "another", "yourself", "him", "her", "please", "and", "to", "into", "up",
+    "down", "over", "back", "out", "off", "on", "in",
+}
+
+
 def _is_shell_command(text: str) -> bool:
-    """Check if input looks like a direct shell command."""
-    return text.startswith(_SHELL_PREFIXES)
+    """Check if input looks like a direct shell command.
+
+    For prefixes that double as English verbs (make/go/cat/...), reject inputs
+    that read as a sentence ("make the tests pass") so they go to the model
+    instead of being executed literally.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if stripped.startswith("./"):
+        return True
+    if not stripped.startswith(_SHELL_PREFIXES):
+        return False
+    parts = stripped.split()
+    verb = parts[0].lower()
+    if verb in _AMBIGUOUS_PREFIXES:
+        if len(parts) >= 2 and parts[1].lower() in _ENGLISH_AFTER_VERB:
+            return False
+        if len(parts) > 6:  # real invocations of these verbs are short
+            return False
+    return True
 
 
 _IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".svg")
@@ -343,9 +413,10 @@ _SPARK_LOGO = """\
 
 def print_banner(console: Console, config: dict, mcp_count: int = 0,
                  skill_count: int = 0, spark_md_loaded: bool = False,
-                 project_type: str = ""):
+                 project_type: str = "", real_model_name: str | None = None):
     """Print startup banner — two-column layout matching Claude Code."""
-    model_name = get(config, "model", "name", default="unknown")
+    config_name = get(config, "model", "name", default="unknown")
+    model_name = real_model_name or config_name
     provider = get(config, "model", "provider", default="")
     cwd = os.getcwd()
     home = os.path.expanduser("~")
@@ -363,6 +434,8 @@ def print_banner(console: Console, config: dict, mcp_count: int = 0,
         left.append("\n")
     left.append("\n")
     left.append(f"  {model_name}", style="#88c0d0")
+    if real_model_name and real_model_name != config_name:
+        left.append(f"  (served as {config_name})", style="#4c566a")
     if provider:
         left.append(f" · {provider}", style="#4c566a")
     left.append(f"\n  {cwd}", style="#4c566a")
@@ -514,7 +587,8 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
         print_banner(console, config,
                      skill_count=len(skills.all()),
                      spark_md_loaded=bool(load_spark_md()),
-                     project_type=detect_project_type(os.getcwd()))
+                     project_type=detect_project_type(os.getcwd()),
+                     real_model_name=getattr(model, "real_model_name", "") or None)
         return None
 
     elif command == "/compact":
@@ -528,7 +602,7 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
     elif command == "/config":
         import yaml
         if not args:
-            console.print(Markdown(f"```yaml\n{yaml.dump(config, default_flow_style=False)}```"))
+            console.print(Markdown(f"```yaml\n{yaml.dump(_redacted_config(config), default_flow_style=False)}```"))
             return None
 
         sub_parts = args.strip().split(maxsplit=2)
@@ -545,6 +619,16 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
             value = sub_parts[2]
             ok, msg = set_config(config, key_path, value)
             if ok:
+                # Apply to the live objects so the change takes effect this
+                # session (set_config only mutates the config dict/file).
+                if key_path == "permissions.mode" and permissions is not None:
+                    permissions.mode = value.strip()
+                    config["_plan_mode"] = False
+                elif key_path == "model.temperature":
+                    try:
+                        model.temperature = float(value)
+                    except (TypeError, ValueError):
+                        pass
                 console.print(f"[#a3be8c]{msg}[/#a3be8c]")
             else:
                 console.print(f"[#bf616a]{msg}[/#bf616a]")
@@ -558,13 +642,20 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
             return None
 
         else:
-            console.print(Markdown(f"```yaml\n{yaml.dump(config, default_flow_style=False)}```"))
+            console.print(Markdown(f"```yaml\n{yaml.dump(_redacted_config(config), default_flow_style=False)}```"))
             return None
 
     elif command == "/model":
         if not args:
-            # Show current model info
-            console.print(f"Model: {get(config, 'model', 'name')}")
+            # Show current model info. Use the name resolved once at startup
+            # (avoids a blocking 2s HTTP call on the event loop every /model).
+            config_name = get(config, "model", "name")
+            real_name = getattr(model, "real_model_name", "") or None
+            if real_name and real_name != config_name:
+                console.print(f"Model: {real_name}")
+                console.print(f"Served as: {config_name} [#4c566a](alias)[/#4c566a]")
+            else:
+                console.print(f"Model: {config_name}")
             console.print(f"Provider: {get(config, 'model', 'provider', default='unknown')}")
             console.print(f"Endpoint: {get(config, 'model', 'endpoint')}")
             console.print(f"Temperature: {get(config, 'model', 'temperature')}")
@@ -795,13 +886,30 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
             console.print("[#ebcb8b]Usage: /image <file_path> [prompt][/#ebcb8b]")
             console.print("[#8899aa]Example: /image ~/Desktop/screenshot.png what's wrong with this UI?[/#8899aa]")
             return None
-        # Parse: first token is path, rest is prompt
-        img_parts = args.split(maxsplit=1)
-        img_path = os.path.expanduser(img_parts[0])
-        img_prompt = img_parts[1] if len(img_parts) > 1 else "Describe this image."
+        # Parse: first token is path, rest is prompt. Use shlex so dragged-in
+        # paths with escaped/quoted spaces (macOS) stay intact.
+        import shlex
+        try:
+            tokens = shlex.split(args)
+        except ValueError:
+            tokens = args.split()
+        img_path = os.path.expanduser(tokens[0]) if tokens else ""
+        img_prompt = " ".join(tokens[1:]) if len(tokens) > 1 else "Describe this image."
         if not os.path.exists(img_path):
-            console.print(f"[#bf616a]File not found: {img_path}[/#bf616a]")
-            return None
+            # Fallback: a raw (unescaped) path with spaces — grow the prefix
+            # until an existing file is found, treating the remainder as prompt.
+            found = False
+            raw = args.strip()
+            for i in range(len(tokens), 0, -1):
+                cand = os.path.expanduser(" ".join(tokens[:i]))
+                if os.path.exists(cand):
+                    img_path = cand
+                    img_prompt = " ".join(tokens[i:]) or "Describe this image."
+                    found = True
+                    break
+            if not found:
+                console.print(f"[#bf616a]File not found: {_esc(img_path or raw)}[/#bf616a]")
+                return None
         # Read and encode image
         mime_type = mimetypes.guess_type(img_path)[0] or "image/png"
         with open(img_path, "rb") as f:
@@ -818,20 +926,32 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
             return None
         valid_modes = {"ask", "auto", "trust"}
         if command == "/mode":
-            if args and args.strip() in valid_modes:
-                new_mode = args.strip()
+            target = args.strip() if args else ""
+            if target == "plan":
+                # Enter plan mode: explore with reads, prompt before writes.
+                config["_plan_mode"] = True
+                permissions.mode = "auto"
+                console.print("[#a3be8c]Switched to plan mode[/#a3be8c]")
+                return None
+            if target in valid_modes:
+                new_mode = target
             else:
-                console.print(f"[#88c0d0]Current mode:[/#88c0d0] [#d8dee9]{permissions.mode}[/#d8dee9]")
-                console.print("[#8899aa]Usage: /mode <ask|auto|trust>  or  shift+tab to cycle[/#8899aa]")
+                display = "plan" if config.get("_plan_mode") else permissions.mode
+                console.print(f"[#88c0d0]Current mode:[/#88c0d0] [#d8dee9]{display}[/#d8dee9]")
+                console.print("[#8899aa]Usage: /mode <ask|auto|trust|plan>  or  shift+tab to cycle[/#8899aa]")
                 console.print("[#8899aa]  ask   — confirm every tool call[/#8899aa]")
                 console.print("[#8899aa]  auto  — allow reads, ask for writes[/#8899aa]")
                 console.print("[#8899aa]  trust — allow all tool calls[/#8899aa]")
-                console.print("[#8899aa]  plan  — plan before executing (via shift+tab)[/#8899aa]")
+                console.print("[#8899aa]  plan  — plan before executing (reads free, writes prompt)[/#8899aa]")
                 return None
         else:
             new_mode = command[1:]  # /trust -> trust, /auto -> auto, /ask -> ask
+        # Any explicit mode switch exits plan mode.
+        config["_plan_mode"] = False
         permissions.mode = new_mode
         config["permissions"]["mode"] = new_mode
+        if team_manager is not None:
+            team_manager.worker_permission_mode = new_mode
         console.print(f"[#a3be8c]Switched to {new_mode} mode[/#a3be8c]")
         return None
 
@@ -867,9 +987,9 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
                 }.get(w["status"], w["status"])
                 console.print(
                     f"  [#88c0d0]#{w['id']}[/#88c0d0] "
-                    f"[#d8dee9]{w['name']}[/#d8dee9]  "
+                    f"[#d8dee9]{_esc(str(w['name']))}[/#d8dee9]  "
                     f"{status_icon}  "
-                    f"[#8899aa]{w['prompt'][:60]}[/#8899aa]"
+                    f"[#8899aa]{_esc(str(w['prompt'])[:60])}[/#8899aa]"
                 )
             return None
 
@@ -904,8 +1024,8 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
             return None
         for m in msgs:
             console.print(
-                f"  [#5e81ac][{m.from_name}][/#5e81ac] "
-                f"[#d8dee9]{m.content}[/#d8dee9]"
+                f"  [#5e81ac]\\[{_esc(str(m.from_name))}][/#5e81ac] "
+                f"[#d8dee9]{_esc(str(m.content))}[/#d8dee9]"
             )
         return None
 
@@ -928,7 +1048,7 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
             console.print(
                 f"  [#88c0d0]#{t.id}[/#88c0d0]  "
                 f"{status_icon} {t.status:<12}  "
-                f"[#d8dee9]{t.description[:60]}[/#d8dee9]"
+                f"[#d8dee9]{_esc(str(t.description)[:60])}[/#d8dee9]"
                 f"{assigned}"
             )
         return None
@@ -1002,7 +1122,10 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
                 "- Summary of what will be done\n"
                 "- Numbered steps with clear descriptions\n"
                 "- Files that will be modified or created\n"
-                "- Which steps can be done in parallel (mark them clearly)\n"
+                "- A '## Parallelization' section. On its own line, list the step\n"
+                "  numbers that are INDEPENDENT and safe to run in parallel using\n"
+                "  the exact marker format: 'Parallel: 1, 2' (only truly\n"
+                "  independent steps; omit steps that depend on earlier ones).\n"
                 "- Any risks or considerations\n\n"
                 "After writing plan.md, tell the user: Review the plan with /plan show, then /plan go to execute."
             )
@@ -1069,13 +1192,21 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
             keywords = extract_keywords(plan_prompt)
             console.print(f"[#88c0d0]▸ Researching docs for: {', '.join(keywords) or plan_prompt}[/#88c0d0]")
 
-            rag_context = fetch_rag_context(keywords, project_type, prompt=plan_prompt)
+            # fetch_rag_context is async; this handler is sync and runs inside
+            # the REPL's event loop, so drive the coroutine on a worker thread.
+            _rag = fetch_rag_context(keywords, project_type, prompt=plan_prompt)
+            if asyncio.iscoroutine(_rag):
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _ex:
+                    rag_context = _ex.submit(asyncio.run, _rag).result()
+            else:
+                rag_context = _rag
 
             if rag_context:
                 ref_count = rag_context.count("[Ref ")
                 console.print(f"[#a3be8c]  ✓ Found {ref_count} reference(s) from knowledge base[/#a3be8c]")
             else:
-                console.print(f"[#ebcb8b]  ⚠ No RAG results (service down or no matches)[/#ebcb8b]")
+                console.print("[#ebcb8b]  ⚠ No RAG results (service down or no matches)[/#ebcb8b]")
             # Discover MCP tools
             mcp_section = ""
             mcp_configs = find_mcp_configs()
@@ -1104,7 +1235,7 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
             )
 
             console.print(f"[#88c0d0]▸ {'Writing' if is_empty_dir else 'Exploring codebase and writing'} projectplan.md...[/#88c0d0]")
-            console.print(f"[#4c566a]  (This may take a minute with large models. Ctrl+C to cancel)[/#4c566a]")
+            console.print("[#4c566a]  (This may take a minute with large models. Ctrl+C to cancel)[/#4c566a]")
 
             rag_section = ""
             if rag_context:
@@ -1136,7 +1267,8 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
                     "Write projectplan.md IMMEDIATELY using write_file.\n\n"
                     "Format: ## Reference Material (if docs above), ---, "
                     "## Summary, ## Steps (numbered, tag with [see Ref N]), "
-                    "## Parallelization, ## Files, ## Risks\n\n"
+                    "## Parallelization (list independent step numbers as 'Parallel: 1, 2'), "
+                    "## Files, ## Risks\n\n"
                     "Keep the plan concise — max 8 steps. Write the file NOW."
                 )
             else:
@@ -1154,7 +1286,8 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
                     "3. Use write_file to save projectplan.md\n\n"
                     "Format: ## Reference Material (if docs above), ---, "
                     "## Summary, ## Steps (numbered, tag with [see Ref N]), "
-                    "## Parallelization, ## Files, ## Risks\n\n"
+                    "## Parallelization (list independent step numbers as 'Parallel: 1, 2'), "
+                    "## Files, ## Risks\n\n"
                     "Do NOT use rag_search — docs are pre-researched.\n"
                     "After writing, say: Review with /projectplan show, then /projectplan go to execute."
                 )
@@ -1261,7 +1394,7 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
 
     elif command == "/history":
         from datetime import datetime as _dt
-        history_dir = os.path.expanduser("~/.spark/history")
+        history_dir = _sessions_dir()
         if not os.path.isdir(history_dir):
             console.print("[#8899aa]No saved sessions yet.[/#8899aa]")
             return None
@@ -1451,7 +1584,7 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
         # Save current session and start fresh
         from datetime import datetime as _dt
         try:
-            history_dir = os.path.expanduser("~/.spark/history")
+            history_dir = _sessions_dir()
             os.makedirs(history_dir, exist_ok=True)
             ts = _dt.now().strftime("%Y%m%d_%H%M%S")
             label = _make_session_label(context)
@@ -1477,7 +1610,7 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
                 console.print("[bold #eceff4]Saved snippets:[/bold #eceff4]")
                 for name, prompt in all_snippets.items():
                     preview = prompt[:60].replace("\n", " ")
-                    console.print(f"  [#88c0d0]{name}[/#88c0d0]  [#8899aa]{preview}[/#8899aa]")
+                    console.print(f"  [#88c0d0]{_esc(name)}[/#88c0d0]  [#8899aa]{_esc(preview)}[/#8899aa]")
             return None
         sub_parts = args.strip().split(maxsplit=2)
         if sub_parts[0].lower() == "save":
@@ -1537,7 +1670,7 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
         out_tokens = model.total_output_tokens
         cost = model.estimated_cost
         provider = get(config, "model", "provider", default="ollama")
-        console.print(f"[bold #eceff4]Session Cost[/bold #eceff4]")
+        console.print("[bold #eceff4]Session Cost[/bold #eceff4]")
         console.print(f"  [#88c0d0]Provider:[/#88c0d0] [#d8dee9]{provider}[/#d8dee9]")
         console.print(f"  [#88c0d0]Input tokens:[/#88c0d0] [#d8dee9]{in_tokens:,}[/#d8dee9]")
         console.print(f"  [#88c0d0]Output tokens:[/#88c0d0] [#d8dee9]{out_tokens:,}[/#d8dee9]")
@@ -1550,7 +1683,7 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
                 remaining = float(budget) - cost
                 console.print(f"  [#8899aa]Budget remaining: ${remaining:.4f}[/#8899aa]")
         else:
-            console.print(f"  [#8899aa]Local model — no cost[/#8899aa]")
+            console.print("  [#8899aa]Local model — no cost[/#8899aa]")
         return None
 
     elif command == "/watch":
@@ -1576,9 +1709,11 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
                     console.print("[#8899aa]No changes to checkpoint.[/#8899aa]")
                 else:
                     console.print(f"[#a3be8c]Checkpoint created: {output}[/#a3be8c]")
-                    # Immediately restore working state (stash keeps a copy)
+                    # Re-apply the changes so the working tree is unchanged while
+                    # the stash entry REMAINS as the checkpoint. `pop` would have
+                    # deleted the very checkpoint we just made.
                     subprocess.run(
-                        ["git", "stash", "pop", "--index"],
+                        ["git", "stash", "apply", "--index"],
                         capture_output=True, text=True, timeout=10,
                     )
                     console.print("[#8899aa]Working state preserved. Use /rollback to restore.[/#8899aa]")
@@ -1595,16 +1730,28 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
                 ["git", "stash", "list"],
                 capture_output=True, text=True, timeout=10,
             )
-            stashes = [l for l in result.stdout.strip().split("\n")
-                       if l and "spark-checkpoint" in l]
-            if not stashes:
+            # Keep the REAL stash ref (stash@{N}) alongside each checkpoint so
+            # the display index maps correctly even when user stashes are
+            # interleaved with checkpoints.
+            checkpoints = []  # (real_ref, description)
+            for line in result.stdout.strip().split("\n"):
+                if line and "spark-checkpoint" in line:
+                    ref = line.split(":", 1)[0].strip()  # "stash@{2}"
+                    checkpoints.append((ref, line))
+            if not checkpoints:
                 console.print("[#8899aa]No checkpoints found. Use /checkpoint first.[/#8899aa]")
                 return None
 
             if args and args.strip().isdigit():
                 idx = int(args.strip())
+                if idx < 0 or idx >= len(checkpoints):
+                    console.print(f"[#bf616a]No checkpoint {idx}. Use /rollback to list.[/#bf616a]")
+                    return None
+                real_ref = checkpoints[idx][0]
+                # `apply` (not `pop`) so the checkpoint survives and can be
+                # rolled back to again.
                 restore_result = subprocess.run(
-                    ["git", "stash", "pop", f"stash@{{{idx}}}"],
+                    ["git", "stash", "apply", real_ref],
                     capture_output=True, text=True, timeout=10,
                 )
                 if restore_result.returncode == 0:
@@ -1613,7 +1760,7 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
                     console.print(f"[#bf616a]{restore_result.stderr.strip()}[/#bf616a]")
             else:
                 console.print("[bold #eceff4]Checkpoints:[/bold #eceff4]")
-                for i, stash in enumerate(stashes[:10]):
+                for i, (_ref, stash) in enumerate(checkpoints[:10]):
                     console.print(f"  [#88c0d0]{i}.[/#88c0d0] [#d8dee9]{stash}[/#d8dee9]")
                 console.print("[#8899aa]Use /rollback <number> to restore[/#8899aa]")
         except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -1708,7 +1855,7 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
         ok, reason = check_skill_compatibility(skill)
         if not ok:
             console.print(f"[#ebcb8b]⚠ {reason}[/#ebcb8b]")
-            console.print(f"[#8899aa]Skill will run anyway. Start the dependency first if it needs one.[/#8899aa]")
+            console.print("[#8899aa]Skill will run anyway. Start the dependency first if it needs one.[/#8899aa]")
         return skill.get_prompt(args)
 
     console.print(f"[yellow]Unknown command: {command}. Type /help for available commands.[/yellow]")
@@ -1763,11 +1910,22 @@ async def run_interactive(config: dict, resume_session: str = "",
     if project_type:
         system_prompt += f"\n\nThis is a {project_type}."
 
+    # Resolve real model name (unmasks vLLM --served-model-name aliasing).
+    # Pass the configured name so the correct entry is picked on multi-model
+    # servers (Ollama lists every pulled model).
+    real_model_name = await resolve_real_model_name(
+        endpoint=get(config, "model", "endpoint", default=""),
+        api_key=get(config, "model", "api_key", default=""),
+        timeout=1.5,
+        configured_model=get(config, "model", "name", default=""),
+    )
+
     # Print banner
     print_banner(console, config, mcp_count=len(mcp_tools),
                  skill_count=len(skills.all()),
                  spark_md_loaded=bool(spark_md),
-                 project_type=project_type)
+                 project_type=project_type,
+                 real_model_name=real_model_name)
 
     # Initialize components
     model = ModelClient(
@@ -1778,6 +1936,7 @@ async def run_interactive(config: dict, resume_session: str = "",
         api_key=get(config, "model", "api_key", default=""),
         provider=get(config, "model", "provider", default="ollama"),
         timeout=float(get(config, "model", "timeout", default=300)),
+        real_model_name=real_model_name or "",
     )
 
     # Startup connection check (non-blocking)
@@ -1887,7 +2046,8 @@ async def run_interactive(config: dict, resume_session: str = "",
         )
         console.print(f"  [#88c0d0]Workers will use: {worker_model_name}[/#88c0d0]")
     team_manager = TeamManager(model, tools, console, task_store,
-                               stats=session_stats, worker_model=worker_model_obj)
+                               stats=session_stats, worker_model=worker_model_obj,
+                               worker_permission_mode=permissions.mode)
 
     # Give the lead agent the ability to spawn workers
     spawn_tool = SpawnWorkerTool()
@@ -1952,28 +2112,35 @@ async def run_interactive(config: dict, resume_session: str = "",
 
         return parts
 
-    # Track plan mode separately from permission mode
-    plan_mode = {"active": False}
+    # Track plan mode in the shared config so slash-command handlers
+    # (/ask, /auto, /trust, /mode) can also see and clear it.
+    plan_mode = {"active": bool(config.get("_plan_mode", False))}
+
+    def _set_plan(active: bool):
+        plan_mode["active"] = active
+        config["_plan_mode"] = active
 
     def mode_switch():
         """Cycle modes: ask → auto → trust → plan → ask (Shift+Tab)."""
         from .ui.input import _MODE_CYCLE
-        if plan_mode["active"]:
-            current = "plan"
-        else:
-            current = permissions.mode
+        # Sync from config in case a slash command changed plan state.
+        plan_mode["active"] = bool(config.get("_plan_mode", False))
+        current = "plan" if plan_mode["active"] else permissions.mode
         idx = _MODE_CYCLE.index(current) if current in _MODE_CYCLE else 0
         next_mode = _MODE_CYCLE[(idx + 1) % len(_MODE_CYCLE)]
         if next_mode == "plan":
-            plan_mode["active"] = True
-            permissions.mode = "trust"  # plan mode auto-trusts tools
+            _set_plan(True)
+            # Plan mode explores with reads but still PROMPTS before any write
+            # or bash (auto), rather than silently trusting everything.
+            permissions.mode = "auto"
         else:
-            plan_mode["active"] = False
+            _set_plan(False)
             permissions.mode = next_mode
-        config["permissions"]["mode"] = next_mode
+            config["permissions"]["mode"] = next_mode
 
     def mode_callback():
         """Line 2: ⏵⏵ mode on · shift+tab to switch · ctrl+t team."""
+        plan_mode["active"] = bool(config.get("_plan_mode", False))
         if plan_mode["active"]:
             display_mode = "plan"
         else:
@@ -2043,16 +2210,16 @@ async def run_interactive(config: dict, resume_session: str = "",
                 status_text = "[#bf616a]failed[/#bf616a]"
 
             console.print(
-                f"  {icon} [bold #d8dee9]{w['name']}[/bold #d8dee9]  "
+                f"  {icon} [bold #d8dee9]{_esc(str(w['name']))}[/bold #d8dee9]  "
                 f"{status_text}"
             )
             console.print(
-                f"    [#8899aa]Task: {w['prompt'][:70]}[/#8899aa]"
+                f"    [#8899aa]Task: {_esc(str(w['prompt'])[:70])}[/#8899aa]"
             )
             if w["result"] and w["status"] != "running":
                 result_preview = w["result"][:100].replace("\n", " ")
                 console.print(
-                    f"    [#4c566a]Result: {result_preview}[/#4c566a]"
+                    f"    [#4c566a]Result: {_esc(result_preview)}[/#4c566a]"
                 )
 
         # Messages
@@ -2063,8 +2230,8 @@ async def run_interactive(config: dict, resume_session: str = "",
             console.print("[#4c566a]  ─────────────────────────────────────────[/#4c566a]")
             for m in msgs:
                 console.print(
-                    f"  [#5e81ac][{m.from_name}][/#5e81ac] "
-                    f"[#d8dee9]{m.content[:80]}[/#d8dee9]"
+                    f"  [#5e81ac]\\[{_esc(str(m.from_name))}][/#5e81ac] "
+                    f"[#d8dee9]{_esc(str(m.content)[:80])}[/#d8dee9]"
                 )
 
         console.print("[#4c566a]  ─────────────────────────────────────────[/#4c566a]")
@@ -2281,11 +2448,15 @@ async def run_interactive(config: dict, resume_session: str = "",
                     start_t = _t.monotonic()
                     first_token_t = None
                     total_chars = 0
-                    async for chunk in model.chat(bench_ctx.get_messages(), tools=None, stream=True):
-                        if chunk["type"] == "text":
-                            if first_token_t is None:
-                                first_token_t = _t.monotonic()
-                            total_chars += len(chunk["content"])
+                    try:
+                        async for chunk in model.chat(bench_ctx.get_messages(), tools=None, stream=True):
+                            if chunk["type"] == "text":
+                                if first_token_t is None:
+                                    first_token_t = _t.monotonic()
+                                total_chars += len(chunk["content"])
+                    except Exception as e:
+                        console.print(f"  [#bf616a]Benchmark failed: {_esc(str(e))}[/#bf616a]")
+                        continue
                     end_t = _t.monotonic()
                     ttft = (first_token_t - start_t) if first_token_t else 0
                     total_time = end_t - start_t
@@ -2295,7 +2466,7 @@ async def run_interactive(config: dict, resume_session: str = "",
                     console.print(f"  [#88c0d0]Total time:[/#88c0d0] [#d8dee9]{total_time:.2f}s[/#d8dee9]")
                     console.print(f"  [#88c0d0]Output:[/#88c0d0] [#d8dee9]~{int(est_tokens)} tokens ({total_chars} chars)[/#d8dee9]")
                     console.print(f"  [#88c0d0]Speed:[/#88c0d0] [#a3be8c]{tps:.1f} tokens/sec[/#a3be8c]")
-                    console.print(f"  [#88c0d0]Model:[/#88c0d0] [#d8dee9]{get(config, 'model', 'name')}[/#d8dee9]")
+                    console.print(f"  [#88c0d0]Model:[/#88c0d0] [#d8dee9]{_esc(str(get(config, 'model', 'name')))}[/#d8dee9]")
 
                 elif result == "__BENCHMARK__":
                     import time as _btime
@@ -2325,7 +2496,7 @@ async def run_interactive(config: dict, resume_session: str = "",
                         console.print(f"  [#a3be8c]Generation speed: {speed:.1f} tok/s[/#a3be8c]")
                         console.print(f"  [#a3be8c]Total: {token_count} tokens in {total_time:.1f}s[/#a3be8c]")
                     except (KeyboardInterrupt, asyncio.CancelledError):
-                        console.print(f"\n  [#ebcb8b]Benchmark cancelled.[/#ebcb8b]")
+                        console.print("\n  [#ebcb8b]Benchmark cancelled.[/#ebcb8b]")
                     except Exception as e:
                         console.print(f"  [#bf616a]Benchmark failed: {e}[/#bf616a]")
                     continue
@@ -2347,10 +2518,15 @@ async def run_interactive(config: dict, resume_session: str = "",
                     if not tool_name or not command_str:
                         console.print("[#ebcb8b]Usage: /teach <name> <description> -- <command>[/#ebcb8b]")
                     else:
-                        ct = custom_tool_registry.add(tool_name, tool_desc, command_str)
-                        tools.register(ct)
-                        console.print(f"[#a3be8c]Taught: {tool_name} — {tool_desc}[/#a3be8c]")
-                        console.print(f"[#8899aa]Command: {command_str}[/#8899aa]")
+                        try:
+                            ct = custom_tool_registry.add(tool_name, tool_desc, command_str)
+                        except ValueError as e:
+                            # e.g. name collides with a built-in tool
+                            console.print(f"[#bf616a]Can't teach '{_esc(tool_name)}': {_esc(str(e))}[/#bf616a]")
+                        else:
+                            tools.register(ct)
+                            console.print(f"[#a3be8c]Taught: {_esc(tool_name)} — {_esc(tool_desc)}[/#a3be8c]")
+                            console.print(f"[#8899aa]Command: {_esc(command_str)}[/#8899aa]")
 
                 elif result.startswith("__BRANCH__"):
                     branch_args = result[len("__BRANCH__"):]
@@ -2405,23 +2581,24 @@ async def run_interactive(config: dict, resume_session: str = "",
                              "h1{color:#ebcb8b}h2{color:#88c0d0;border-bottom:1px solid #4c566a}",
                              "</style></head><body>",
                              "<h1>Spark Code Session</h1>"]
+                    import html as _html
                     for msg in context.messages:
                         role = msg.get("role", "")
                         content = msg.get("content", "") or ""
                         if role == "user" and isinstance(content, str):
-                            lines.append(f"<h2 class='user'>User</h2><p>{content[:2000]}</p>")
+                            lines.append(f"<h2 class='user'>User</h2><p>{_html.escape(content[:2000])}</p>")
                         elif role == "assistant" and isinstance(content, str) and content:
-                            lines.append(f"<h2 class='assistant'>Assistant</h2><p>{content[:2000]}</p>")
+                            lines.append(f"<h2 class='assistant'>Assistant</h2><p>{_html.escape(content[:2000])}</p>")
                         elif role == "tool":
                             name = msg.get("name", "tool")
                             preview = (content[:500] + "...") if len(content) > 500 else content
-                            lines.append(f"<p class='tool'>Tool: {name}</p><pre>{preview}</pre>")
+                            lines.append(f"<p class='tool'>Tool: {_html.escape(str(name))}</p><pre>{_html.escape(preview)}</pre>")
                     lines.append("</body></html>")
                     html_content = "\n".join(lines)
 
                     if share_format == "gist":
                         # Export as markdown for gist
-                        md_lines = [f"# Spark Code Session\n"]
+                        md_lines = ["# Spark Code Session\n"]
                         for msg in context.messages:
                             role = msg.get("role", "")
                             content = msg.get("content", "") or ""
@@ -2443,7 +2620,7 @@ async def run_interactive(config: dict, resume_session: str = "",
 
                 elif result.startswith("__SEARCH__"):
                     query = result[len("__SEARCH__"):].lower()
-                    history_dir = os.path.expanduser("~/.spark/history")
+                    history_dir = _sessions_dir()
                     if not os.path.isdir(history_dir):
                         console.print("[#8899aa]No saved sessions.[/#8899aa]")
                     else:
@@ -2473,15 +2650,16 @@ async def run_interactive(config: dict, resume_session: str = "",
                                 break
 
                         if not matches:
-                            console.print(f"[#8899aa]No sessions matching '{query}'[/#8899aa]")
+                            console.print(f"[#8899aa]No sessions matching '{_esc(query)}'[/#8899aa]")
                         else:
-                            console.print(f"[bold #eceff4]Sessions matching '{query}':[/bold #eceff4]")
+                            console.print(f"[bold #eceff4]Sessions matching '{_esc(query)}':[/bold #eceff4]")
                             for label, snippet, fname in matches:
-                                console.print(f"  [#88c0d0]{label}[/#88c0d0]")
-                                console.print(f"    [#8899aa]...{snippet}...[/#8899aa]")
+                                console.print(f"  [#88c0d0]{_esc(str(label))}[/#88c0d0]")
+                                console.print(f"    [#8899aa]...{_esc(str(snippet))}...[/#8899aa]")
                             console.print("[#8899aa]Use /history <name> to resume[/#8899aa]")
 
                 elif result == "__ANALYTICS__":
+                    stats = session_stats
                     if not stats:
                         console.print("[#8899aa]No stats available.[/#8899aa]")
                     else:
@@ -2540,7 +2718,7 @@ async def run_interactive(config: dict, resume_session: str = "",
                     if not last_user_message:
                         console.print("  [#ebcb8b]No previous message to retry.[/#ebcb8b]")
                     else:
-                        console.print(f"  [#88c0d0]Retrying: {last_user_message[:60]}...[/#88c0d0]")
+                        console.print(f"  [#88c0d0]Retrying: {_esc(last_user_message[:60])}...[/#88c0d0]")
                         try:
                             team_monitor.start()
                             await _run_with_notify(agent.run(last_user_message))
@@ -2553,7 +2731,7 @@ async def run_interactive(config: dict, resume_session: str = "",
                     continue
 
                 elif result == "__CONTINUE__":
-                    from spark_code.agent import load_checkpoint, CHECKPOINT_DIR
+                    from spark_code.agent import CHECKPOINT_DIR, load_checkpoint
                     checkpoint_path = str(CHECKPOINT_DIR / "latest.json")
                     data = load_checkpoint(checkpoint_path)
                     if not data:
@@ -2636,6 +2814,13 @@ async def run_interactive(config: dict, resume_session: str = "",
                         continue
 
                     pconf = providers[provider_name]
+                    # Resolve the underlying model name for the new endpoint.
+                    new_real = await resolve_real_model_name(
+                        endpoint=pconf.get("endpoint", ""),
+                        api_key=pconf.get("api_key", ""),
+                        timeout=1.5,
+                        configured_model=pconf.get("model", ""),
+                    )
                     # Close old client
                     await model.close()
                     # Create new client
@@ -2647,14 +2832,19 @@ async def run_interactive(config: dict, resume_session: str = "",
                         api_key=pconf.get("api_key", ""),
                         provider=provider_name,
                         timeout=float(pconf.get("timeout", 300)),
+                        real_model_name=new_real or "",
                     )
                     # Update config
                     config["model"]["name"] = pconf.get("model", "unknown")
                     config["model"]["endpoint"] = pconf.get("endpoint", "http://localhost:11434")
                     config["model"]["provider"] = provider_name
 
-                    # Update agent's model reference
+                    # Update every holder of the model client — the agent AND the
+                    # team manager (which kept the now-closed client, so /team
+                    # after a switch would hit a closed httpx client).
                     agent.model = model
+                    if team_manager is not None:
+                        team_manager.model = model
                     console.print(f"[#a3be8c]Switched to {provider_name} ({pconf.get('model', '?')})[/#a3be8c]")
                     console.print("[#8899aa]Conversation context preserved[/#8899aa]")
                 else:
@@ -2674,11 +2864,11 @@ async def run_interactive(config: dict, resume_session: str = "",
                     if is_projectplan:
                         pp_path = os.path.join(os.getcwd(), "projectplan.md")
                         if os.path.exists(pp_path):
-                            console.print(f"\n[#a3be8c]▸ projectplan.md created successfully[/#a3be8c]")
-                            console.print(f"[#88c0d0]  /projectplan show  to review  ·  /projectplan go  to execute[/#88c0d0]")
+                            console.print("\n[#a3be8c]▸ projectplan.md created successfully[/#a3be8c]")
+                            console.print("[#88c0d0]  /projectplan show  to review  ·  /projectplan go  to execute[/#88c0d0]")
                         else:
-                            console.print(f"\n[#bf616a]▸ projectplan.md was NOT created — model may have failed[/#bf616a]")
-                            console.print(f"[#8899aa]  Try again or use /projectplan <prompt> with a simpler request[/#8899aa]")
+                            console.print("\n[#bf616a]▸ projectplan.md was NOT created — model may have failed[/#bf616a]")
+                            console.print("[#8899aa]  Try again or use /projectplan <prompt> with a simpler request[/#8899aa]")
             elif _is_shell_command(user_input):
                 # Direct shell command — run via agent with explicit instruction
                 run_prompt = (
@@ -2730,9 +2920,10 @@ async def run_interactive(config: dict, resume_session: str = "",
                     if file_context:
                         user_input += "\n\n" + "\n\n".join(file_context)
 
-                # In plan mode, wrap prompt to plan first
-                # Skip wrapping for short conversational messages
-                if plan_mode["active"] and len(user_input.split()) > 3:
+                # In plan mode, wrap prompt to plan first. Applies to ALL
+                # requests — a short command like "delete old tests" must not
+                # slip through unwrapped (and un-planned).
+                if config.get("_plan_mode", False):
                     user_input = (
                         f"The user wants you to PLAN before executing. "
                         f"Their request: {user_input}\n\n"
@@ -2772,7 +2963,7 @@ async def run_interactive(config: dict, resume_session: str = "",
         if context.turn_count > 0:
             try:
                 from datetime import datetime
-                history_dir = os.path.expanduser("~/.spark/history")
+                history_dir = _sessions_dir()
                 os.makedirs(history_dir, exist_ok=True)
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                 label = _make_session_label(context)
@@ -2785,6 +2976,12 @@ async def run_interactive(config: dict, resume_session: str = "",
             except Exception:
                 pass  # Don't crash on save failure
 
+        # Stop the file watcher so its poll task is cancelled cleanly.
+        if file_watcher is not None and getattr(file_watcher, "is_running", False):
+            try:
+                await file_watcher.stop()
+            except Exception:
+                pass
         await team_manager.stop_all()
         await model.close()
         await mcp_client.disconnect_all()
@@ -2835,17 +3032,24 @@ def _run_setup():
             "endpoint": "http://localhost:11434",
             "context_window": 32768,
         },
+        "sglang": {
+            "label": "SGLang (fast local inference server)",
+            "endpoint": "http://localhost:30000",
+            "context_window": 32768,
+        },
     }
     presets = {}
     for i, p in enumerate(_PROVIDER_INFO, 1):
-        presets[str(i)] = {**p, **_SETUP_EXTRAS[p["name"]]}
+        # Fall back to the provider's own fields if no setup-specific extras
+        # exist, so a provider added to _PROVIDER_INFO can't crash setup.
+        presets[str(i)] = {**p, **_SETUP_EXTRAS.get(p["name"], {})}
 
     console.print("  Choose a provider:\n")
     for key, preset in presets.items():
         console.print(f"    [#88c0d0]{key}[/#88c0d0]  {preset['label']}")
     console.print()
 
-    choice = input("  Enter number (1-6): ").strip()
+    choice = input(f"  Enter number (1-{len(presets)}): ").strip()
     if choice not in presets:
         console.print("[#bf616a]  Invalid choice. Run 'spark --setup' again.[/#bf616a]")
         return
@@ -3004,9 +3208,13 @@ async def _one_shot(config: dict, prompt: str):
         provider=get(config, "model", "provider", default="ollama"),
         timeout=float(get(config, "model", "timeout", default=300)),
     )
-    context = Context()
+    # Honor --trust/--auto/--yolo (main() writes them into config) instead of
+    # hardcoding "auto", so `spark --trust "do X"` doesn't still prompt.
+    agentic = config.get("_agentic", False)
+    context = Context(system_prompt=AGENTIC_PROMPT if agentic else SYSTEM_PROMPT)
     tools = build_tools()
-    permissions = PermissionManager(mode="auto")
+    permissions = PermissionManager(
+        mode=get(config, "permissions", "mode", default="auto"))
     agent = Agent(model, context, tools, permissions, console)
 
     try:

@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 from typing import AsyncIterator
+from urllib.parse import urlparse
 
 import httpx
 
@@ -18,6 +19,126 @@ logger = logging.getLogger(__name__)
 
 # Retryable HTTP status codes
 _RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
+
+
+class StreamError(Exception):
+    """A non-200 HTTP status raised from inside the streaming request so the
+    retry wrapper can decide whether to retry or surface it."""
+
+    def __init__(self, status_code: int, text: str):
+        self.status_code = status_code
+        self.text = text
+        super().__init__(f"API error ({status_code}): {text[:200]}")
+
+
+def _should_verify_tls(base: str) -> bool:
+    """Disable TLS verification only for genuinely local hosts.
+
+    Uses a real hostname parse rather than a substring check, so hosts like
+    ``api.localstack.evil.com`` or ``foo.localdomain.com`` are NOT treated as
+    local (which would silently disable certificate verification).
+    """
+    host = (urlparse(base).hostname or "").lower()
+    if not host:
+        return True
+    if host in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+        return False
+    # mDNS / LAN hostnames end in .local (e.g. spark-4a54.local)
+    if host.endswith(".local"):
+        return False
+    return True
+
+
+def _models_url(base: str) -> str:
+    """Build the `/models` URL for an OpenAI-compatible endpoint.
+
+    Handles bases that already include a version segment (``/v1``) or an
+    OpenAI-compat suffix (Gemini's ``/v1beta/openai``) so we don't produce a
+    doubled/wrong path that 404s.
+    """
+    base = base.rstrip("/")
+    if base.endswith("/models"):
+        return base
+    if base.endswith("/v1") or base.endswith("/openai") or "/v1beta" in base:
+        return base + "/models"
+    return base + "/v1/models"
+
+
+def _pick_real_model_name(data: list, configured_model: str = "") -> str | None:
+    """Given a `/v1/models` ``data`` list, return the underlying model name.
+
+    Handles vLLM's `--served-model-name` masquerade: when a model's ``root``
+    field differs from its ``id``, ``root`` is the real model and ``id`` is the
+    alias. ``root`` is often a HuggingFace path (e.g.
+    ``Intel/Qwen3-Coder-Next-int4-AutoRound``); we strip to the last path
+    component for display.
+
+    Selects the entry whose ``id`` matches ``configured_model`` when possible —
+    critical for multi-model servers (Ollama lists every pulled model), where
+    blindly taking ``data[0]`` reports an arbitrary, wrong model.
+    """
+    if not data:
+        return None
+    entry = None
+    if configured_model:
+        for e in data:
+            if e.get("id") == configured_model:
+                entry = e
+                break
+    if entry is None:
+        # No exact match: only fall back to the sole entry when unambiguous.
+        if len(data) == 1:
+            entry = data[0]
+        else:
+            return None
+    served_id = entry.get("id") or ""
+    root = entry.get("root") or ""
+    if root and root != served_id:
+        return root.split("/")[-1]
+    return served_id or None
+
+
+def resolve_real_model_name_sync(endpoint: str, api_key: str = "",
+                                 timeout: float = 2.0,
+                                 configured_model: str = "") -> str | None:
+    """Synchronous variant of `resolve_real_model_name` for non-async callers."""
+    if not endpoint:
+        return None
+    base = endpoint.rstrip("/")
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    try:
+        with httpx.Client(timeout=timeout, verify=_should_verify_tls(base),
+                          headers=headers) as client:
+            r = client.get(_models_url(base))
+            r.raise_for_status()
+            return _pick_real_model_name(r.json().get("data") or [], configured_model)
+    except Exception:
+        return None
+
+
+async def resolve_real_model_name(endpoint: str, api_key: str = "",
+                                  timeout: float = 2.0,
+                                  configured_model: str = "") -> str | None:
+    """Query `/v1/models` on an OpenAI-compatible endpoint and return the
+    underlying model name (unmasking vLLM's `--served-model-name` alias).
+
+    Pass ``configured_model`` so the correct entry is chosen on multi-model
+    servers (e.g. Ollama). Returns None on any failure — caller should fall
+    back to the configured name.
+    """
+    if not endpoint:
+        return None
+    base = endpoint.rstrip("/")
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    try:
+        async with httpx.AsyncClient(timeout=timeout,
+                                     verify=_should_verify_tls(base),
+                                     headers=headers) as client:
+            r = await client.get(_models_url(base))
+            r.raise_for_status()
+            return _pick_real_model_name(r.json().get("data") or [], configured_model)
+    except Exception:
+        return None
 
 
 def _parse_tool_arguments(raw: str) -> dict:
@@ -126,9 +247,12 @@ class ModelClient:
     def __init__(self, endpoint: str, model: str, temperature: float = 0.7,
                  max_tokens: int = 4096, api_key: str = "",
                  provider: str = "ollama", timeout: float = 300.0,
-                 max_retries: int = 3):
+                 max_retries: int = 3, real_model_name: str = ""):
         self.provider = provider
         self.model = model
+        # Underlying model name (unmasked from a vLLM --served-model-name alias);
+        # used for reasoning-template detection. Falls back to `model`.
+        self.real_model_name = real_model_name
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.api_key = api_key
@@ -139,25 +263,16 @@ class ModelClient:
         self._cost_per_1k_input = _COST_TABLE.get(provider, {}).get("input", 0.0)
         self._cost_per_1k_output = _COST_TABLE.get(provider, {}).get("output", 0.0)
 
-        # Set up endpoint
-        if provider in PROVIDERS and endpoint == PROVIDERS[provider]["base_url"]:
-            self.endpoint = PROVIDERS[provider]["base_url"]
-        else:
-            self.endpoint = endpoint.rstrip("/")
+        self.endpoint = endpoint.rstrip("/")
 
         # Build headers
         headers = {}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
 
-        # Allow self-signed certs for local endpoints
-        verify = True
-        if "localhost" in self.endpoint or ".local" in self.endpoint:
-            verify = False
-
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(timeout, connect=10.0),
-            verify=verify,
+            verify=_should_verify_tls(self.endpoint),
             headers=headers,
         )
 
@@ -201,6 +316,11 @@ class ModelClient:
             "stream": stream,
         }
 
+        if stream:
+            # Ask the server to emit a final usage chunk (OpenAI/vLLM/recent
+            # Ollama). Servers that don't support it ignore the field.
+            payload["stream_options"] = {"include_usage": True}
+
         if tools:
             payload["tools"] = self._build_tools_payload(tools)
 
@@ -212,49 +332,93 @@ class ModelClient:
                 yield chunk
 
     async def _stream_request(self, payload: dict) -> AsyncIterator[dict]:
-        """Handle streaming response with retry on transient errors."""
+        """Handle streaming response with retry on transient errors.
+
+        Retries only happen *before the first chunk is yielded*: once partial
+        output has streamed, replaying the request would duplicate text in the
+        conversation, so an interruption is surfaced as an error instead.
+        """
         last_error = None
         for attempt in range(self.max_retries):
             if attempt > 0:
                 delay = 2 ** (attempt - 1)  # 1s, 2s
                 logger.info("Retry %d/%d after %ds", attempt + 1, self.max_retries, delay)
                 await asyncio.sleep(delay)
+            yielded = False
             try:
                 async for chunk in self._stream_request_inner(payload):
+                    yielded = True
                     yield chunk
                 return
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code not in _RETRYABLE_STATUSES:
-                    yield {"type": "text", "content": f"API error ({e.response.status_code}): {e.response.text[:500]}"}
+            except StreamError as e:
+                if yielded:
+                    logger.warning("Stream error after partial output: %s", e)
+                    yield {"type": "text",
+                           "content": f"\n\n[stream error after partial output: {e}]"}
+                    yield {"type": "done", "usage": {}}
+                    return
+                if e.status_code not in _RETRYABLE_STATUSES:
+                    yield {"type": "text",
+                           "content": f"API error ({e.status_code}): {e.text[:500]}"}
                     yield {"type": "done", "usage": {}}
                     return
                 last_error = e
-                logger.warning("Retryable error %d: %s", e.response.status_code, str(e)[:200])
-            except (httpx.ConnectError, httpx.ReadError, httpx.WriteError) as e:
+                logger.warning("Retryable error %d: %s", e.status_code, str(e)[:200])
+            except (httpx.ConnectError, httpx.ReadError, httpx.WriteError,
+                    httpx.TimeoutException, httpx.RemoteProtocolError) as e:
+                if yielded:
+                    logger.warning("Stream interrupted after partial output: %s", e)
+                    yield {"type": "text",
+                           "content": f"\n\n[stream interrupted: {type(e).__name__}]"}
+                    yield {"type": "done", "usage": {}}
+                    return
                 last_error = e
                 logger.warning("Connection error (attempt %d): %s", attempt + 1, str(e)[:200])
 
-        yield {"type": "text", "content": f"API error after {self.max_retries} retries: {last_error}"}
+        yield {"type": "text",
+               "content": f"API error after {self.max_retries} retries: {last_error}"}
         yield {"type": "done", "usage": {}}
 
     async def _stream_request_inner(self, payload: dict) -> AsyncIterator[dict]:
-        """Inner streaming request (single attempt)."""
+        """Inner streaming request (single attempt).
+
+        Raises ``StreamError`` on a non-200 response so the outer retry wrapper
+        can decide whether to retry. Filters ``<think>...</think>`` blocks and
+        ``reasoning_content`` deltas out of the visible stream, holding back
+        partial tags that straddle SSE chunks. As a safety net, if the *entire*
+        response gets classified as thinking (e.g. a non-reasoning model served
+        under a reasoning alias that never emits ``</think>``), the buffered
+        thinking is surfaced as text rather than silently swallowed.
+        """
         import time as _time
         tool_calls_buffer: dict[int, dict] = {}
         _first_token_time = None
         _token_count = 0
-        # Track <think>...</think> blocks so thinking tokens are hidden
-        _in_think = True  # Qwen3.5 starts in think mode (chat template adds <think>)
+        _req_input = 0
+        _req_output = 0
+
+        # Track <think>...</think> blocks so thinking tokens are hidden. Some
+        # Qwen3 reasoning chat templates prepend a <think> opener (first tokens
+        # are mid-thought, no leading tag). Key this off the *real* model name,
+        # not a vLLM --served-model-name alias.
+        _model_lc = (self.real_model_name or self.model or "").lower()
+        _starts_in_think = any(m in _model_lc for m in
+                               ("qwen3.5", "qwen3-next", "qwen3-coder-next"))
+        _in_think = _starts_in_think
         _think_buf = ""
-        _think_notified = False  # Whether we've sent a thinking indicator
+        _think_accumulated = ""   # raw hidden thinking, for the safety-net flush
+        _think_notified = False   # whether we've ever emitted a thinking indicator
+        _thinking_open = False    # whether a thinking indicator is currently open
+        _visible_emitted = False
+
+        _CLOSE = "</think>"
+        _OPEN = "<think>"
 
         async with self._client.stream("POST", self.api_url, json=payload) as response:
             if response.status_code != 200:
                 body = await response.aread()
                 error_text = body.decode("utf-8", errors="replace")[:500]
-                yield {"type": "text", "content": f"API error ({response.status_code}): {error_text}"}
-                yield {"type": "done", "usage": {}}
-                return
+                raise StreamError(response.status_code, error_text)
             async for line in response.aiter_lines():
                 if not line.startswith("data: "):
                     continue
@@ -267,46 +431,78 @@ class ModelClient:
                 except json.JSONDecodeError:
                     logger.warning("Skipping malformed SSE chunk: %s", data[:200])
                     continue
-                delta = chunk.get("choices", [{}])[0].get("delta", {})
+
+                # Usage can arrive on a chunk with an empty `choices` list
+                # (OpenAI/vLLM include_usage) — read it before touching choices.
+                usage = chunk.get("usage")
+                if usage:
+                    _req_input = usage.get("prompt_tokens", _req_input)
+                    _req_output = usage.get("completion_tokens", _req_output)
+
+                choices = chunk.get("choices") or []
+                delta = choices[0].get("delta", {}) if choices else {}
+
+                # Dedicated reasoning field (vLLM/DeepSeek reasoning parser) —
+                # always hidden thinking. Its presence means the server splits
+                # reasoning out of `content`, so `content` is the clean answer:
+                # cancel any assumed mid-<think> start.
+                reasoning = delta.get("reasoning_content")
+                if reasoning:
+                    _in_think = False
+                    if not _thinking_open:
+                        _think_notified = _thinking_open = True
+                        yield {"type": "thinking_start"}
+                    _think_accumulated += reasoning
 
                 # Text content — filter <think>...</think> blocks
-                if "content" in delta and delta["content"]:
-                    _think_buf += delta["content"]
+                content = delta.get("content")
+                if content:
+                    _think_buf += content
                     visible = ""
                     while _think_buf:
                         if _in_think:
-                            # Emit a one-time thinking indicator so user knows model is active
-                            if not _think_notified:
-                                _think_notified = True
+                            if not _thinking_open:
+                                _think_notified = _thinking_open = True
                                 yield {"type": "thinking_start"}
-                            end = _think_buf.find("</think>")
+                            end = _think_buf.find(_CLOSE)
                             if end != -1:
-                                _think_buf = _think_buf[end + 8:]
+                                _think_accumulated += _think_buf[:end]
+                                _think_buf = _think_buf[end + len(_CLOSE):]
                                 _in_think = False
+                                _thinking_open = False
                                 yield {"type": "thinking_end"}
                                 continue
-                            else:
-                                _think_buf = ""
-                                break
+                            # No closer yet — hold back a possible partial one.
+                            keep = len(_CLOSE) - 1
+                            if len(_think_buf) > keep:
+                                _think_accumulated += _think_buf[:-keep]
+                                _think_buf = _think_buf[-keep:]
+                            break
                         else:
-                            start = _think_buf.find("<think>")
+                            start = _think_buf.find(_OPEN)
                             if start != -1:
                                 visible += _think_buf[:start]
-                                _think_buf = _think_buf[start + 7:]
+                                _think_buf = _think_buf[start + len(_OPEN):]
                                 _in_think = True
                                 continue
-                            else:
-                                visible += _think_buf
-                                _think_buf = ""
-                                break
+                            # No opener — emit all but a possible partial one.
+                            keep = len(_OPEN) - 1
+                            if len(_think_buf) > keep:
+                                visible += _think_buf[:-keep]
+                                _think_buf = _think_buf[-keep:]
+                            break
                     if visible:
+                        if _thinking_open:
+                            _thinking_open = False
+                            yield {"type": "thinking_end"}
+                        _visible_emitted = True
                         if _first_token_time is None:
                             _first_token_time = _time.monotonic()
                         _token_count += max(1, len(visible.split()))
                         yield {"type": "text", "content": visible}
 
                 # Tool calls (streamed)
-                if "tool_calls" in delta:
+                if delta.get("tool_calls"):
                     for tc in delta["tool_calls"]:
                         idx = tc.get("index", 0)
                         if idx not in tool_calls_buffer:
@@ -321,11 +517,27 @@ class ModelClient:
                             if "arguments" in tc["function"]:
                                 tool_calls_buffer[idx]["arguments"] += tc["function"]["arguments"]
 
-                # Usage info
-                usage = chunk.get("usage")
-                if usage:
-                    self.total_input_tokens += usage.get("prompt_tokens", 0)
-                    self.total_output_tokens += usage.get("completion_tokens", 0)
+        # Flush any content still held in the tag buffer.
+        if _think_buf:
+            if _in_think:
+                _think_accumulated += _think_buf
+            else:
+                if _thinking_open:
+                    _thinking_open = False
+                    yield {"type": "thinking_end"}
+                _visible_emitted = True
+                yield {"type": "text", "content": _think_buf}
+            _think_buf = ""
+
+        # Safety net: the whole response was classified as thinking and nothing
+        # visible (or tool calls) came out — surface it instead of losing it.
+        if (not _visible_emitted and not tool_calls_buffer
+                and _think_accumulated.strip()):
+            if _thinking_open:
+                _thinking_open = False
+                yield {"type": "thinking_end"}
+            recovered = _think_accumulated.replace(_OPEN, "").replace(_CLOSE, "")
+            yield {"type": "text", "content": recovered}
 
         # Emit buffered tool calls
         for idx in sorted(tool_calls_buffer):
@@ -333,8 +545,14 @@ class ModelClient:
             args = _parse_tool_arguments(tc["arguments"])
             yield {"type": "tool_call", "id": tc["id"], "name": tc["name"], "arguments": args}
 
+        # Fold this request's usage into the session totals once.
+        self.total_input_tokens += _req_input
+        self.total_output_tokens += _req_output
+
         _elapsed = (_time.monotonic() - _first_token_time) if _first_token_time else 0
         yield {"type": "done", "usage": {
+            "prompt_tokens": _req_input,
+            "completion_tokens": _req_output,
             "total_input": self.total_input_tokens,
             "total_output": self.total_output_tokens,
         }, "_speed": {"tokens": _token_count, "elapsed": _elapsed}}
@@ -356,20 +574,17 @@ class ModelClient:
             return
         data = response.json()
 
-        choice = data.get("choices", [{}])[0]
-        message = choice.get("message", {})
+        choices = data.get("choices") or [{}]
+        message = choices[0].get("message", {})
 
         # Text
         if message.get("content"):
             yield {"type": "text", "content": message["content"]}
 
-        # Tool calls
-        for tc in message.get("tool_calls", []):
+        # Tool calls (field may be present but null)
+        for tc in (message.get("tool_calls") or []):
             func = tc.get("function", {})
-            try:
-                args = json.loads(func.get("arguments", "{}"))
-            except json.JSONDecodeError:
-                args = {}
+            args = _parse_tool_arguments(func.get("arguments", "{}"))
             yield {
                 "type": "tool_call",
                 "id": tc.get("id", "call_0"),
@@ -378,10 +593,14 @@ class ModelClient:
             }
 
         # Usage
-        usage = data.get("usage", {})
-        self.total_input_tokens += usage.get("prompt_tokens", 0)
-        self.total_output_tokens += usage.get("completion_tokens", 0)
+        usage = data.get("usage", {}) or {}
+        req_input = usage.get("prompt_tokens", 0)
+        req_output = usage.get("completion_tokens", 0)
+        self.total_input_tokens += req_input
+        self.total_output_tokens += req_output
         yield {"type": "done", "usage": {
+            "prompt_tokens": req_input,
+            "completion_tokens": req_output,
             "total_input": self.total_input_tokens,
             "total_output": self.total_output_tokens,
         }}
@@ -401,17 +620,12 @@ class ModelClient:
         """
         try:
             # Use /models endpoint (standard OpenAI-compatible)
-            models_url = self.endpoint.rstrip("/")
-            if not models_url.endswith("/v1"):
-                models_url += "/v1"
-            models_url += "/models"
-
-            response = await self._client.get(models_url, timeout=5.0)
+            response = await self._client.get(_models_url(self.endpoint), timeout=5.0)
             if response.status_code == 200:
                 return True, f"Connected to {self.provider} ({self.model})"
             if response.status_code in (401, 403):
                 return False, f"Authentication failed for {self.provider} ({response.status_code}) — check your API key"
-            return True, f"Connected to {self.provider} ({self.model}) [status {response.status_code}]"
+            return True, f"Reached {self.provider} at {self.endpoint} [status {response.status_code}]"
         except httpx.ConnectError:
             return False, f"Cannot connect to {self.endpoint} — is the server running?"
         except httpx.TimeoutException:

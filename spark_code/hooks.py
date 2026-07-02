@@ -19,6 +19,7 @@ import asyncio
 import fnmatch
 import logging
 import os
+import shlex
 
 logger = logging.getLogger(__name__)
 
@@ -45,8 +46,10 @@ class Hook:
         Returns (success, output).
         """
         cmd = self.command
+        # Shell-quote every substituted value so a path/filename like
+        # `x$(rm -rf ~).py` can't execute arbitrary shell in the hook command.
         for key, value in context.items():
-            cmd = cmd.replace(f"{{{key}}}", str(value))
+            cmd = cmd.replace(f"{{{key}}}", shlex.quote(str(value)))
 
         try:
             process = await asyncio.create_subprocess_shell(

@@ -12,8 +12,15 @@ from datetime import datetime
 class BranchManager:
     """Manages conversation branches as separate saved states."""
 
-    def __init__(self, branch_dir: str = "~/.spark/branches"):
-        self.branch_dir = os.path.expanduser(branch_dir)
+    def __init__(self, branch_dir: str = "~/.spark/branches",
+                 project_dir: str | None = None):
+        # Scope branches per project so switching projects doesn't surface an
+        # unrelated project's branches (they used to all share one flat dir).
+        # The base dir is namespaced by the encoded project path.
+        self.base_dir = os.path.expanduser(branch_dir)
+        project = os.path.abspath(project_dir or os.getcwd())
+        self._project_key = project.replace(os.sep, "-")
+        self.branch_dir = os.path.join(self.base_dir, self._project_key)
         os.makedirs(self.branch_dir, exist_ok=True)
         self._current_branch: str = "main"
 
@@ -97,7 +104,15 @@ class BranchManager:
         return branches
 
     def merge_branch(self, source: str, context) -> tuple[bool, str]:
-        """Merge another branch's messages into the current conversation."""
+        """Merge another branch's conversation into the current context.
+
+        This performs a REAL merge: the source branch's plain user/assistant
+        text turns are appended to the current context (wrapped with a marker),
+        so the merged content is actually present — not a false claim that
+        "key content has been incorporated". Tool-call / tool-result messages
+        are skipped because splicing them in would break the message sequence
+        (an assistant tool_calls turn without its matching tool results).
+        """
         branch_path = os.path.join(self.branch_dir, f"{source}.json")
         if not os.path.exists(branch_path):
             return False, f"Branch '{source}' not found"
@@ -109,13 +124,25 @@ class BranchManager:
             if not source_messages:
                 return False, f"Branch '{source}' has no messages"
 
-            # Add a summary of the merged branch
-            summary = (
-                f"[Merged from branch '{source}']\n"
-                f"The branch had {len(source_messages)} messages. "
-                f"Key content has been incorporated."
+            context.add_user(
+                f"[Merging branch '{source}' — {len(source_messages)} message(s) follow]"
             )
-            context.add_user(summary)
-            return True, f"Merged branch '{source}' into '{self._current_branch}'"
+            merged = 0
+            for m in source_messages:
+                role = m.get("role")
+                content = m.get("content")
+                if not isinstance(content, str) or not content:
+                    continue  # skip tool_calls/tool_result/structured turns
+                if role == "user":
+                    context.add_user(content)
+                    merged += 1
+                elif role == "assistant":
+                    context.add_assistant(content)
+                    merged += 1
+
+            return True, (
+                f"Merged {merged} of {len(source_messages)} message(s) from "
+                f"branch '{source}' into '{self._current_branch}'"
+            )
         except (json.JSONDecodeError, OSError) as e:
             return False, f"Failed to merge: {e}"

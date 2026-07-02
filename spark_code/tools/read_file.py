@@ -70,13 +70,20 @@ class ReadFileTool(Tool):
 
         selected = lines[start:end]
 
-        # Format with line numbers
+        # Format with line numbers. Strip ONLY the trailing newline — never spaces
+        # or tabs — so edit_file's byte-exact match can still find lines that end
+        # in trailing whitespace (otherwise edits become an unfixable loop).
         result = []
         for i, line in enumerate(selected, start=start + 1):
-            result.append(f"{i:>6}\t{line.rstrip()}")
+            result.append(f"{i:>6}\t{line.rstrip(chr(13) + chr(10))}")
 
         if not result:
-            return f"File is empty: {path}"
+            if len(lines) == 0:
+                return f"File is empty: {path}"
+            return (
+                f"No lines to show: offset {offset} is past the end of {path} "
+                f"({len(lines)} lines)."
+            )
 
         total = len(lines)
         header = f"File: {path} ({total} lines)"

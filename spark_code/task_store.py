@@ -4,10 +4,18 @@ import json
 import logging
 import os
 import shutil
+import tempfile
+import threading
 import time
 import uuid
 
 logger = logging.getLogger(__name__)
+
+# Retention / pruning knobs — keep the shared file from growing unbounded
+# (it had 84 stale tasks and was never pruned).
+MAX_TASKS = 200
+TERMINAL_STATUSES = frozenset({"completed", "failed", "stale"})
+COMPLETED_RETENTION_SECONDS = 7 * 24 * 3600  # drop terminal tasks older than 7 days
 
 
 class Task:
@@ -16,7 +24,7 @@ class Task:
     def __init__(self, description: str, task_id: str | None = None):
         self.id = task_id or uuid.uuid4().hex[:8]
         self.description = description
-        self.status: str = "pending"  # pending | in_progress | completed | failed
+        self.status: str = "pending"  # pending | in_progress | completed | failed | stale
         self.assigned_to: str | None = None  # worker id
         self.result: str | None = None
         self.created_at: float = time.time()
@@ -50,6 +58,7 @@ class TaskStore:
     def __init__(self, path: str = "~/.spark/tasks.json"):
         self.path = os.path.expanduser(path)
         self.tasks: dict[str, Task] = {}
+        self._lock = threading.Lock()  # in-process guard around writes
         self.load()
 
     def create(self, description: str, assigned_to: str | None = None) -> Task:
@@ -90,15 +99,60 @@ class TaskStore:
         self.tasks.clear()
         self.save()
 
+    def _prune(self):
+        """Drop old terminal tasks and cap the total task count."""
+        now = time.time()
+        # 1. Drop terminal tasks older than the retention window.
+        survivors: dict[str, Task] = {}
+        for tid, t in self.tasks.items():
+            if t.status in TERMINAL_STATUSES:
+                ref = t.completed_at or t.created_at or now
+                if (now - ref) > COMPLETED_RETENTION_SECONDS:
+                    continue  # too old — prune
+            survivors[tid] = t
+        self.tasks = survivors
+
+        # 2. Hard cap: if still over MAX_TASKS, drop the oldest terminal tasks.
+        if len(self.tasks) > MAX_TASKS:
+            terminal = sorted(
+                (t for t in self.tasks.values() if t.status in TERMINAL_STATUSES),
+                key=lambda t: t.completed_at or t.created_at or 0,
+            )
+            to_remove = len(self.tasks) - MAX_TASKS
+            for t in terminal[:to_remove]:
+                self.tasks.pop(t.id, None)
+
     def save(self):
-        """Persist tasks to disk."""
-        os.makedirs(os.path.dirname(self.path), exist_ok=True)
-        data = {tid: t.to_dict() for tid, t in self.tasks.items()}
-        with open(self.path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+        """Persist tasks to disk atomically (temp file + os.replace).
+
+        Also prunes stale/old tasks first. Writing to a temp file and renaming
+        means a crash mid-write can never truncate the live file (which the old
+        code did, causing 'recovery' to reset everything to empty).
+        """
+        with self._lock:
+            self._prune()
+            dir_name = os.path.dirname(self.path) or "."
+            os.makedirs(dir_name, exist_ok=True)
+            data = {tid: t.to_dict() for tid, t in self.tasks.items()}
+
+            fd, tmp_path = tempfile.mkstemp(
+                dir=dir_name, prefix=".tasks-", suffix=".tmp"
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_path, self.path)  # atomic on POSIX
+            except Exception:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
 
     def load(self):
-        """Load tasks from disk."""
+        """Load tasks from disk, then reconcile orphaned in-progress tasks."""
         if not os.path.exists(self.path):
             return
         try:
@@ -114,3 +168,22 @@ class TaskStore:
             except OSError:
                 pass
             self.tasks = {}
+            return
+
+        # Startup reconciliation: any task still 'in_progress' on load is
+        # orphaned (its session/worker died) — mark it 'stale' so it doesn't
+        # linger as forever-running, and persist the change.
+        self._reconcile_orphans()
+
+    def _reconcile_orphans(self):
+        """Mark orphaned in_progress tasks as stale and persist if changed."""
+        now = time.time()
+        changed = False
+        for t in self.tasks.values():
+            if t.status == "in_progress":
+                t.status = "stale"
+                if t.completed_at is None:
+                    t.completed_at = now
+                changed = True
+        if changed:
+            self.save()

@@ -1,9 +1,13 @@
 """MCP server discovery and registration."""
 
 import os
+import re
 from pathlib import Path
 
 import yaml
+
+# Matches ${VAR} and $VAR references inside config strings.
+_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
 
 
 def find_mcp_configs() -> dict:
@@ -27,16 +31,32 @@ def find_mcp_configs() -> dict:
     return configs
 
 
+def _expand_str(value: str) -> str:
+    """Expand ${VAR} / $VAR references in a string.
+
+    Undefined variables are left as the literal placeholder (e.g. ``${MISSING}``
+    stays ``${MISSING}``) so a misconfiguration is visible rather than silently
+    turning into an empty string.
+    """
+    def repl(match: "re.Match") -> str:
+        name = match.group(1) or match.group(2)
+        return os.environ.get(name, match.group(0))
+
+    return _VAR_RE.sub(repl, value)
+
+
 def expand_mcp_env(config: dict) -> dict:
-    """Expand environment variables in MCP config."""
-    result = config.copy()
-    if "env" in result:
-        expanded = {}
-        for key, value in result["env"].items():
-            if isinstance(value, str) and value.startswith("${") and value.endswith("}"):
-                env_key = value[2:-1]
-                expanded[key] = os.environ.get(env_key, value)
-            else:
-                expanded[key] = value
-        result["env"] = expanded
+    """Return a copy of ``config`` with environment variables expanded in ``env``.
+
+    Handles ``{TOKEN: "${GITHUB_TOKEN}"}`` style references (both ``${VAR}`` and
+    ``$VAR`` forms, including embedded ones). The original config is not mutated.
+    Undefined variables are left as their literal placeholder.
+    """
+    result = dict(config)
+    env = result.get("env")
+    if isinstance(env, dict):
+        result["env"] = {
+            key: (_expand_str(value) if isinstance(value, str) else value)
+            for key, value in env.items()
+        }
     return result

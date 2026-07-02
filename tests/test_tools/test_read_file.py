@@ -85,3 +85,21 @@ async def test_path_validation_with_valid_path(tool, tmp_file):
     result = await tool.execute(file_path=tmp_file)
     assert "Error" not in result
     assert "File:" in result
+
+
+async def test_preserves_trailing_whitespace(tool, tmp_dir):
+    # read_file must NOT strip trailing spaces/tabs, or edit_file's byte-exact
+    # match can never match a line ending in whitespace.
+    path = os.path.join(tmp_dir, "ws.py")
+    with open(path, "w") as f:
+        f.write("def f():   \n\tpass\t\n")
+    result = await tool.execute(file_path=path)
+    assert "def f():   " in result  # trailing spaces kept
+    assert "\tpass\t" in result  # trailing tab kept
+
+
+async def test_offset_past_end_message(tool, tmp_file):
+    # tmp_file has 5 lines; offset 99 is past EOF on a non-empty file.
+    result = await tool.execute(file_path=tmp_file, offset=99)
+    assert "empty" not in result.lower()
+    assert "past the end" in result.lower()

@@ -26,9 +26,10 @@ class WriteFileTool(Tool):
             "required": ["file_path", "content"],
         }
 
-    async def execute(self, file_path: str, content: str, **kw) -> str:
+    async def execute(self, file_path: str, content: str,
+                      cwd: str | None = None, **kw) -> str:
         try:
-            path = _validate_path(file_path)
+            path = _validate_path(file_path, cwd=cwd, for_write=True)
         except ValueError as e:
             return f"Error: {e}"
 

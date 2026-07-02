@@ -98,3 +98,29 @@ async def test_path_validation_valid_path(tool, editable_file):
         file_path=editable_file, old_string="foo bar", new_string="ok"
     )
     assert "Error" not in result
+
+
+async def test_edit_line_with_trailing_whitespace(tool, tmp_dir):
+    # Regression: read_file no longer strips trailing whitespace, so a
+    # byte-exact edit of a line ending in spaces must succeed.
+    path = os.path.join(tmp_dir, "ws.py")
+    with open(path, "w") as f:
+        f.write("x = 1   \ny = 2\n")
+    result = await tool.execute(
+        file_path=path, old_string="x = 1   ", new_string="x = 42"
+    )
+    assert "Successfully replaced" in result
+    with open(path) as f:
+        assert f.read() == "x = 42\ny = 2\n"
+
+
+async def test_edit_file_with_invalid_utf8_bytes(tool, tmp_dir):
+    # edit_file reads with errors="replace" (like read_file), so a stray byte
+    # doesn't make the edit fail with a codec error.
+    path = os.path.join(tmp_dir, "latin.txt")
+    with open(path, "wb") as f:
+        f.write(b"header\ncaf\xe9 here\nfooter\n")  # 0xe9 is invalid UTF-8
+    result = await tool.execute(
+        file_path=path, old_string="header", new_string="HEADER"
+    )
+    assert "Successfully replaced" in result

@@ -20,7 +20,7 @@ dependencies = [
     "click>=8.0",
     "prompt-toolkit>=3.0",
     "beautifulsoup4>=4.12",
-    "duckduckgo-search>=4.0",
+    "ddgs>=9.0",
     "pygments>=2.17",
 ]
 

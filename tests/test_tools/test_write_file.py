@@ -65,8 +65,48 @@ async def test_path_validation_valid_path(tool, tmp_dir):
     assert "Error" not in result
 
 
-async def test_error_on_unwritable_location(tool):
-    # On macOS, /System is read-only — makedirs raises PermissionError
+async def test_write_outside_project_is_refused(tool):
+    # Writes are now sandboxed to the project (cwd) + system temp. A path
+    # elsewhere (e.g. /System) is refused *before* any OS write is attempted.
     path = "/System/nonexistent/deep/path/file.txt"
-    with pytest.raises(PermissionError):
-        await tool.execute(file_path=path, content="fail\n")
+    result = await tool.execute(file_path=path, content="fail\n")
+    assert "Error" in result
+    assert "outside the project" in result.lower()
+    assert not os.path.exists(path)
+
+
+async def test_write_rejects_path_traversal_outside_cwd(tool, tmp_dir):
+    # A traversal that escapes the given project root (cwd) is rejected.
+    escape = os.path.join(tmp_dir, "sub", "..", "..", "..", "etc_escape.txt")
+    result = await tool.execute(file_path=escape, content="x", cwd=os.path.join(tmp_dir, "sub"))
+    assert "Error" in result
+    assert "outside the project" in result.lower()
+
+
+async def test_write_rejects_symlink_escape(tool, tmp_dir):
+    # A symlink inside the project pointing outside must not be a write escape.
+    project = os.path.join(tmp_dir, "project")
+    os.makedirs(project)
+    outside = os.path.join(os.path.expanduser("~"), ".spark_symlink_escape_target")
+    link = os.path.join(project, "link.txt")
+    try:
+        os.symlink(outside, link)
+    except OSError:
+        pytest.skip("symlinks not supported")
+    try:
+        result = await tool.execute(file_path=link, content="pwned", cwd=project)
+        assert "Error" in result
+        assert "outside the project" in result.lower()
+        assert not os.path.exists(outside)
+    finally:
+        if os.path.exists(outside):
+            os.remove(outside)
+
+
+async def test_write_within_explicit_cwd_allowed(tool, tmp_dir):
+    project = os.path.join(tmp_dir, "proj")
+    os.makedirs(project)
+    path = os.path.join(project, "ok.txt")
+    result = await tool.execute(file_path=path, content="ok\n", cwd=project)
+    assert "Error" not in result
+    assert os.path.exists(path)

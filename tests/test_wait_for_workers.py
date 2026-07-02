@@ -22,22 +22,24 @@ class TestWaitForWorkersTool:
         tool = WaitForWorkersTool(team=None)
         assert tool.is_read_only is True
 
-    def test_returns_immediately_when_no_workers(self):
+    def test_returns_immediately_when_no_workers(self, tmp_path):
         console = Console(file=io.StringIO(), force_terminal=True)
         from spark_code.tools.base import ToolRegistry
         from spark_code.task_store import TaskStore
         team = TeamManager(model=None, tools=ToolRegistry(),
-                          console=console, task_store=TaskStore())
+                          console=console,
+                          task_store=TaskStore(path=str(tmp_path / "tasks.json")))
         tool = WaitForWorkersTool(team=team)
         result = asyncio.run(tool.execute(names=[], timeout=5))
         assert "no running workers" in result.lower()
 
-    def test_returns_completed_worker_results(self):
+    def test_returns_completed_worker_results(self, tmp_path):
         console = Console(file=io.StringIO(), force_terminal=True)
         from spark_code.tools.base import ToolRegistry
         from spark_code.task_store import TaskStore
         team = TeamManager(model=None, tools=ToolRegistry(),
-                          console=console, task_store=TaskStore())
+                          console=console,
+                          task_store=TaskStore(path=str(tmp_path / "tasks.json")))
         w = Worker(id="1", name="worker-test", prompt="test", status="completed",
                    result="All tests passed.")
         team.workers["1"] = w

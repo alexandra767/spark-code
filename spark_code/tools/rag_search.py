@@ -1,9 +1,10 @@
 """RAG search tool — queries the RAG service on the Spark for indexed documents."""
 
 import os
+
 from .base import Tool
 
-RAG_SERVICE_URL = os.environ.get("RAG_SERVICE_URL", "http://spark-4a54.local:8010")
+RAG_SERVICE_URL = os.environ.get("RAG_SERVICE_URL", "http://localhost:8010")
 
 
 class RagSearchTool(Tool):

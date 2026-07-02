@@ -11,6 +11,8 @@ import signal
 import sys
 from typing import Callable
 
+from rich.markup import escape as _esc
+
 
 class TeamStatusMonitor:
     """Periodically prints team status while workers are running.
@@ -118,14 +120,14 @@ class TeamStatusMonitor:
         parts = []
         for w in workers:
             if w["status"] == "running":
-                label = f"⟳ {w['name']}"
+                label = f"⟳ {_esc(str(w['name']))}"
                 if w.get("current_tool"):
-                    label += f" [{w['current_tool']}]"
+                    label += " " + _esc(f"[{w['current_tool']}]")
                 parts.append(f"[#ebcb8b]{label}[/#ebcb8b]")
             elif w["status"] == "completed":
-                parts.append(f"[#a3be8c]✓ {w['name']}[/#a3be8c]")
+                parts.append(f"[#a3be8c]✓ {_esc(str(w['name']))}[/#a3be8c]")
             else:
-                parts.append(f"[#bf616a]✗ {w['name']}[/#bf616a]")
+                parts.append(f"[#bf616a]✗ {_esc(str(w['name']))}[/#bf616a]")
 
         status_line = "  ".join(parts)
         self._console.print(f"\n  [#88c0d0]▸ Team:[/#88c0d0] {status_line}")
@@ -161,14 +163,14 @@ class TeamStatusMonitor:
         parts = []
         for w in workers:
             if w["status"] == "running":
-                label = f"⟳ {w['name']}"
+                label = f"⟳ {_esc(str(w['name']))}"
                 if w.get("current_tool"):
-                    label += f" [{w['current_tool']}]"
+                    label += " " + _esc(f"[{w['current_tool']}]")
                 parts.append(f"[#ebcb8b]{label}[/#ebcb8b]")
             elif w["status"] == "completed":
-                parts.append(f"[#a3be8c]✓ {w['name']}[/#a3be8c]")
+                parts.append(f"[#a3be8c]✓ {_esc(str(w['name']))}[/#a3be8c]")
             else:
-                parts.append(f"[#bf616a]✗ {w['name']}[/#bf616a]")
+                parts.append(f"[#bf616a]✗ {_esc(str(w['name']))}[/#bf616a]")
 
         status_line = "  ".join(parts)
         self._console.print(f"  [#88c0d0]▸ Team:[/#88c0d0] {status_line}")

@@ -108,9 +108,14 @@ class SlashCommandCompleter(Completer):
         if not text.startswith("/"):
             return
 
-        word = text.split()[0] if text.split() else text
+        # Match against the ENTIRE slash phrase typed so far, not just the first
+        # token — otherwise completing "/plan sh" → "/plan show" replaces only
+        # the first token's worth of characters and produces "/pl/plan show".
+        # For multi-word command entries ("/plan show", "/config set") this
+        # lets subcommands complete correctly.
+        word = text
         for cmd, desc in sorted(self._commands.items()):
-            if cmd.startswith(word):
+            if cmd.startswith(word) and cmd != word:
                 yield Completion(
                     text=cmd,
                     start_position=-len(word),
@@ -249,7 +254,7 @@ def _create_bindings(
 # ---------------------------------------------------------------------------
 
 def create_session(
-    history_file: str = "~/.spark/history",
+    history_file: str = "~/.spark/input_history",
     skill_names: list[str] | None = None,
     status_callback: Callable[[], AnyFormattedText] | None = None,
     mode_callback: Callable[[], AnyFormattedText] | None = None,
@@ -268,6 +273,16 @@ def create_session(
     """
     history_path = os.path.expanduser(history_file)
     os.makedirs(os.path.dirname(history_path), exist_ok=True)
+
+    # Legacy migration: the input history used to live at ~/.spark/history,
+    # which collides with the sessions DIRECTORY of the same name. If that old
+    # file is still present, move it to the new path (once) so both features work.
+    legacy = os.path.expanduser("~/.spark/history")
+    if os.path.isfile(legacy) and not os.path.exists(history_path):
+        try:
+            os.rename(legacy, history_path)
+        except OSError:
+            pass
 
     # Build completer
     extra_commands: dict[str, str] = {}

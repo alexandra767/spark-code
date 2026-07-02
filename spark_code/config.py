@@ -1,10 +1,16 @@
 """Configuration loading for Spark Code."""
 
+import logging
 import os
+import re
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+logger = logging.getLogger(__name__)
+
+_ENV_VAR_RE = re.compile(r"\$\{([^}]+)\}")
 
 DEFAULT_CONFIG = {
     "model": {
@@ -49,19 +55,36 @@ def deep_merge(base: dict, override: dict) -> dict:
     return result
 
 
-def expand_env_vars(config: dict) -> dict:
-    """Expand ${VAR} references in string values."""
-    result = {}
-    for key, value in config.items():
-        if isinstance(value, dict):
-            result[key] = expand_env_vars(value)
-        elif isinstance(value, str) and "${" in value:
-            for env_key, env_val in os.environ.items():
-                value = value.replace(f"${{{env_key}}}", env_val)
-            result[key] = value
-        else:
-            result[key] = value
-    return result
+def _expand_env_str(value: str) -> str:
+    """Expand ${VAR} references in a single string.
+
+    Undefined variables are left literal (unchanged) and a warning is logged.
+    """
+    def _repl(match: "re.Match") -> str:
+        var = match.group(1)
+        if var in os.environ:
+            return os.environ[var]
+        logger.warning(
+            "Undefined environment variable ${%s} — left literal in config", var
+        )
+        return match.group(0)
+
+    return _ENV_VAR_RE.sub(_repl, value)
+
+
+def expand_env_vars(config: Any) -> Any:
+    """Expand ${VAR} references in string values, recursing dicts AND lists.
+
+    Recursing into lists matters for things like mcp_servers.*.args, whose
+    values are lists — previously ${VAR} inside a list item was passed literally.
+    """
+    if isinstance(config, dict):
+        return {key: expand_env_vars(value) for key, value in config.items()}
+    if isinstance(config, list):
+        return [expand_env_vars(item) for item in config]
+    if isinstance(config, str) and "${" in config:
+        return _expand_env_str(config)
+    return config
 
 
 def resolve_provider(config: dict, provider_name: str | None = None) -> dict:
@@ -81,7 +104,8 @@ def resolve_provider(config: dict, provider_name: str | None = None) -> dict:
     # Map provider config to model config
     config["model"] = {
         "endpoint": provider_conf.get("endpoint", "http://localhost:11434"),
-        "name": provider_conf.get("model", "qwen2.5:72b"),
+        # Keep in sync with DEFAULT_CONFIG["model"]["name"].
+        "name": provider_conf.get("model", DEFAULT_CONFIG["model"]["name"]),
         "temperature": provider_conf.get("temperature", 0.7),
         "max_tokens": provider_conf.get("max_tokens", 4096),
         "context_window": provider_conf.get("context_window", 32768),
@@ -135,11 +159,38 @@ def get(config: dict, *keys: str, default: Any = None) -> Any:
     return current
 
 
-def set_config(config: dict, key_path: str, value: str) -> tuple[bool, str]:
-    """Set a nested config value and save to global config.
+def _project_config_file(project_dir: str | None) -> Path:
+    """Path to the project config file (relative to cwd if project_dir is None)."""
+    if project_dir:
+        return Path(project_dir) / PROJECT_CONFIG_FILE
+    return Path(PROJECT_CONFIG_FILE)
+
+
+def _key_in_config(data: dict, keys: list[str]) -> bool:
+    """Return True if the nested key path exists in data."""
+    current: Any = data
+    for key in keys:
+        if isinstance(current, dict) and key in current:
+            current = current[key]
+        else:
+            return False
+    return True
+
+
+def set_config(config: dict, key_path: str, value: str,
+               project_dir: str | None = None,
+               scope: str = "auto") -> tuple[bool, str]:
+    """Set a nested config value and persist it to the correct scope.
 
     key_path: dot-separated path like "model.temperature" or "permissions.mode"
     value: string value (auto-converted to int/float/bool where appropriate)
+    scope: "auto" | "global" | "project".
+        - "auto" (default): write to the PROJECT config if a project config
+          file exists AND already defines this key (i.e. it overrides global);
+          otherwise write to the GLOBAL config. This fixes the bug where a
+          project-overridden key was written to the global file and the change
+          silently had no effect (project config wins on the next load).
+        - "global"/"project": force the target scope.
 
     Returns (success, message).
     """
@@ -169,11 +220,30 @@ def set_config(config: dict, key_path: str, value: str) -> tuple[bool, str]:
     old_value = current.get(keys[-1])
     current[keys[-1]] = converted
 
-    # Save to global config file (merge with existing)
+    # Decide which file to persist to.
+    proj_path = _project_config_file(project_dir)
+    if scope == "project":
+        target_path, scope_label = proj_path, "project"
+    elif scope == "global":
+        target_path, scope_label = GLOBAL_CONFIG_FILE, "global"
+    else:  # auto
+        proj_existing = {}
+        if proj_path.exists():
+            try:
+                with open(proj_path) as f:
+                    proj_existing = yaml.safe_load(f) or {}
+            except Exception:
+                proj_existing = {}
+        if proj_path.exists() and _key_in_config(proj_existing, keys):
+            target_path, scope_label = proj_path, "project"
+        else:
+            target_path, scope_label = GLOBAL_CONFIG_FILE, "global"
+
+    # Save to the chosen file (merge with existing)
     try:
         existing = {}
-        if GLOBAL_CONFIG_FILE.exists():
-            with open(GLOBAL_CONFIG_FILE) as f:
+        if target_path.exists():
+            with open(target_path) as f:
                 existing = yaml.safe_load(f) or {}
 
         # Set the value in the file config too
@@ -184,11 +254,11 @@ def set_config(config: dict, key_path: str, value: str) -> tuple[bool, str]:
             file_current = file_current[key]
         file_current[keys[-1]] = converted
 
-        GLOBAL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        with open(GLOBAL_CONFIG_FILE, "w") as f:
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(target_path, "w") as f:
             yaml.dump(existing, f, default_flow_style=False)
 
-        return True, f"{key_path}: {old_value} → {converted}"
+        return True, f"{key_path}: {old_value} → {converted} (saved to {scope_label} config)"
     except Exception as e:
         return False, f"Failed to save config: {e}"
 

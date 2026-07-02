@@ -199,3 +199,182 @@ async def test_stop_all(tmp_path):
 
     # All workers should now be failed/cancelled (not running)
     assert team.active_count == 0
+
+
+# ---------------------------------------------------------------------------
+# Regression tests — audit 2026-07-02
+# ---------------------------------------------------------------------------
+
+
+class LongResultMockModel:
+    """Returns a long (>500 char) text so we can test result truncation."""
+
+    total_input_tokens = 0
+    total_output_tokens = 0
+    TEXT = "R" * 1000
+
+    async def chat(self, **kwargs):
+        yield {"type": "text", "content": self.TEXT}
+        yield {"type": "done", "usage": {}}
+
+    async def close(self):
+        pass
+
+
+async def test_duplicate_name_guard_rejects_running(tmp_path):
+    """Bug 1: spawning a duplicate NAME while it's running must be rejected.
+
+    The old guard used get_worker(name) which keys by numeric id and never
+    matched a name, so this always silently created a second worker.
+    """
+    team = _make_team(tmp_path, model=SlowMockModel())
+
+    w1 = await team.spawn("first", name="dupe")
+    await asyncio.sleep(0.1)
+    assert w1 is not None
+
+    w2 = await team.spawn("second", name="dupe")
+    assert w2 is None  # rejected as already running
+
+    await team.stop_all()
+
+
+async def test_queued_unnamed_workers_get_unique_names(tmp_path):
+    """Bug 1: multiple queued UNNAMED workers must not collide on one name."""
+    team = _make_team(tmp_path, model=SlowMockModel())
+
+    # Fill all slots with named running workers.
+    for i in range(MAX_WORKERS_LOCAL):
+        await team.spawn(f"running {i}", name=f"run-{i}")
+    await asyncio.sleep(0.1)
+
+    # Now queue two UNNAMED workers — they should get distinct names.
+    await team.spawn("queued A")
+    await team.spawn("queued B")
+
+    queued_names = [name for _, name in team._spawn_queue]
+    assert len(queued_names) == 2
+    assert queued_names[0] != queued_names[1]
+
+    await team.stop_all()
+
+
+async def test_stop_all_does_not_spawn_queued(tmp_path):
+    """Bug 2: cancelling workers must NOT drain the queue and spawn new ones."""
+    team = _make_team(tmp_path, model=SlowMockModel())
+
+    for i in range(MAX_WORKERS_LOCAL):
+        await team.spawn(f"running {i}", name=f"run-{i}")
+    await asyncio.sleep(0.1)
+
+    await team.spawn("queued", name="never-runs")
+    assert len(team._spawn_queue) == 1
+
+    await team.stop_all()
+    await asyncio.sleep(0.3)  # give any (buggy) drain a chance to fire
+
+    assert team.active_count == 0
+    assert len(team._spawn_queue) == 0
+    # The queued worker must never have started.
+    assert team._find_worker_by_name("never-runs") is None
+
+
+async def test_deliver_message_does_not_mutate_context(tmp_path):
+    """Bug 3: deliver_message must enqueue only; drain_inbox injects later."""
+    team = _make_team(tmp_path, model=SlowMockModel())
+
+    w = await team.spawn("long task", name="msg-target")
+    await asyncio.sleep(0.1)  # let the agent loop add the initial prompt
+
+    before = len(w.agent.context.messages)
+    result = team.deliver_message("lead", "msg-target", "hello there")
+    assert "delivered" in result.lower()
+
+    # Context must be untouched; the message sits in the inbox.
+    assert len(w.agent.context.messages) == before
+    assert len(w.inbox) == 1
+
+    # Draining injects it as a user turn at a safe boundary.
+    drained = w.drain_inbox()
+    assert len(drained) == 1
+    assert len(w.inbox) == 0
+    assert len(w.agent.context.messages) == before + 1
+    assert "hello there" in w.agent.context.messages[-1]["content"]
+
+    await team.stop_all()
+
+
+async def test_deliver_to_completed_worker_is_rejected(tmp_path):
+    """Bug 3: no delivery to completed/dead workers."""
+    team = _make_team(tmp_path)  # QuickMockModel — completes fast
+
+    await team.spawn("quick", name="done-worker")
+    await asyncio.sleep(0.4)  # let it complete
+    assert team._find_worker_by_name("done-worker").status == "completed"
+
+    result = team.deliver_message("lead", "done-worker", "you awake?")
+    assert "error" in result.lower()
+    assert "no longer running" in result.lower()
+
+
+async def test_worker_permission_mode_defaults_to_auto_not_trust(tmp_path):
+    """Bug 4: workers must not hardcode trust; default is the safer 'auto'."""
+    team = _make_team(tmp_path, model=SlowMockModel())
+    w = await team.spawn("task", name="perm")
+    await asyncio.sleep(0.05)
+    assert w.agent.permissions.mode == "auto"
+    await team.stop_all()
+
+
+async def test_worker_permission_mode_inherits_lead(tmp_path):
+    """Bug 4: the lead's mode is passed through to workers."""
+    store = TaskStore(path=str(tmp_path / "tasks.json"))
+    team = TeamManager(model=SlowMockModel(), tools=ToolRegistry(),
+                       console=_make_console(), task_store=store,
+                       worker_permission_mode="trust")
+    w = await team.spawn("task", name="perm2")
+    await asyncio.sleep(0.05)
+    assert w.agent.permissions.mode == "trust"
+    await team.stop_all()
+
+
+async def test_spawn_worker_excluded_from_worker_tools(tmp_path):
+    """Bug 4: workers must not be able to recursively spawn sub-workers."""
+    from spark_code.tools.spawn_worker import SpawnWorkerTool
+
+    tools = ToolRegistry()
+    tools.register(SpawnWorkerTool())
+    store = TaskStore(path=str(tmp_path / "tasks.json"))
+    team = TeamManager(model=SlowMockModel(), tools=tools,
+                       console=_make_console(), task_store=store)
+
+    w = await team.spawn("task", name="norecurse")
+    await asyncio.sleep(0.05)
+
+    assert w.agent.tools.get("spawn_worker") is None
+    # But it still gets its own send_message tool.
+    assert w.agent.tools.get("send_message") is not None
+
+    await team.stop_all()
+
+
+async def test_worker_result_persisted_full_not_truncated(tmp_path):
+    """Bug 5: full worker result is durably retrievable by name."""
+    team = _make_team(tmp_path, model=LongResultMockModel())
+
+    await team.spawn("long output", name="big")
+    await asyncio.sleep(0.5)  # let it complete
+
+    result = team.get_worker_result("big")
+    assert result == LongResultMockModel.TEXT
+    assert len(result) == 1000  # not truncated to 500
+
+    # Task store also holds the full result.
+    tasks = team.task_store.list()
+    assert any((t.result or "") == LongResultMockModel.TEXT for t in tasks)
+
+
+def test_get_worker_result_none_for_unknown(tmp_path):
+    """get_worker_result returns None for an unknown worker name."""
+    team = _make_team(tmp_path)
+    assert team.get_worker_result("nope") is None

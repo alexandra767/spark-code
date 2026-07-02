@@ -21,13 +21,11 @@ You have access to these tools:
 - spawn_worker: Spawn a background worker agent for parallel tasks
 - send_message: Send a message to another worker or the lead agent
 
-RAG-Powered Development:
-- BEFORE writing Swift or SwiftUI code, ALWAYS use rag_search to check for relevant documentation, Apple HIG guidelines, and App Store review rules
-- Use rag_search with collection "claude_documents" for Swift docs, HIG, and App Store guidelines
-- Use rag_search with collection "jarvis_detections" for camera data, "jarvis_browser" for browsing history
-- Example: Before building a settings screen, search for "HIG settings" and "App Store guidelines settings"
-- The RAG contains: Swift 6.0/6.1 language guide (47 chapters), Apple HIG (99 pages), App Store Review Guidelines, SwiftUI docs, CNN news, and user-indexed documents
-- When writing Swift/SwiftUI code, ALWAYS search RAG first for current syntax, patterns, and guidelines before relying on your training data
+RAG-Powered Development (only if a rag_search tool is available):
+- Before writing Swift/SwiftUI code, use rag_search to check for relevant documentation, Apple HIG guidelines, and App Store review rules
+- Discover available collections at runtime rather than assuming names; a common one is "claude_documents" for Swift docs, HIG, and App Store guidelines
+- Example: before building a settings screen, search for "HIG settings" and "App Store guidelines settings"
+- Prefer RAG results over training data for current syntax, patterns, and guidelines
 
 Guidelines:
 - For greetings and casual messages (e.g. "hello", "hey", "hi", "thanks"), respond naturally and briefly. Do NOT use tools or explore files — just reply conversationally.
@@ -175,11 +173,16 @@ class Context:
         """Add an assistant text response."""
         self.messages.append({"role": "assistant", "content": content})
 
-    def add_assistant_tool_calls(self, tool_calls: list[dict]):
-        """Add an assistant message with tool calls."""
+    def add_assistant_tool_calls(self, tool_calls: list[dict], content: str = ""):
+        """Add an assistant message with tool calls.
+
+        ``content`` preserves any narration the model produced alongside the
+        tool calls (OpenAI allows content + tool_calls together); dropping it
+        loses the model's own reasoning across rounds.
+        """
         self.messages.append({
             "role": "assistant",
-            "content": None,
+            "content": content or None,
             "tool_calls": [
                 {
                     "id": tc["id"],
@@ -226,8 +229,15 @@ class Context:
         before_count = len(self.messages)
         before_tokens = self.estimate_tokens()
 
-        old = self.messages[:-keep_recent]
-        recent = self.messages[-keep_recent:]
+        # Snap the split point to a safe boundary so `recent` never BEGINS with
+        # orphaned tool results (a role:"tool" message whose assistant
+        # tool_calls parent got summarized away) — that produces an invalid
+        # message sequence that OpenAI-compatible servers reject with a 400.
+        split = self._safe_split_index(len(self.messages) - keep_recent)
+        if split <= 0:
+            return None
+        old = self.messages[:split]
+        recent = self.messages[split:]
 
         # Build a structured summary
         files_read = set()
@@ -319,6 +329,16 @@ class Context:
         freed = before_tokens - after_tokens
         return f"Context compacted: {before_count} messages → {after_count} (freed ~{freed:,} tokens)"
 
+    def _safe_split_index(self, idx: int) -> int:
+        """Move ``idx`` earlier until messages[idx:] does not start with an
+        orphaned tool result. A ``role:"tool"`` message must be preceded by the
+        assistant ``tool_calls`` message it answers; if the boundary lands
+        between them, walk back past the assistant tool_calls message too."""
+        idx = max(0, min(idx, len(self.messages)))
+        while idx < len(self.messages) and self.messages[idx].get("role") == "tool":
+            idx -= 1
+        return idx
+
     def clear(self):
         """Clear all messages."""
         self.messages = []
@@ -326,11 +346,24 @@ class Context:
 
     def estimate_tokens(self) -> int:
         """Rough token estimate (4 chars ≈ 1 token)."""
-        total = len(self.system_prompt)
+        total = len(self.system_prompt) + len(self.platform_prompt) + len(self.provider_prompt)
         for msg in self.messages:
-            content = msg.get("content", "") or ""
-            total += len(content)
-            for tc in msg.get("tool_calls", []):
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                total += len(content)
+            elif isinstance(content, list):
+                # Multimodal message — count text parts and approximate images
+                # by their (base64) payload size so a megabyte image isn't
+                # counted as ~0 tokens (which would defeat auto-compaction).
+                for part in content:
+                    if not isinstance(part, dict):
+                        continue
+                    if part.get("type") == "text":
+                        total += len(part.get("text", ""))
+                    elif part.get("type") == "image_url":
+                        url = part.get("image_url", {}).get("url", "")
+                        total += len(url)
+            for tc in msg.get("tool_calls", []) or []:
                 total += len(json.dumps(tc))
         return total // 4
 
@@ -348,11 +381,15 @@ class Context:
             json.dump(data, f, indent=2)
 
     def load(self, path: str) -> bool:
-        """Load conversation from file."""
+        """Load conversation from file. Returns False on a missing/corrupt file
+        instead of crashing the session on resume."""
         if not os.path.exists(path):
             return False
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return False
         self.messages = data.get("messages", [])
         self.turn_count = data.get("turn_count", 0)
         return True

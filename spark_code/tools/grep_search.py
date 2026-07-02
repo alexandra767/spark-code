@@ -4,8 +4,38 @@ import asyncio
 import os
 import re
 import shutil
+import signal
 
 from .base import Tool
+
+
+async def _kill_process_group(process) -> None:
+    """SIGTERM then SIGKILL the process's whole group; reap it."""
+    try:
+        pgid = os.getpgid(process.pid)
+    except (ProcessLookupError, OSError):
+        pgid = None
+
+    def _send(sig):
+        try:
+            if pgid is not None:
+                os.killpg(pgid, sig)
+            else:
+                process.send_signal(sig)
+        except (ProcessLookupError, OSError):
+            pass
+
+    _send(signal.SIGTERM)
+    try:
+        await asyncio.wait_for(process.wait(), timeout=2)
+        return
+    except (asyncio.TimeoutError, ProcessLookupError):
+        pass
+    _send(signal.SIGKILL)
+    try:
+        await asyncio.wait_for(process.wait(), timeout=2)
+    except (asyncio.TimeoutError, ProcessLookupError):
+        pass
 
 
 class GrepTool(Tool):
@@ -48,32 +78,57 @@ class GrepTool(Tool):
         if shutil.which("rg"):
             return await self._rg_search(pattern, search_path, glob, case_insensitive)
         else:
-            return self._python_search(pattern, search_path, glob, case_insensitive)
+            # Sync os.walk over a big tree would block the event loop.
+            return await asyncio.to_thread(
+                self._python_search, pattern, search_path, glob, case_insensitive
+            )
 
     async def _rg_search(self, pattern: str, path: str, file_glob: str,
                          case_insensitive: bool) -> str:
-        cmd = ["rg", "--no-heading", "--line-number", "--max-count", "50"]
+        cmd = ["rg", "--no-heading", "--line-number", "--max-count", "50",
+               # Cap match line length so a minified/one-line JSON doesn't dump
+               # megabytes; show a short preview of the omitted tail instead.
+               "--max-columns", "500", "--max-columns-preview"]
         if case_insensitive:
             cmd.append("-i")
         if file_glob:
             cmd.extend(["--glob", file_glob])
-        cmd.extend([pattern, path])
+        # -e guards a pattern that starts with '-' (otherwise parsed as a flag);
+        # '--' ends option parsing so a path can't be misread as a flag either.
+        cmd.extend(["-e", pattern, "--", path])
 
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
             )
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=30)
-            output = stdout.decode("utf-8", errors="replace").strip()
-            if not output:
-                return f"No matches found for: {pattern}"
-            return output
-        except asyncio.TimeoutError:
-            return "Error: Search timed out"
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(), timeout=30
+                )
+            except asyncio.TimeoutError:
+                await _kill_process_group(process)
+                return "Error: Search timed out"
         except Exception as e:
             return f"Error: {e}"
+
+        rc = process.returncode
+        output = stdout.decode("utf-8", errors="replace").strip()
+        err = stderr.decode("utf-8", errors="replace").strip()
+
+        # ripgrep exit codes: 0 = matches, 1 = no matches, 2 = error
+        # (bad regex, unreadable path, etc.). Don't disguise an error as
+        # "no matches".
+        if rc == 2 or (rc not in (0, 1) and err):
+            return f"Error: ripgrep failed: {err or 'unknown error'}"
+        if not output:
+            msg = f"No matches found for: {pattern}"
+            if err:
+                msg += f"\n(note: {err})"
+            return msg
+        return output
 
     def _python_search(self, pattern: str, path: str, file_glob: str,
                        case_insensitive: bool) -> str:

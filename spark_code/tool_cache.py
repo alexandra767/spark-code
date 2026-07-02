@@ -15,6 +15,7 @@ class ToolCache:
         self.ttl = ttl
         self.max_entries = max_entries
         self._cache: dict[str, tuple[float, str]] = {}  # key -> (timestamp, result)
+        self._key_tool: dict[str, str] = {}  # key -> tool_name (for invalidation)
         self._hits = 0
         self._misses = 0
 
@@ -34,6 +35,7 @@ class ToolCache:
         ts, result = entry
         if time.monotonic() - ts > self.ttl:
             del self._cache[key]
+            self._key_tool.pop(key, None)
             self._misses += 1
             return None
         self._hits += 1
@@ -45,37 +47,47 @@ class ToolCache:
             # Evict oldest
             oldest_key = min(self._cache, key=lambda k: self._cache[k][0])
             del self._cache[oldest_key]
+            self._key_tool.pop(oldest_key, None)
         key = self._key(tool_name, args)
         self._cache[key] = (time.monotonic(), result)
+        self._key_tool[key] = tool_name
+
+    # Tools whose results depend on directory STRUCTURE (which files exist),
+    # not just a single file's contents. A create/delete changes these even
+    # when the new path can't appear in an old (e.g. "no matches") result.
+    _STRUCTURE_TOOLS = {"glob", "grep", "list_dir"}
 
     def invalidate_path(self, path: str):
-        """Invalidate all cache entries that reference a path.
+        """Invalidate cache entries affected by a write/create/delete at `path`.
 
-        Checks both the cached result text and reconstructs keys for
-        common tools that use the path.
+        Drops the direct read of the path, any cached result whose text mentions
+        the path, AND every directory-structure query (glob/grep/list_dir) —
+        because creating or deleting a file changes those even if the path is
+        absent from a stale negative result (e.g. a cached "No files found").
         """
         to_remove = []
-        # Direct key invalidation for common patterns
+        for key, (_, result) in self._cache.items():
+            tool_name = self._key_tool.get(key)
+            if tool_name in self._STRUCTURE_TOOLS:
+                to_remove.append(key)
+            elif path and path in result:
+                to_remove.append(key)
+
+        # Direct key invalidation for the specific path read
         for tool_name in ("read_file", "glob", "grep", "list_dir"):
-            for args_dict in [
-                {"file_path": path},
-                {"path": path},
-            ]:
+            for args_dict in ({"file_path": path}, {"path": path}):
                 key = self._key(tool_name, args_dict)
                 if key in self._cache:
                     to_remove.append(key)
 
-        # Also scan results for the path string
-        for key, (_, result) in self._cache.items():
-            if path in result and key not in to_remove:
-                to_remove.append(key)
-
-        for key in to_remove:
+        for key in set(to_remove):
             self._cache.pop(key, None)
+            self._key_tool.pop(key, None)
 
     def invalidate_all(self):
         """Clear the entire cache."""
         self._cache.clear()
+        self._key_tool.clear()
 
     @property
     def stats(self) -> dict:

@@ -7,7 +7,6 @@ Usage: /watch pytest
 
 import asyncio
 import os
-import time
 
 from rich.console import Console
 from rich.text import Text
@@ -91,14 +90,16 @@ class FileWatcher:
 
     async def _watch_loop(self):
         """Main watch loop — poll for changes every 2 seconds."""
-        prev_snapshot = self._scan()
+        # Run the (blocking) filesystem walk off the event loop so a large tree
+        # doesn't stall the UI / other coroutines every poll.
+        prev_snapshot = await asyncio.to_thread(self._scan)
         try:
             while self._running:
                 await asyncio.sleep(2)
                 if not self._running:
                     break
 
-                current = self._scan()
+                current = await asyncio.to_thread(self._scan)
                 changed = self._diff(prev_snapshot, current)
                 if changed:
                     self._run_count += 1

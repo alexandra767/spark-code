@@ -1,5 +1,6 @@
 """Glob file search tool."""
 
+import asyncio
 import glob as globlib
 import os
 
@@ -34,10 +35,14 @@ class GlobTool(Tool):
         search_dir = os.path.expanduser(search_dir)
 
         full_pattern = os.path.join(search_dir, pattern)
-        matches = sorted(globlib.glob(full_pattern, recursive=True))
 
-        # Filter out directories, keep files
-        files = [m for m in matches if os.path.isfile(m)]
+        # glob.glob is sync-blocking on large trees — offload it so it doesn't
+        # stall the event loop.
+        def _scan():
+            matches = sorted(globlib.glob(full_pattern, recursive=True))
+            return [m for m in matches if os.path.isfile(m)]
+
+        files = await asyncio.to_thread(_scan)
 
         if not files:
             return f"No files found matching: {pattern}"

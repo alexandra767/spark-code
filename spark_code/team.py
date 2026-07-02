@@ -79,8 +79,28 @@ class Worker:
     agent: Agent | None = None
     asyncio_task: asyncio.Task | None = None
     inbox: deque = field(default_factory=deque)
-    context_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     current_tool: str = ""
+
+    def drain_inbox(self) -> list["Message"]:
+        """Inject any pending inbox messages into this worker's context.
+
+        MUST be called only at a SAFE boundary — the TOP of an agent-loop
+        iteration, never between an assistant ``tool_calls`` message and its
+        matching tool results — otherwise the message sequence becomes invalid
+        (a user message wedged between tool_calls and tool_result).
+
+        Returns the list of messages that were drained (for logging/tests).
+        """
+        if not self.inbox:
+            return []
+        drained: list[Message] = []
+        while self.inbox:
+            msg = self.inbox.popleft()
+            drained.append(msg)
+            if self.agent is not None:
+                self.agent.context.add_user(
+                    f"[Message from {msg.from_name}]: {msg.content}")
+        return drained
 
 
 class TeamManager:
@@ -88,7 +108,8 @@ class TeamManager:
 
     def __init__(self, model: ModelClient, tools: ToolRegistry,
                  console: Console, task_store: TaskStore,
-                 stats=None, worker_model=None):
+                 stats=None, worker_model=None,
+                 worker_permission_mode: str = "auto"):
         self.model = model
         self.worker_model = worker_model  # separate model for workers (faster)
         self.max_workers = MAX_WORKERS_CLOUD if worker_model else MAX_WORKERS_LOCAL
@@ -96,12 +117,21 @@ class TeamManager:
         self.console = console
         self.task_store = task_store
         self.stats = stats  # shared session stats for file tracking
+        # Permission mode workers run under. Defaults to "auto" (read-only
+        # auto-allowed, writes gated) rather than "trust" so an approved
+        # background worker can't turn into an unrestricted shell. cli.py
+        # should pass the LEAD agent's mode here so workers inherit it.
+        self.worker_permission_mode = worker_permission_mode
         self.workers: dict[str, Worker] = {}
         self._counter = 0
+        self._name_counter = 0  # monotonic — guarantees unique auto worker names
         self.files_changed: list[dict] = []
         self._spawn_queue: deque[tuple[str, str]] = deque()  # (prompt, name) waiting to spawn
         # Lead agent's inbox — messages from workers to "lead"
         self.lead_inbox: deque[Message] = deque()
+        # Durable full results keyed by worker name (survives status display
+        # racing get_lead_messages, and is not truncated).
+        self.worker_results: dict[str, str] = {}
 
     @property
     def active_count(self) -> int:
@@ -123,11 +153,12 @@ class TeamManager:
             count = 0
             for w in self.workers.values():
                 if w.name != from_name and w.status == "running":
+                    # Only enqueue — the worker drains its inbox at a safe
+                    # boundary (top of its agent loop). We must NOT mutate the
+                    # worker's live context here: injecting a user message
+                    # between an assistant tool_calls message and its tool
+                    # results yields an invalid message sequence.
                     w.inbox.append(msg)
-                    # Queue message injection — will be picked up between agent rounds
-                    if w.agent:
-                        w.agent.context.add_user(
-                            f"[Message from {from_name}]: {message}")
                     count += 1
             self.lead_inbox.append(msg)  # Lead also sees broadcasts
             return f"Message broadcast to {count} worker(s) and the lead."
@@ -136,12 +167,12 @@ class TeamManager:
         target = self._find_worker_by_name(to_name)
         if not target:
             return f"Error: Worker '{to_name}' not found. Active workers: {self._active_worker_names()}"
+        if target.status != "running":
+            return (f"Error: Worker '{to_name}' is no longer running "
+                    f"(status: {target.status}); message not delivered.")
 
+        # Enqueue only — the worker drains its inbox at a safe boundary.
         target.inbox.append(msg)
-        # Inject message into the target worker's context
-        if target.agent:
-            target.agent.context.add_user(
-                f"[Message from {from_name}]: {message}")
         return f"Message delivered to {to_name}."
 
     def get_lead_messages(self) -> list[Message]:
@@ -160,11 +191,18 @@ class TeamManager:
         names = [w.name for w in self.workers.values() if w.status == "running"]
         return ", ".join(names) if names else "(none)"
 
+    def _next_auto_name(self) -> str:
+        """Return a unique auto-generated worker name (never collides)."""
+        self._name_counter += 1
+        return f"worker-{self._name_counter}"
+
     async def spawn(self, prompt: str, name: str = "") -> Worker | None:
         """Spawn a new worker agent with the given task."""
-        # Reject duplicate names if that worker is still running
+        # Reject duplicate names if that worker is still running.
+        # NOTE: look up by NAME (get_worker keys by numeric id and would never
+        # match a name, silently disabling this guard).
         if name:
-            existing = self.get_worker(name)
+            existing = self._find_worker_by_name(name)
             if existing and existing.status == "running":
                 self.console.print(
                     Text(f"  Worker '{name}' is already running. "
@@ -173,8 +211,10 @@ class TeamManager:
                 return None
 
         if self.active_count >= self.max_workers:
-            # Queue the worker instead of rejecting
-            worker_name = name or f"worker-{self._counter + 1}"
+            # Queue the worker instead of rejecting. Give unnamed queued
+            # workers a UNIQUE auto name so multiple queued workers don't all
+            # collide on the same "worker-N".
+            worker_name = name or self._next_auto_name()
             self._spawn_queue.append((prompt, worker_name))
             self.console.print(
                 Text(f"  [{worker_name}] Queued — will start when a slot opens "
@@ -184,14 +224,18 @@ class TeamManager:
 
         self._counter += 1
         worker_id = str(self._counter)
-        worker_name = name or f"worker-{worker_id}"
+        worker_name = name or self._next_auto_name()
 
         # Create task in shared store
         task = self.task_store.create(prompt, assigned_to=worker_name)
 
-        # Build a tool registry for this worker with its own send_message instance
+        # Build a tool registry for this worker with its own send_message instance.
+        # Exclude spawn_worker so workers cannot spawn sub-workers (prevents
+        # unbounded recursive spawning).
         worker_tools = ToolRegistry()
         for tool in self.tools.all():
+            if tool.name == "spawn_worker":
+                continue
             worker_tools.register(tool)
 
         # Create a per-worker send_message tool bound to this worker
@@ -205,12 +249,14 @@ class TeamManager:
         if active_names and active_names != "(none)":
             team_info = f"\n\nOther active workers: {active_names}\nYou are: {worker_name}\n"
 
-        # Each worker gets its own context and permissions (trust mode)
+        # Each worker gets its own context. Permissions INHERIT the lead's
+        # mode (defaults to "auto") instead of a hardcoded "trust" so a single
+        # approved worker can't become an unrestricted background shell.
         context = Context(
             system_prompt=WORKER_SYSTEM_PROMPT + team_info,
             max_tokens=32768,
         )
-        permissions = PermissionManager(mode="trust")
+        permissions = PermissionManager(mode=self.worker_permission_mode)
 
         # Create a prefixed console wrapper for worker output
         worker_console = _PrefixedConsole(self.console, worker_name)
@@ -232,6 +278,8 @@ class TeamManager:
             prompt=prompt,
             agent=agent,
         )
+        # Drain queued inbox messages into context at each agent-loop boundary.
+        agent.on_iteration = worker.drain_inbox
         self.workers[worker_id] = worker
 
         # Print start message
@@ -254,10 +302,14 @@ class TeamManager:
             )
             worker.status = "completed"
             worker.result = result or "(completed with no text output)"
+            # Persist the FULL result durably (not truncated) so the lead can
+            # retrieve it via get_worker_result even after the status display
+            # consumes the ephemeral lead-message queue.
+            self.worker_results[worker.name] = worker.result
 
             self.task_store.update(
                 task_id, status="completed",
-                result=worker.result[:500],
+                result=worker.result,
             )
 
             self.lead_inbox.append(Message(
@@ -272,6 +324,7 @@ class TeamManager:
         except asyncio.TimeoutError:
             worker.status = "failed"
             worker.result = f"Timed out after {WORKER_TIMEOUT}s"
+            self.worker_results[worker.name] = worker.result
             self.task_store.update(task_id, status="failed",
                                    result=worker.result)
             self.lead_inbox.append(Message(
@@ -284,20 +337,28 @@ class TeamManager:
                      style=_C_RED))
 
         except asyncio.CancelledError:
+            # Cancellation means someone is STOPPING us (/team stop or session
+            # exit). Record the state, then RE-RAISE so the task actually ends
+            # cancelled \u2014 and crucially do NOT fall through to _drain_queue(),
+            # which would spawn the queued workers we're trying to stop.
             worker.status = "failed"
             worker.result = "Cancelled"
+            self.worker_results[worker.name] = worker.result
             self.task_store.update(task_id, status="failed", result="Cancelled")
             self.console.print(
                 Text(f"  [{worker.name}] Stopped", style=_C_YELLOW))
+            raise
 
         except Exception as e:
             worker.status = "failed"
             worker.result = str(e)
-            self.task_store.update(task_id, status="failed", result=str(e)[:500])
+            self.worker_results[worker.name] = worker.result
+            self.task_store.update(task_id, status="failed", result=str(e))
             self.console.print(
                 Text(f"  [{worker.name}] \u2717 Failed: {e}", style=_C_RED))
 
-        # Auto-spawn next queued worker if there's a slot
+        # Auto-spawn next queued worker if there's a slot.
+        # (Unreachable on cancellation \u2014 we re-raised above.)
         await self._drain_queue()
 
     async def _drain_queue(self):
@@ -325,7 +386,9 @@ class TeamManager:
         return True
 
     async def stop_all(self):
-        """Stop all running workers."""
+        """Stop all running workers and drop any queued (not-yet-started) ones."""
+        # Drop pending queued workers first so nothing spawns after we stop.
+        self._spawn_queue.clear()
         tasks = []
         for worker in self.workers.values():
             if worker.asyncio_task and not worker.asyncio_task.done():
@@ -385,6 +448,18 @@ class TeamManager:
 
     def get_worker(self, worker_id: str) -> Worker | None:
         return self.workers.get(worker_id)
+
+    def get_worker_result(self, name: str) -> str | None:
+        """Return the FULL stored result for a worker by NAME, or None.
+
+        Reads from the durable ``worker_results`` map first (survives the
+        ephemeral lead-message queue being consumed by the status display),
+        then falls back to the live worker's result.
+        """
+        if name in self.worker_results:
+            return self.worker_results[name]
+        worker = self._find_worker_by_name(name)
+        return worker.result if worker else None
 
 
 class _PrefixedConsole:

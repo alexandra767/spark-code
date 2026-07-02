@@ -49,9 +49,11 @@ class _LoopingModel:
 
     def __init__(self):
         self._call = 0
+        self.seen_requests = []  # messages passed on each round
 
     async def chat(self, **kwargs):
         self._call += 1
+        self.seen_requests.append(kwargs.get("messages", []))
         yield {"type": "tool_call", "id": f"call_{self._call}",
                "name": "noop", "arguments": {}}
         yield {"type": "done", "usage": {}}
@@ -75,7 +77,10 @@ class _NoopTool(Tool):
 
 
 class TestRoundWarnings:
-    def test_warning_injected_near_limit(self):
+    def test_warning_injected_into_request_but_not_persisted(self):
+        """The round-limit nudge must reach the model on the relevant round,
+        but must NOT be stored in context.messages (persisting 'Finish
+        immediately.' poisons every subsequent turn)."""
         model = _LoopingModel()
         context = Context()
         tools = ToolRegistry()
@@ -88,10 +93,20 @@ class TestRoundWarnings:
 
         asyncio.run(agent.run("test"))
 
-        messages = [m for m in context.messages if m.get("role") == "system"]
-        warning_texts = [m["content"] for m in messages]
-        assert any("remaining" in t.lower() for t in warning_texts), \
-            f"Expected round warning in system messages, got: {warning_texts}"
+        # The nudge appeared in at least one request sent to the model...
+        seen_in_request = any(
+            any("remaining" in m.get("content", "").lower()
+                for m in req if m.get("role") == "system")
+            for req in model.seen_requests
+        )
+        assert seen_in_request, "Expected round warning injected into a request"
+
+        # ...but was NOT persisted into the conversation history.
+        persisted = [m for m in context.messages
+                     if m.get("role") == "system"
+                     and "remaining" in (m.get("content") or "").lower()]
+        assert not persisted, \
+            f"Round warnings must be transient, but were persisted: {persisted}"
 
 
 from spark_code.stats import SessionStats

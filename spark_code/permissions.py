@@ -65,10 +65,9 @@ def _format_permission_detail(tool_name: str, args: dict[str, Any]) -> Text:
     elif tool_name == "bash":
         command = args.get("command", "")
         text.append("Run ", style=_C_DIM)
-        if len(command) > 120:
-            text.append(command[:117] + "...", style=_C_CMD)
-        else:
-            text.append(command, style=_C_CMD)
+        # Show the FULL command — never truncate. Truncating hid any payload
+        # after the cutoff at approval time. Rich wraps long lines in the panel.
+        text.append(command, style=_C_CMD)
 
     elif tool_name == "glob":
         pattern = args.get("pattern", "")
@@ -99,11 +98,14 @@ def _format_permission_detail(tool_name: str, args: dict[str, Any]) -> Text:
         text.append(url, style=_C_BLUE)
 
     else:
-        # Generic fallback — show key: value pairs
+        # Generic fallback — show key: value pairs. Use a generous cap so a
+        # payload isn't hidden at approval time (the old 80-char cut could hide
+        # an injection); only extreme blobs are trimmed, with a clear note.
+        _MAX_VAL = 4000
         for k, v in args.items():
             v_str = str(v)
-            if len(v_str) > 80:
-                v_str = v_str[:77] + "..."
+            if len(v_str) > _MAX_VAL:
+                v_str = v_str[:_MAX_VAL] + f"... [+{len(v_str) - _MAX_VAL} more chars]"
             text.append(f"  {k}: ", style=_C_DIM)
             text.append(v_str, style=_C_PATH)
             text.append("\n")
@@ -167,9 +169,10 @@ class PermissionManager:
         ))
 
         choice = Prompt.ask(
-            "[Y]es / [N]o / [A]lways allow this tool",
+            "[y]es / [N]o / [a]lways allow this tool",
             choices=["y", "n", "a"],
-            default="y",
+            # Default to No so a stray Enter never approves a tool call.
+            default="n",
         )
 
         if choice == "a":

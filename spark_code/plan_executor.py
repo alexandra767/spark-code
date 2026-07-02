@@ -17,6 +17,62 @@ _C_RED = "#bf616a"
 _C_DIM = "#4c566a"
 
 
+def _parse_parallel_spec(section_lines: list[str]) -> set[int]:
+    """Parse the ## Parallelization section CONSERVATIVELY.
+
+    The old logic scraped every integer 1-50 out of the prose, which turned
+    dependency descriptions (e.g. "steps 3-7") into bogus parallel batches.
+    This version, in priority order:
+
+      1. Explicit machine-readable marker — a line like
+         ``Parallel: 1, 2, 3`` (or ``Parallel steps: 1 2 3``). Authoritative.
+      2. A list of bare numbers, one per line (e.g. ``- 2`` / ``3``).
+      3. Prose fallback — ONLY numbers explicitly joined as a group
+         (``Steps 1 and 2``) inside a sentence that mentions "parallel".
+         Ranges like ``3-7`` and lone numbers are ignored so dependency prose
+         never creates false parallel batches.
+    """
+    nums: set[int] = set()
+
+    def _add(n: int):
+        if 1 <= n <= 50:
+            nums.add(n)
+
+    # 1. Explicit marker anywhere in the section.
+    marker_re = re.compile(r"(?i)^\s*parallel(?:\s+steps)?\s*[:=]\s*(.+)$")
+    for line in section_lines:
+        m = marker_re.match(line)
+        if m:
+            for num in re.findall(r"\d+", m.group(1)):
+                _add(int(num))
+    if nums:
+        return nums
+
+    # 2. Bare-number list lines (bullets or plain numbers).
+    bare_re = re.compile(r"^[\-\*•]?\s*(\d+)[\.\)]?\s*$")
+    bare_found = False
+    for line in section_lines:
+        m = bare_re.match(line)
+        if m:
+            _add(int(m.group(1)))
+            bare_found = True
+    if bare_found:
+        return nums
+
+    # 3. Conservative prose parsing — only explicit "X and Y" groups in a
+    #    sentence that actually says "parallel". Hyphenated ranges are skipped
+    #    because the connector must be a comma / "and" / "&", not "-".
+    text = " ".join(section_lines)
+    group_re = re.compile(r"\d+(?:\s*(?:,|and|&)\s*\d+)+", re.IGNORECASE)
+    for sentence in re.split(r"(?<=[.!?])\s+", text):
+        if "parallel" not in sentence.lower():
+            continue
+        for grp in group_re.finditer(sentence):
+            for num in re.findall(r"\d+", grp.group(0)):
+                _add(int(num))
+    return nums
+
+
 def parse_plan(plan_text: str) -> tuple[list[dict], set[int]]:
     """Parse plan.md into steps and identify parallel step numbers.
 
@@ -24,7 +80,7 @@ def parse_plan(plan_text: str) -> tuple[list[dict], set[int]]:
       {"number": int, "title": str, "body": str}
     """
     steps = []
-    parallel_nums = set()
+    parallel_section_lines: list[str] = []
 
     lines = plan_text.split("\n")
     current_step = None
@@ -49,12 +105,10 @@ def parse_plan(plan_text: str) -> tuple[list[dict], set[int]]:
                         "package", "distribut"]):
                     past_steps_section = True
 
-        # Collect numbers from parallelization section
+        # Collect the raw parallelization-section lines; parse them
+        # conservatively AFTER the loop (see _parse_parallel_spec).
         if in_parallel_section and not stripped.startswith("#"):
-            for m in re.finditer(r"\b(\d+)\b", stripped):
-                num = int(m.group(1))
-                if 1 <= num <= 50:  # sanity check
-                    parallel_nums.add(num)
+            parallel_section_lines.append(stripped)
 
         # Match numbered step headers: "1. **Title:**" or "1. Title"
         step_match = re.match(
@@ -80,6 +134,7 @@ def parse_plan(plan_text: str) -> tuple[list[dict], set[int]]:
         current_step["body"] = "\n".join(current_body_lines).strip()
         steps.append(current_step)
 
+    parallel_nums = _parse_parallel_spec(parallel_section_lines)
     return steps, parallel_nums
 
 
@@ -248,8 +303,10 @@ async def execute_plan(plan_text: str, team_manager, agent, console: Console):
 
             workers = []
             for s in batch:
-                # Wait if at capacity
-                while team_manager.active_count >= 3:
+                # Wait if at capacity. Use the team's real cap (local mode
+                # allows only MAX_WORKERS_LOCAL=2) instead of a hardcoded 3,
+                # which silently dropped the 3rd parallel step from tracking.
+                while team_manager.active_count >= team_manager.max_workers:
                     await asyncio.sleep(1)
 
                 task_desc = build_task_desc(s, refs)
@@ -321,7 +378,24 @@ async def execute_plan(plan_text: str, team_manager, agent, console: Console):
                 console.print(f"\n[{_C_RED}]Step interrupted[/{_C_RED}]")
                 return
             except Exception as e:
-                console.print(f"[{_C_RED}]  Error: {e}[/{_C_RED}]")
+                # Stop-on-failure: a failed sequential step usually invalidates
+                # everything downstream (later steps build on it). Make the
+                # failure loud and abort, clearly marking the skipped steps.
+                console.print(
+                    f"[{_C_RED}]  ✗ Step {step['number']} failed: {e}[/{_C_RED}]"
+                )
+                downstream = steps[i + 1:]
+                if downstream:
+                    skipped = ", ".join(str(s["number"]) for s in downstream)
+                    console.print(
+                        f"[{_C_RED}]  Aborting plan — skipping downstream "
+                        f"step(s): {skipped}[/{_C_RED}]"
+                    )
+                console.print(
+                    f"[{_C_RED}]▸ Plan halted at step {step['number']}."
+                    f"[/{_C_RED}]"
+                )
+                return
 
             i += 1
 

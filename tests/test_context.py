@@ -189,3 +189,58 @@ class TestMessageOrder:
         assert messages[2]["content"] == "second"
         assert messages[3]["content"] == "third"
         assert messages[4]["content"] == "fourth"
+
+
+class TestCompactionSafety:
+    """Regression: compaction must not orphan tool results (invalid history)."""
+
+    def _msg_tool_call(self, cid, name):
+        return {"role": "assistant", "content": None,
+                "tool_calls": [{"id": cid, "type": "function",
+                                "function": {"name": name, "arguments": "{}"}}]}
+
+    def test_recent_never_starts_with_orphan_tool_result(self):
+        ctx = Context(max_tokens=0)
+        # Build a history where the naive keep_recent boundary would land
+        # between an assistant tool_calls message and its tool result.
+        ctx.messages = [
+            {"role": "user", "content": "do a thing"},
+            self._msg_tool_call("c1", "read_file"),
+            {"role": "tool", "tool_call_id": "c1", "name": "read_file", "content": "data"},
+            {"role": "assistant", "content": "done"},
+            {"role": "user", "content": "another"},
+            self._msg_tool_call("c2", "bash"),
+            {"role": "tool", "tool_call_id": "c2", "name": "bash", "content": "ok"},
+        ]
+        ctx.compact(keep_recent=1)  # naive slice would keep only the last tool msg
+        # After compaction, no tool message may be preceded by a non-tool_calls msg
+        for i, m in enumerate(ctx.messages):
+            if m.get("role") == "tool":
+                prev = ctx.messages[i - 1]
+                assert prev.get("role") == "assistant" and prev.get("tool_calls"), (
+                    f"orphaned tool result at index {i}")
+
+
+class TestNarrationPreserved:
+    def test_tool_calls_keep_narration_content(self):
+        ctx = Context()
+        ctx.add_assistant_tool_calls(
+            [{"id": "c1", "name": "bash", "arguments": {"command": "ls"}}],
+            content="Let me list the files.")
+        assert ctx.messages[-1]["content"] == "Let me list the files."
+        assert ctx.messages[-1]["tool_calls"][0]["function"]["name"] == "bash"
+
+    def test_tool_calls_without_content_is_none(self):
+        ctx = Context()
+        ctx.add_assistant_tool_calls(
+            [{"id": "c1", "name": "bash", "arguments": {}}])
+        assert ctx.messages[-1]["content"] is None
+
+
+class TestEstimateTokensImages:
+    def test_image_payload_counted(self):
+        ctx = Context(system_prompt="")
+        big = "A" * 40000  # ~fake base64 image payload
+        ctx.add_user_with_image("look", big)
+        # Must be counted (not ~0), so auto-compaction can trigger on images.
+        assert ctx.estimate_tokens() > 5000

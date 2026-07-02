@@ -1,5 +1,6 @@
 """RAG-enhanced project planning — keyword extraction and RAG query builder."""
 
+import asyncio
 import os
 import re
 
@@ -71,7 +72,7 @@ def build_rag_queries(keywords: list[str], project_type: str,
         short_kw = " ".join(keywords[:3])
         return [
             f"HIG design guidelines {short_kw}",
-            f"HIG forms lists navigation",
+            "HIG forms lists navigation",
             f"SwiftUI {short_kw}",
             f"App Store guidelines {short_kw}",
         ]
@@ -93,8 +94,26 @@ def build_rag_queries(keywords: list[str], project_type: str,
         ]
 
 
-RAG_SERVICE_URL = os.environ.get("RAG_SERVICE_URL", "http://spark-4a54.local:8010")
+# Generic, machine-agnostic default. Override with the RAG_SERVICE_URL env var
+# (or set the config key) to point at a specific host — do NOT hardcode a
+# personal machine name here.
+DEFAULT_RAG_SERVICE_URL = "http://localhost:8010"
 MAX_REFS = 5
+# Per-query HTTP timeout. Kept low so an unreachable RAG host can't freeze the
+# planner for tens of seconds per query.
+RAG_QUERY_TIMEOUT = 8.0
+
+
+def get_rag_service_url() -> str:
+    """Resolve the RAG service URL from the environment (evaluated at call time).
+
+    Falls back to a generic localhost default so it isn't machine-specific.
+    """
+    return os.environ.get("RAG_SERVICE_URL", DEFAULT_RAG_SERVICE_URL)
+
+
+# Backwards-compatible module constant (env override honoured at import time).
+RAG_SERVICE_URL = get_rag_service_url()
 
 
 def format_references(raw_results: list[dict]) -> str:
@@ -130,15 +149,20 @@ def format_references(raw_results: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def fetch_rag_context(keywords: list[str], project_type: str,
-                      prompt: str = "") -> str:
+async def fetch_rag_context(keywords: list[str], project_type: str,
+                            prompt: str = "",
+                            timeout: float = RAG_QUERY_TIMEOUT) -> str:
     """Fire RAG queries and return formatted reference material.
 
-    Uses synchronous httpx since this runs in the slash command handler
-    which is called from within an already-running async event loop.
+    This is a COROUTINE — it runs inside the REPL's event loop, so it uses
+    httpx.AsyncClient (never the blocking httpx.Client, which would freeze the
+    UI and every worker for up to timeout×len(queries) when the RAG host is
+    unreachable). Queries run concurrently.
 
-    Returns a formatted '## Reference Material' section string,
-    or empty string if RAG is unreachable or returns no results.
+    Callers must ``await`` it (see INTEGRATION NOTES for the cli.py call site).
+
+    Returns a formatted '## Reference Material' section string, or empty string
+    if RAG is unreachable or returns no results.
     """
     import httpx
 
@@ -146,26 +170,31 @@ def fetch_rag_context(keywords: list[str], project_type: str,
     if not queries:
         return ""
 
-    all_results = []
+    base_url = get_rag_service_url()
 
+    async def _run_query(client: "httpx.AsyncClient", query: str) -> list[dict]:
+        payload = {
+            "query": query,
+            "collection": "claude_documents",
+            "n_results": 3,
+            "search_type": "hybrid",
+            "user_role": "owner",
+        }
+        try:
+            resp = await client.post(f"{base_url}/search", json=payload)
+            data = resp.json()
+            return data.get("results", [])
+        except Exception:
+            return []
+
+    all_results: list[dict] = []
     try:
-        with httpx.Client(timeout=30.0) as client:
-            for query in queries:
-                payload = {
-                    "query": query,
-                    "collection": "claude_documents",
-                    "n_results": 3,
-                    "search_type": "hybrid",
-                    "user_role": "owner",
-                }
-                try:
-                    resp = client.post(f"{RAG_SERVICE_URL}/search", json=payload)
-                    data = resp.json()
-                    all_results.extend(data.get("results", []))
-                except Exception:
-                    continue
-    except httpx.ConnectError:
-        return ""
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            batches = await asyncio.gather(
+                *(_run_query(client, q) for q in queries)
+            )
+        for batch in batches:
+            all_results.extend(batch)
     except Exception:
         return ""
 

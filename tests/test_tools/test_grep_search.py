@@ -66,3 +66,22 @@ async def test_skipped_binary_files(tool, searchable_dir):
     result = await tool.execute(pattern="Hello", path=searchable_dir)
     # Main results should still come through
     assert "hello.py" in result or "data.txt" in result
+
+
+async def test_invalid_regex_surfaces_error(tool, searchable_dir):
+    # A bad regex must be reported as an error, NOT disguised as "no matches".
+    result = await tool.execute(pattern="(unclosed", path=searchable_dir)
+    assert "No matches found" not in result
+    assert "error" in result.lower() or "invalid" in result.lower()
+
+
+async def test_pattern_starting_with_dash(tool, tmp_dir):
+    # A pattern that begins with '-' must be searched literally, not parsed as a
+    # ripgrep flag.
+    path = os.path.join(tmp_dir, "flags.txt")
+    with open(path, "w") as f:
+        f.write("normal line\n--dash-prefixed-token here\n")
+    result = await tool.execute(pattern="--dash-prefixed-token", path=tmp_dir)
+    # Must not error out as an unknown flag, and must find the line.
+    assert "unknown" not in result.lower()
+    assert "--dash-prefixed-token" in result

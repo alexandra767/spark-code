@@ -1,35 +1,59 @@
 """Base tool interface for Spark Code."""
 
 import os
+import tempfile
 from abc import ABC, abstractmethod
 
 # Maximum file size for reading (50 MB)
 MAX_READ_SIZE = 50 * 1024 * 1024
 
 
-def _validate_path(file_path: str, cwd: str | None = None) -> str:
-    """Validate and resolve a file path. Rejects symlinks outside cwd and path traversal.
+def _validate_path(file_path: str, cwd: str | None = None,
+                   for_write: bool = False) -> str:
+    """Validate and resolve a file path.
 
     Returns the resolved absolute path.
-    Raises ValueError if the path is invalid or outside the allowed directory.
+
+    Reads (``for_write=False``) are permissive: a coding assistant legitimately
+    needs to read configs, dependencies and files outside the project tree, so
+    only path expansion/normalisation happens.
+
+    Writes/edits (``for_write=True``) are sandboxed: the *resolved* path (after
+    following symlinks — so a symlink inside the project can't be used to escape)
+    must live inside the project root (``cwd``, defaulting to ``os.getcwd()``) or
+    the system temp directory (scratch space / build artifacts / tests). Anything
+    else — path traversal (``../../etc/passwd``), an absolute path elsewhere, or a
+    symlink pointing outside — raises ``ValueError``.
     """
     path = os.path.expanduser(file_path)
     if not os.path.isabs(path):
         path = os.path.abspath(path)
 
-    # Resolve symlinks to get the real path
+    # Resolve symlinks to get the real path (defeats symlink-escape).
     real_path = os.path.realpath(path)
 
-    # Check for path traversal outside cwd (if cwd is provided)
-    if cwd:
-        real_cwd = os.path.realpath(cwd)
-        if not real_path.startswith(real_cwd + os.sep) and real_path != real_cwd:
-            # Allow home directory paths too (for reading configs, etc.)
-            home = os.path.expanduser("~")
-            if not real_path.startswith(home + os.sep) and real_path != home:
-                raise ValueError(
-                    f"Path '{file_path}' resolves outside allowed directories"
-                )
+    if for_write:
+        root = os.path.realpath(cwd or os.getcwd())
+        allowed_roots = [root]
+        # Allow the common temp dirs as legitimate scratch space. On macOS
+        # gettempdir() is /var/folders/... but /tmp (-> /private/tmp) is also a
+        # widely-used scratch location, so allow both.
+        for tmp_candidate in (tempfile.gettempdir(), "/tmp"):
+            try:
+                real_tmp = os.path.realpath(tmp_candidate)
+                if real_tmp not in allowed_roots:
+                    allowed_roots.append(real_tmp)
+            except Exception:
+                pass
+
+        def _within(target: str, base: str) -> bool:
+            return target == base or target.startswith(base + os.sep)
+
+        if not any(_within(real_path, r) for r in allowed_roots):
+            raise ValueError(
+                f"Refusing to write outside the project directory: '{file_path}' "
+                f"resolves to '{real_path}', which is outside '{root}'."
+            )
 
     return path
 
@@ -55,9 +79,19 @@ def _backup_for_undo(path: str):
     if not os.path.exists(path):
         return
 
+    # Skip undo backup for binary / non-UTF-8 files: the /undo restore writes the
+    # stored content back as UTF-8 text, so backing up a binary file with
+    # errors="replace" would silently corrupt it on restore.
+    if _is_binary(path):
+        return
+
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read()
+        with open(path, "rb") as f:
+            raw = f.read()
+        try:
+            content = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return  # non-UTF-8: skip undo rather than corrupt on restore
         meta = {"path": path, "content": content}
         # Use monotonic counter + timestamp for proper ordering
         meta_path = os.path.join(undo_dir, f"undo_{int(time.time() * 1000)}.json")

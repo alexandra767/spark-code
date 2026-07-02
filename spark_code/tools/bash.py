@@ -3,8 +3,32 @@
 import asyncio
 import os
 import re
+import signal
 
 from .base import Tool
+
+# Raise the asyncio StreamReader buffer limit well above the 64 KB default so a
+# single very long output line doesn't blow up readline().
+_STREAM_LIMIT = 10 * 1024 * 1024  # 10 MB
+
+# Cap the returned output. Truncate the MIDDLE (keep head + tail) so the exit
+# code / tail of a failing command is never lost.
+_MAX_OUTPUT_CHARS = 100_000
+
+
+def _truncate_middle(text: str, limit: int = _MAX_OUTPUT_CHARS) -> str:
+    """Truncate the middle of *text*, preserving head and tail."""
+    if len(text) <= limit:
+        return text
+    head = limit // 2
+    tail = limit - head
+    omitted = len(text) - head - tail
+    return (
+        text[:head]
+        + f"\n\n... [truncated {omitted} chars in the middle] ...\n\n"
+        + text[-tail:]
+    )
+
 
 SIDE_EFFECT_PATTERNS = [
     (r'\bpip\s+install\b', "Installs packages into the active Python environment"),
@@ -68,30 +92,109 @@ class BashTool(Tool):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=os.getcwd(),
+                # Own process group so a timeout can kill the whole tree, not
+                # just /bin/sh (which would orphan children).
+                start_new_session=True,
+                limit=_STREAM_LIMIT,
             )
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(), timeout=timeout
-            )
-        except asyncio.TimeoutError:
-            process.kill()
-            await process.wait()
-            return f"Error: Command timed out after {timeout}s"
         except Exception as e:
             return f"Error executing command: {e}"
 
-        output = ""
-        if stdout:
-            output += stdout.decode("utf-8", errors="replace")
-        if stderr:
+        stdout_buf = bytearray()
+        stderr_buf = bytearray()
+
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(
+                    self._drain(process.stdout, stdout_buf),
+                    self._drain(process.stderr, stderr_buf),
+                    process.wait(),
+                ),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            # Kill the whole process group and return whatever we captured so far.
+            await self._kill_process_group(process)
+            return self._finalize_timeout(stdout_buf, stderr_buf, timeout)
+        except Exception as e:
+            await self._kill_process_group(process)
+            return f"Error executing command: {e}"
+
+        output = stdout_buf.decode("utf-8", errors="replace")
+        stderr_text = stderr_buf.decode("utf-8", errors="replace")
+        if stderr_text:
             if output:
                 output += "\n"
-            output += stderr.decode("utf-8", errors="replace")
+            output += stderr_text
 
-        exit_code = process.returncode
-        if exit_code != 0:
+        return self._finalize(output, process.returncode)
+
+    @staticmethod
+    async def _drain(stream, buf: bytearray) -> None:
+        """Read a stream into *buf* in chunks.
+
+        Uses read(n) (not readline) so a single multi-megabyte line never trips
+        the StreamReader limit.
+        """
+        if stream is None:
+            return
+        while True:
+            chunk = await stream.read(65536)
+            if not chunk:
+                break
+            buf.extend(chunk)
+
+    @staticmethod
+    async def _kill_process_group(process) -> None:
+        """SIGTERM then SIGKILL the process's whole group; reap it."""
+        try:
+            pgid = os.getpgid(process.pid)
+        except (ProcessLookupError, OSError):
+            pgid = None
+
+        def _send(sig):
+            try:
+                if pgid is not None:
+                    os.killpg(pgid, sig)
+                else:
+                    process.send_signal(sig)
+            except (ProcessLookupError, OSError):
+                pass
+
+        _send(signal.SIGTERM)
+        try:
+            await asyncio.wait_for(process.wait(), timeout=2)
+            return
+        except (asyncio.TimeoutError, ProcessLookupError):
+            pass
+        _send(signal.SIGKILL)
+        try:
+            await asyncio.wait_for(process.wait(), timeout=2)
+        except (asyncio.TimeoutError, ProcessLookupError):
+            pass
+
+    def _finalize(self, output: str, exit_code) -> str:
+        """Truncate (middle) then append the exit code so it's never cut off."""
+        output = _truncate_middle(output)
+        if exit_code is not None and exit_code != 0:
             output += f"\n\nExit code: {exit_code}"
+        stripped = output.strip()
+        return stripped if stripped else f"Command completed (exit code {exit_code})"
 
-        return output.strip() if output.strip() else f"Command completed (exit code {exit_code})"
+    def _finalize_timeout(self, stdout_buf: bytearray, stderr_buf: bytearray,
+                          timeout: int) -> str:
+        """Return partial output plus a timeout marker (never discard it)."""
+        output = stdout_buf.decode("utf-8", errors="replace")
+        stderr_text = stderr_buf.decode("utf-8", errors="replace")
+        if stderr_text:
+            if output:
+                output += "\n"
+            output += stderr_text
+        output = _truncate_middle(output)
+        marker = (f"[timed out after {timeout}s] "
+                  f"Command exceeded the time limit and was killed.")
+        stripped = output.strip()
+        return (stripped + "\n\n" + marker) if stripped else marker
 
     def _is_gui_command(self, command: str) -> bool:
         """Detect commands that launch GUI apps and should run detached."""
@@ -116,51 +219,74 @@ class BashTool(Tool):
         return False
 
     async def execute_streaming(self, command: str, timeout: int = 120,
-                                callback=None, **kw) -> str:
+                                callback=None, background: bool = False,
+                                **kw) -> str:
         """Execute command with line-by-line streaming output.
 
         callback(line: str) is called for each output line as it arrives.
         Still returns the full output for context.
         """
+        # Honor background/GUI commands here too — streaming can't stream a
+        # detached server, and blocking-until-timeout on `npm start` is wrong.
+        if background or self._is_gui_command(command):
+            return await self._run_background(command)
+
         try:
             process = await asyncio.create_subprocess_shell(
                 command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=os.getcwd(),
+                # Own process group so a timeout kills the whole tree.
+                start_new_session=True,
+                # Raise the readline() buffer limit so long lines don't blow up.
+                limit=_STREAM_LIMIT,
             )
-
-            lines = []
-            try:
-                async def read_lines():
-                    while True:
-                        line = await process.stdout.readline()
-                        if not line:
-                            break
-                        decoded = line.decode("utf-8", errors="replace").rstrip("\n")
-                        lines.append(decoded)
-                        if callback:
-                            try:
-                                callback(decoded)
-                            except Exception:
-                                pass  # Don't crash on callback failure
-
-                await asyncio.wait_for(read_lines(), timeout=timeout)
-            except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
-                return "\n".join(lines) + f"\n\nError: Command timed out after {timeout}s"
-
-            await process.wait()
-            output = "\n".join(lines)
-            exit_code = process.returncode
-            if exit_code != 0:
-                output += f"\n\nExit code: {exit_code}"
-
-            return output.strip() if output.strip() else f"Command completed (exit code {exit_code})"
-
         except Exception as e:
             return f"Error executing command: {e}"
+
+        lines: list[str] = []
+
+        async def read_lines():
+            while True:
+                try:
+                    line = await process.stdout.readline()
+                except (ValueError, asyncio.LimitOverrunError):
+                    # A single line exceeded even the raised limit. Fall back to
+                    # a bounded raw read so we don't lose output or orphan the
+                    # process (the old code let this except nuke everything).
+                    try:
+                        line = await process.stdout.read(_STREAM_LIMIT)
+                    except Exception:
+                        break
+                    if not line:
+                        break
+                if not line:
+                    break
+                decoded = line.decode("utf-8", errors="replace").rstrip("\n")
+                lines.append(decoded)
+                if callback:
+                    try:
+                        callback(decoded)
+                    except Exception:
+                        pass  # Don't crash on callback failure
+
+        try:
+            await asyncio.wait_for(read_lines(), timeout=timeout)
+        except asyncio.TimeoutError:
+            await self._kill_process_group(process)
+            partial = _truncate_middle("\n".join(lines))
+            marker = (f"[timed out after {timeout}s] "
+                      f"Command exceeded the time limit and was killed.")
+            return (partial.strip() + "\n\n" + marker) if partial.strip() else marker
+        except Exception as e:
+            await self._kill_process_group(process)
+            partial = _truncate_middle("\n".join(lines)).strip()
+            err = f"Error executing command: {e}"
+            return (partial + "\n\n" + err) if partial else err
+
+        await process.wait()
+        return self._finalize("\n".join(lines), process.returncode)
 
     async def _run_background(self, command: str) -> str:
         """Launch a process detached — for GUI apps and servers."""

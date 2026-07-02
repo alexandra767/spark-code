@@ -69,3 +69,61 @@ class TestEnsureDirs:
         mem.ensure_dirs()
         assert global_dir.exists()
         assert project_dir.exists()
+
+
+class TestEnsureDirsCleanProject:
+    def test_append_project_in_clean_dir_without_spark_parent(self, tmp_path):
+        """Bug 11: /memory add must work in a project with no .spark/ dir.
+
+        The old ensure_dirs only created the project dir if its PARENT existed,
+        so append_project raised FileNotFoundError on the first write.
+        """
+        clean = tmp_path / "brand_new_project"
+        clean.mkdir()
+        project_dir = clean / ".spark" / "memory"  # parent (.spark) does NOT exist
+        assert not project_dir.parent.exists()
+
+        mem = Memory(
+            global_path=tmp_path / "g",
+            project_path=project_dir,
+        )
+        # Must not raise.
+        mem.append_project("First note.")
+        assert project_dir.exists()
+        assert "First note." in mem.load_project()
+
+
+class TestClaudeMemoryPathDerivation:
+    def test_resolve_claude_memory_path_from_cwd(self, tmp_path, monkeypatch):
+        """Bug 12: the Claude memory path is derived from the cwd encoding."""
+        from spark_code.memory import resolve_claude_memory_path, encode_cwd
+
+        # Build a fake ~/.claude/projects/<encoded-cwd>/memory that exists.
+        fake_home = tmp_path / "home"
+        cwd = "/Users/someone/my-project"
+        encoded = encode_cwd(cwd)
+        target = fake_home / ".claude" / "projects" / encoded / "memory"
+        target.mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(fake_home))
+
+        resolved = resolve_claude_memory_path(cwd)
+        assert resolved == target
+
+    def test_resolve_falls_back_when_derived_missing(self, tmp_path, monkeypatch):
+        """When neither derived nor legacy path exists, returns derived path."""
+        from spark_code.memory import resolve_claude_memory_path, encode_cwd
+
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setenv("HOME", str(fake_home))
+        cwd = "/tmp/nonexistent-project-xyz"
+        resolved = resolve_claude_memory_path(cwd)
+        # Derived path (non-existent) is returned; load_claude handles missing.
+        assert encode_cwd(cwd) in str(resolved)
+
+    def test_different_projects_get_different_paths(self, tmp_path, monkeypatch):
+        from spark_code.memory import resolve_claude_memory_path
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        p1 = resolve_claude_memory_path("/Users/x/proj-a")
+        p2 = resolve_claude_memory_path("/Users/x/proj-b")
+        assert p1 != p2

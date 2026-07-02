@@ -3,10 +3,39 @@
 import os
 from pathlib import Path
 
-# Claude Code stores per-project memory under ~/.claude/projects/<encoded-cwd>/memory/.
-# The default for this user is ~/.claude/projects/-Users-alexandratitus/memory/.
+# Claude Code stores per-project memory under ~/.claude/projects/<encoded-cwd>/memory/,
+# where <encoded-cwd> is the absolute cwd with "/" replaced by "-".
 # We surface MEMORY.md (the index) only — detail files stay lazy via the read_file tool.
+_CLAUDE_PROJECTS_ROOT = "~/.claude/projects"
+# Legacy fallback (this user's home-encoded project) used only when the
+# cwd-derived path does not exist.
 DEFAULT_CLAUDE_MEMORY_PATH = "~/.claude/projects/-Users-alexandratitus/memory"
+
+# Sentinel so we can tell "caller passed nothing" (auto-derive) apart from
+# "caller explicitly passed None" (disable) and "caller passed a path".
+_UNSET = object()
+
+
+def encode_cwd(cwd: str) -> str:
+    """Encode an absolute path the way Claude Code names its project dirs."""
+    return cwd.replace("/", "-")
+
+
+def resolve_claude_memory_path(cwd: str | None = None) -> Path:
+    """Derive the Claude Code memory dir for the given cwd (default: current).
+
+    Uses ~/.claude/projects/<encoded-cwd>/memory. If that doesn't exist, falls
+    back to the legacy home-encoded path if IT exists; otherwise returns the
+    (non-existent) derived path — load_claude() handles a missing dir gracefully.
+    """
+    cwd = os.path.abspath(cwd or os.getcwd())
+    derived = Path(os.path.expanduser(_CLAUDE_PROJECTS_ROOT)) / encode_cwd(cwd) / "memory"
+    if derived.exists():
+        return derived
+    fallback = Path(os.path.expanduser(DEFAULT_CLAUDE_MEMORY_PATH))
+    if fallback.exists():
+        return fallback
+    return derived
 
 
 class Memory:
@@ -14,18 +43,29 @@ class Memory:
 
     def __init__(self, global_path: str = "~/.spark/memory",
                  project_path: str = ".spark/memory",
-                 claude_memory_path: str | None = DEFAULT_CLAUDE_MEMORY_PATH):
+                 claude_memory_path=_UNSET,
+                 cwd: str | None = None):
         self.global_path = Path(os.path.expanduser(global_path))
         self.project_path = Path(project_path)
-        self.claude_memory_path = (
-            Path(os.path.expanduser(claude_memory_path)) if claude_memory_path else None
-        )
+        if claude_memory_path is _UNSET:
+            # Derive from the current working directory (correct per-project),
+            # instead of hardcoding one machine-specific path for every project.
+            self.claude_memory_path = resolve_claude_memory_path(cwd)
+        elif claude_memory_path is None:
+            self.claude_memory_path = None
+        else:
+            self.claude_memory_path = Path(os.path.expanduser(claude_memory_path))
 
     def ensure_dirs(self):
-        """Create memory directories if they don't exist."""
+        """Create memory directories if they don't exist.
+
+        Creates the FULL project path (parents included). The old guard only
+        created the project dir when its parent already existed, so
+        /memory add in a project without a .spark/ dir raised FileNotFoundError
+        on the subsequent write.
+        """
         self.global_path.mkdir(parents=True, exist_ok=True)
-        if self.project_path.parent.exists():
-            self.project_path.mkdir(parents=True, exist_ok=True)
+        self.project_path.mkdir(parents=True, exist_ok=True)
 
     def load_global(self) -> str:
         """Load global MEMORY.md content."""

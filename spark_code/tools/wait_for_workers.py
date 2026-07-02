@@ -65,8 +65,16 @@ class WaitForWorkersTool(Tool):
         lines = []
         for w in targets:
             status = w.status
-            result = w.result[:500] if w.result else "(no output)"
-            lines.append(f"- {w.name} [{status}]: {result}")
+            # Surface the full worker result (was capped at 500 chars, which
+            # silently discarded most of what workers produced). The agent-level
+            # truncation still bounds the overall tool result.
+            if w.result:
+                result = w.result
+                if len(result) > 4000:
+                    result = result[:4000] + f"\n... ({len(w.result) - 4000:,} more chars)"
+            else:
+                result = "(no output)"
+            lines.append(f"- {w.name} [{status}]:\n{result}")
 
         still_running = [w for w in targets if w.status == "running"]
         if still_running:

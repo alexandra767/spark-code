@@ -1,5 +1,7 @@
 """Web search tool using DuckDuckGo."""
 
+import asyncio
+
 from .base import Tool
 
 
@@ -26,14 +28,24 @@ class WebSearchTool(Tool):
         }
 
     async def execute(self, query: str, max_results: int = 5, **kw) -> str:
+        # `duckduckgo_search` was renamed to `ddgs`. Prefer the new package
+        # (avoids the deprecation RuntimeWarning the old one emits on every
+        # call), fall back to the old name only if `ddgs` isn't installed.
         try:
-            from duckduckgo_search import DDGS
+            from ddgs import DDGS
         except ImportError:
-            return "Error: duckduckgo-search not installed. Run: pip install duckduckgo-search"
+            try:
+                from duckduckgo_search import DDGS
+            except ImportError:
+                return "Error: ddgs not installed. Run: pip install ddgs"
+
+        def _search():
+            with DDGS() as ddgs:
+                return list(ddgs.text(query, max_results=max_results))
 
         try:
-            with DDGS() as ddgs:
-                results = list(ddgs.text(query, max_results=max_results))
+            # ddgs.text() is blocking network I/O — keep it off the event loop.
+            results = await asyncio.to_thread(_search)
         except Exception as e:
             return f"Search error: {e}"
 

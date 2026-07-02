@@ -38,6 +38,25 @@ if TYPE_CHECKING:
 
 CHECKPOINT_DIR = Path.home() / ".spark" / "checkpoints"
 
+# Cap tool results fed back into the context window.
+MAX_TOOL_RESULT_CHARS = 15000
+
+
+def _truncate_result(result: str, limit: int = MAX_TOOL_RESULT_CHARS) -> str:
+    """Truncate an over-long tool result, keeping the head AND the tail.
+
+    Bash appends its exit code at the very end, so a head-only cut would hide
+    whether a long-output command actually failed. Keeping the tail preserves
+    exit codes and trailing error summaries.
+    """
+    if len(result) <= limit:
+        return result
+    head = int(limit * 0.8)
+    tail = limit - head
+    omitted = len(result) - limit
+    return (f"{result[:head]}\n\n... ({omitted:,} chars truncated) ...\n\n"
+            f"{result[-tail:]}")
+
 
 def save_checkpoint(path: str, messages: list, cwd: str, provider: str,
                     model: str, round_count: int, files_created: list):
@@ -73,8 +92,9 @@ class _RepeatDetector:
     2. Same chunk repeated 5+ times consecutively
     """
 
-    REPEAT_THRESHOLD = 3      # same line appears this many times → stuck
-    CHUNK_REPEAT_THRESHOLD = 5  # same chunk in a row this many times → stuck
+    REPEAT_THRESHOLD = 6      # same long line appears this many times → stuck
+    MIN_LINE_LEN = 40         # ignore short lines (code boilerplate repeats)
+    CHUNK_REPEAT_THRESHOLD = 8  # same chunk in a row this many times → stuck
     CHECK_INTERVAL = 20        # only check every N chunks (perf)
 
     def __init__(self):
@@ -107,7 +127,8 @@ class _RepeatDetector:
         """Check if any non-trivial line appears 3+ times."""
         full = "".join(self._accumulated)
         # Split on newlines, filter out short/empty lines
-        lines = [ln.strip() for ln in full.split("\n") if len(ln.strip()) > 20]
+        lines = [ln.strip() for ln in full.split("\n")
+                 if len(ln.strip()) > self.MIN_LINE_LEN]
         if not lines:
             return False
         seen: dict[str, int] = {}
@@ -130,7 +151,8 @@ class Agent:
                  stats: SessionStats | None = None,
                  on_tool_start: object | None = None,
                  tool_cache: ToolCache | None = None,
-                 hooks: HookManager | None = None):
+                 hooks: HookManager | None = None,
+                 on_iteration: object | None = None):
         self.model = model
         self.context = context
         self.tools = tools
@@ -141,6 +163,10 @@ class Agent:
         self.on_tool_start = on_tool_start  # callback(tool_name, args)
         self.tool_cache = tool_cache
         self.hooks = hooks
+        # Optional callback run at the TOP of each loop iteration (a safe
+        # message boundary). Workers use this to drain their inbox so
+        # inter-agent messages are injected without corrupting a tool exchange.
+        self.on_iteration = on_iteration
         self._cancelled = False
 
     def cancel(self):
@@ -172,18 +198,35 @@ class Agent:
         while rounds < self.MAX_TOOL_ROUNDS:
             rounds += 1
 
-            # Inject round warnings as the limit approaches
+            # Safe boundary: drain any queued inter-agent messages into context
+            # before building the next request (workers set this hook).
+            if self.on_iteration:
+                try:
+                    self.on_iteration()
+                except Exception:
+                    pass
+
+            # Keep the context within budget mid-turn (tool results pile up
+            # fastest inside a single turn's many rounds). Uses the safe,
+            # tool-boundary-aware compact.
+            if (self.context.max_tokens > 0
+                    and self.context.estimate_tokens()
+                    > self.context.max_tokens * 0.9):
+                self.context.compact()
+
+            # Round-limit nudges are TRANSIENT — injected into this request only,
+            # never persisted (else "Finish immediately." poisons every later turn).
             remaining = self.MAX_TOOL_ROUNDS - rounds
+            round_note = None
             if remaining == 15:
-                self.context.messages.append({
-                    "role": "system",
-                    "content": "You have 15 tool rounds remaining. Begin wrapping up — summarize progress and finish current work."
-                })
-            elif remaining == 5:
-                self.context.messages.append({
-                    "role": "system",
-                    "content": "5 tool rounds remaining. Finish immediately."
-                })
+                round_note = ("You have 15 tool rounds remaining. Begin wrapping "
+                              "up — summarize progress and finish current work.")
+            elif 0 <= remaining <= 5:
+                round_note = f"{remaining} tool rounds remaining. Finish immediately."
+
+            request_messages = self.context.get_messages()
+            if round_note:
+                request_messages.append({"role": "system", "content": round_note})
 
             # Collect response from model
             text_parts = []
@@ -196,12 +239,15 @@ class Agent:
             repeat_detector = _RepeatDetector()
             repeat_detected = False
 
+            # Hold the async generator so we can close it (aborting the HTTP
+            # stream, stopping server-side generation) on cancel.
+            chat_stream = self.model.chat(
+                messages=request_messages,
+                tools=self.tools.schemas(),
+                stream=True,
+            )
             try:
-                async for chunk in self.model.chat(
-                    messages=self.context.get_messages(),
-                    tools=self.tools.schemas(),
-                    stream=True,
-                ):
+                async for chunk in chat_stream:
                     # Yield to event loop so signal handlers can fire
                     await asyncio.sleep(0)
 
@@ -240,6 +286,10 @@ class Agent:
                                 speed["tokens"], speed["elapsed"])
             except asyncio.CancelledError:
                 self._cancelled = True
+            finally:
+                # Close the generator so the underlying HTTP stream is aborted
+                # and the server stops generating (frees the GPU on a local box).
+                await chat_stream.aclose()
 
             if self._cancelled:
                 # Show whatever was generated before the interrupt
@@ -249,11 +299,6 @@ class Agent:
                     self.context.add_assistant(partial)
                 return full_response
 
-            if repeat_detected:
-                renderer.stop()
-                render_warning(self.console, "Repetition loop detected — stopped generation. Try rephrasing or breaking your request into smaller parts.")
-                break
-
             # Finalize — final markdown render and stop live display
             renderer.flush()
 
@@ -262,26 +307,38 @@ class Agent:
             if text:
                 full_response += text
 
+            if repeat_detected:
+                render_warning(self.console, "Repetition loop detected — stopped generation. Try rephrasing or breaking your request into smaller parts.")
+                # Preserve whatever the model produced before the loop tripped
+                # (don't silently vaporize it from screen and history).
+                if text.strip():
+                    self.context.add_assistant(text)
+                break
+
             # No tool calls — model is done
             if not tool_calls:
                 self.context.add_assistant(text)
                 break
 
-            # Process tool calls (live display already stopped by flush)
-            self.context.add_assistant_tool_calls(tool_calls)
+            # Process tool calls — keep any narration the model produced
+            # alongside the tool calls (don't drop it to content:None).
+            self.context.add_assistant_tool_calls(tool_calls, content=text)
 
-            # Separate tool calls into: need-permission (sequential) and auto-allowed
-            # Then execute independent auto-allowed calls in parallel
+            # Partition tool calls. Only READ-ONLY, already-authorized tools run
+            # in parallel; anything that mutates state (write/edit/bash) or needs
+            # a permission prompt runs sequentially through the full pipeline.
             sequential_tcs = []
             parallel_tcs = []
             for tc in tool_calls:
                 tool = self.tools.get(tc["name"])
-                if not tool or tc.get("arguments") is None:
-                    sequential_tcs.append(tc)
-                elif (self.permissions.mode == "trust"
-                      or tc["name"] in self.permissions.always_allow
-                      or tc["name"] in self.permissions.session_allow
-                      or (self.permissions.mode == "auto" and tool.is_read_only)):
+                authorized = (
+                    self.permissions.mode == "trust"
+                    or self.permissions.mode == "auto"
+                    or tc["name"] in self.permissions.always_allow
+                    or tc["name"] in self.permissions.session_allow
+                )
+                if (tool and tc.get("arguments") is not None
+                        and tool.is_read_only and authorized):
                     parallel_tcs.append(tc)
                 else:
                     sequential_tcs.append(tc)
@@ -291,7 +348,8 @@ class Agent:
             if len(parallel_tcs) > 1:
                 parallel_results = await self._execute_parallel(parallel_tcs)
                 for tc, result in zip(parallel_tcs, parallel_results):
-                    self.context.add_tool_result(tc["id"], tc["name"], result)
+                    self.context.add_tool_result(
+                        tc["id"], tc["name"], _truncate_result(result))
             elif parallel_tcs:
                 # Single auto-allowed call — run normally
                 sequential_tcs = parallel_tcs + sequential_tcs
@@ -317,7 +375,8 @@ class Agent:
                     checkpoint_path,
                     self.context.messages,
                     os.getcwd(),
-                    "", "",
+                    getattr(self.model, "provider", ""),
+                    getattr(self.model, "model", ""),
                     rounds,
                     files,
                 )
@@ -428,6 +487,15 @@ class Agent:
             # Rich error context — gather extra info on failure
             result += self._gather_error_context(tc["name"], tc["arguments"])
 
+        # Truncate BEFORE caching so a cache hit returns exactly what a fresh
+        # execution would (otherwise a re-read re-injects the full untruncated
+        # result and blows the context window).
+        truncated = _truncate_result(result)
+        if is_streamed_bash and len(truncated) != len(result):
+            t = Text("  \u23bf ... (truncated)", style="#7b88a1")
+            self.console.print(t)
+        result = truncated
+
         # Record stats
         if self.stats:
             self.stats.record_tool_call(tc["name"], tc["arguments"])
@@ -444,19 +512,9 @@ class Agent:
                 and not result.startswith("Error")):
             self.tool_cache.put(tc["name"], tc["arguments"], result)
 
-        # Invalidate cache on writes
-        if (self.tool_cache
-                and tc["name"] in self.tool_cache.INVALIDATING_TOOLS):
-            path = tc["arguments"].get("file_path", "")
-            if path:
-                self.tool_cache.invalidate_path(path)
-
-        # Truncate very long results
-        if len(result) > 15000:
-            result = result[:15000] + "\n\n... (truncated)"
-            if is_streamed_bash:
-                t = Text("  \u23bf ... (truncated)", style="#7b88a1")
-                self.console.print(t)
+        # Invalidate cache on anything that can mutate the filesystem, including
+        # bash (sed/git/formatters), not just write_file/edit_file.
+        self._invalidate_cache_for(tc)
 
         self.context.add_tool_result(tc["id"], tc["name"], result)
 
@@ -477,7 +535,10 @@ class Agent:
                 f"after_{tc['name']}", hook_ctx, self.console)
 
     async def _execute_parallel(self, tool_calls: list[dict]) -> list[str]:
-        """Execute multiple independent tool calls concurrently."""
+        """Execute multiple independent, read-only, already-authorized tool
+        calls concurrently. Mutating tools never reach this path (they are
+        routed sequentially), so no cache-invalidation or side-effect handling
+        is needed here — but read hooks still run."""
 
         async def _run_one(tc):
             tool = self.tools.get(tc["name"])
@@ -498,6 +559,12 @@ class Agent:
                 except Exception:
                     pass
 
+            # Pre-hooks
+            if self.hooks and self.hooks.has_hooks(f"before_{tc['name']}"):
+                await self.hooks.run_hooks(
+                    f"before_{tc['name']}", {"tool": tc["name"], **tc["arguments"]},
+                    self.console)
+
             render_tool_call(self.console, tc["name"], tc["arguments"])
 
             try:
@@ -508,19 +575,48 @@ class Agent:
             if self.stats:
                 self.stats.record_tool_call(tc["name"], tc["arguments"])
 
-            # Cache
+            # Truncate before caching so hits match fresh executions.
+            result = _truncate_result(result)
             if (self.tool_cache
                     and tc["name"] in self.tool_cache.CACHEABLE_TOOLS
                     and not result.startswith("Error")):
                 self.tool_cache.put(tc["name"], tc["arguments"], result)
 
-            if len(result) > 15000:
-                result = result[:15000] + "\n\n... (truncated)"
+            # Post-hooks
+            if self.hooks and self.hooks.has_hooks(f"after_{tc['name']}"):
+                await self.hooks.run_hooks(
+                    f"after_{tc['name']}",
+                    {"tool": tc["name"], "path": tc["arguments"].get("file_path", ""),
+                     **tc["arguments"]},
+                    self.console)
 
             return result
 
         results = await asyncio.gather(*[_run_one(tc) for tc in tool_calls])
         return list(results)
+
+    # Bash verbs that can mutate the filesystem (and thus stale the read caches).
+    _BASH_MUTATORS = (">", ">>", "sed -i", " mv ", " cp ", " rm ", "rm -",
+                      "mkdir", "touch ", "tee ", "git checkout", "git restore",
+                      "git reset", "git apply", "git stash", "git pull",
+                      "git merge", "npm install", "pip install", "black ",
+                      "ruff ", "prettier", "gofmt", "dd ", "truncate ")
+
+    def _invalidate_cache_for(self, tc: dict):
+        """Invalidate stale read caches after a tool that may mutate files."""
+        if not self.tool_cache:
+            return
+        name = tc["name"]
+        args = tc.get("arguments") or {}
+        if name in self.tool_cache.INVALIDATING_TOOLS:
+            path = args.get("file_path", "")
+            if path:
+                self.tool_cache.invalidate_path(path)
+        elif name == "bash":
+            cmd = args.get("command", "")
+            if any(tok in cmd for tok in self._BASH_MUTATORS):
+                # bash can touch anything — clear the whole read cache.
+                self.tool_cache.invalidate_all()
 
     def _gather_error_context(self, tool_name: str, args: dict) -> str:
         """Gather additional context when a tool fails."""

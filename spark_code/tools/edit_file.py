@@ -1,5 +1,6 @@
 """Edit file tool — find and replace."""
 
+import asyncio
 import difflib
 import os
 
@@ -36,23 +37,26 @@ class EditFileTool(Tool):
         }
 
     async def execute(self, file_path: str, old_string: str, new_string: str,
-                      replace_all: bool = False, **kw) -> str:
+                      replace_all: bool = False, cwd: str | None = None, **kw) -> str:
         try:
-            path = _validate_path(file_path)
+            path = _validate_path(file_path, cwd=cwd, for_write=True)
         except ValueError as e:
             return f"Error: {e}"
 
         if not os.path.exists(path):
             return f"Error: File not found: {path}"
 
+        # Read with the same error handling as read_file (errors="replace") so a
+        # stray byte doesn't make an edit fail with a codec error where a read
+        # would have succeeded.
         try:
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
                 content = f.read()
         except Exception as e:
             return f"Error reading file: {e}"
 
         if old_string not in content:
-            hint = self._find_closest_match(content, old_string)
+            hint = await asyncio.to_thread(self._find_closest_match, content, old_string)
             base_msg = f"Error: old_string not found in {path}."
             if hint:
                 return f"{base_msg}\n\n{hint}\n\nHint: Check whitespace, indentation, and exact string content."
