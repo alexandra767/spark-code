@@ -6,7 +6,7 @@ Guards the start_position bug where completing a subcommand ("/plan sh" →
 
 from prompt_toolkit.document import Document
 
-from spark_code.ui.input import SlashCommandCompleter
+from spark_code.ui.input import FilePathCompleter, SlashCommandCompleter
 
 
 def _apply(text: str):
@@ -43,3 +43,23 @@ def test_completed_command_offers_subcommands_only():
 
 def test_non_slash_yields_nothing():
     assert _apply("hello world") == []
+
+
+def _count_file(text: str) -> int:
+    completer = FilePathCompleter()
+    doc = Document(text=text, cursor_position=len(text))
+    return len(list(completer.get_completions(doc, None)))
+
+
+def test_file_completer_defers_lone_slash_command():
+    # A single "/word" token belongs to the slash-command completer.
+    assert _count_file("/plan") == 0
+
+
+def test_file_completer_handles_absolute_path():
+    # Absolute path (two slashes) should complete against the filesystem.
+    assert _count_file("/tmp/") > 0
+
+
+def test_file_completer_handles_path_argument():
+    assert _count_file("cat /tmp/") > 0

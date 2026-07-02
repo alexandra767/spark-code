@@ -353,12 +353,12 @@ class ModelClient:
             except StreamError as e:
                 if yielded:
                     logger.warning("Stream error after partial output: %s", e)
-                    yield {"type": "text",
-                           "content": f"\n\n[stream error after partial output: {e}]"}
+                    yield {"type": "error", "recoverable": False,
+                           "content": f"[stream error after partial output: {e}]"}
                     yield {"type": "done", "usage": {}}
                     return
                 if e.status_code not in _RETRYABLE_STATUSES:
-                    yield {"type": "text",
+                    yield {"type": "error", "recoverable": True,
                            "content": f"API error ({e.status_code}): {e.text[:500]}"}
                     yield {"type": "done", "usage": {}}
                     return
@@ -368,14 +368,16 @@ class ModelClient:
                     httpx.TimeoutException, httpx.RemoteProtocolError) as e:
                 if yielded:
                     logger.warning("Stream interrupted after partial output: %s", e)
-                    yield {"type": "text",
-                           "content": f"\n\n[stream interrupted: {type(e).__name__}]"}
+                    yield {"type": "error", "recoverable": False,
+                           "content": f"[stream interrupted: {type(e).__name__}]"}
                     yield {"type": "done", "usage": {}}
                     return
                 last_error = e
                 logger.warning("Connection error (attempt %d): %s", attempt + 1, str(e)[:200])
 
-        yield {"type": "text",
+        # Exhausted retries with no content yielded — a recoverable failure a
+        # fallback chain can retry on another provider.
+        yield {"type": "error", "recoverable": True,
                "content": f"API error after {self.max_retries} retries: {last_error}"}
         yield {"type": "done", "usage": {}}
 
@@ -565,11 +567,13 @@ class ModelClient:
             response.raise_for_status()
         except httpx.HTTPStatusError as e:
             error_text = e.response.text[:500] if e.response else str(e)
-            yield {"type": "text", "content": f"API error ({e.response.status_code}): {error_text}"}
+            recoverable = e.response.status_code in _RETRYABLE_STATUSES if e.response else True
+            yield {"type": "error", "recoverable": recoverable,
+                   "content": f"API error ({e.response.status_code}): {error_text}"}
             yield {"type": "done", "usage": {}}
             return
         except httpx.RequestError as e:
-            yield {"type": "text", "content": f"Request error: {e}"}
+            yield {"type": "error", "recoverable": True, "content": f"Request error: {e}"}
             yield {"type": "done", "usage": {}}
             return
         data = response.json()

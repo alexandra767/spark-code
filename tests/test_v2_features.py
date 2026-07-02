@@ -620,6 +620,105 @@ class TestFallbackChain:
         fc = FallbackChain({}, {"chain": []}, lambda n, c: None)
         assert fc.current_provider == ""
 
+    def test_failover_to_next_provider_on_recoverable_error(self):
+        """A provider that errors before content must fail over to the next."""
+        import asyncio
+        from spark_code.fallback import FallbackChain
+
+        class _Fake:
+            def __init__(self, name, behavior):
+                self.name, self.behavior = name, behavior
+                self.model = name
+                self.total_input_tokens = self.total_output_tokens = 0
+
+            async def chat(self, messages, tools=None, stream=True):
+                if self.behavior == "down":
+                    yield {"type": "error", "recoverable": True, "content": f"{self.name} down"}
+                    yield {"type": "done", "usage": {}}
+                else:
+                    yield {"type": "text", "content": f"hi from {self.name}"}
+                    yield {"type": "done", "usage": {}}
+
+            async def close(self):
+                pass
+
+        behaviors = {"a": "down", "b": "up"}
+        fc = FallbackChain(
+            providers={"a": {}, "b": {}},
+            config={"chain": ["a", "b"]},
+            model_factory=lambda n, c: _Fake(n, behaviors[n]),
+        )
+
+        async def run():
+            out = []
+            async for ch in fc.chat_with_fallback([{"role": "user", "content": "x"}]):
+                out.append(ch)
+            return out
+
+        chunks = asyncio.run(run())
+        texts = [c["content"] for c in chunks if c["type"] == "text"]
+        assert texts == ["hi from b"], f"expected failover to b, got {chunks}"
+        # 'b' becomes the new default provider after a successful response.
+        assert fc.current_provider == "b"
+
+    def test_all_down_yields_error(self):
+        import asyncio
+        from spark_code.fallback import FallbackChain
+
+        class _Down:
+            model = "d"
+            total_input_tokens = total_output_tokens = 0
+
+            async def chat(self, messages, tools=None, stream=True):
+                yield {"type": "error", "recoverable": True, "content": "down"}
+                yield {"type": "done", "usage": {}}
+
+            async def close(self):
+                pass
+
+        fc = FallbackChain({"a": {}, "b": {}}, {"chain": ["a", "b"]},
+                           lambda n, c: _Down())
+
+        async def run():
+            return [c async for c in fc.chat_with_fallback([{"role": "user", "content": "x"}])]
+
+        chunks = asyncio.run(run())
+        assert any(c["type"] == "error" for c in chunks)
+
+    def test_no_failover_after_content_streamed(self):
+        """Once real content is yielded, a later error is surfaced, not retried."""
+        import asyncio
+        from spark_code.fallback import FallbackChain
+
+        class _MidFail:
+            model = "m"
+            total_input_tokens = total_output_tokens = 0
+
+            async def chat(self, messages, tools=None, stream=True):
+                yield {"type": "text", "content": "partial"}
+                yield {"type": "error", "recoverable": True, "content": "mid-stream boom"}
+                yield {"type": "done", "usage": {}}
+
+            async def close(self):
+                pass
+
+        calls = {"n": 0}
+
+        def factory(n, c):
+            calls["n"] += 1
+            return _MidFail()
+
+        fc = FallbackChain({"a": {}, "b": {}}, {"chain": ["a", "b"]}, factory)
+
+        async def run():
+            return [c async for c in fc.chat_with_fallback([{"role": "user", "content": "x"}])]
+
+        chunks = asyncio.run(run())
+        texts = [c["content"] for c in chunks if c["type"] == "text"]
+        assert texts == ["partial"]  # not duplicated by a second provider
+        assert any(c["type"] == "error" for c in chunks)
+        assert calls["n"] == 1  # never constructed the second provider
+
 
 # ── FileWatcher ──────────────────────────────────────────────────────────
 

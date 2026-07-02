@@ -349,8 +349,10 @@ Steps:
 Keep changes focused. Don't refactor everything at once.""",
         required_tools=["read_file", "edit_file", "bash"],
     ),
+    # Named `codesearch` (not `search`) so it doesn't collide with the built-in
+    # `/search` command (which searches past SESSIONS, not the codebase).
     Skill(
-        name="search",
+        name="codesearch",
         description="Deep search through the codebase",
         prompt="""Search the codebase thoroughly for what the user is looking for.
 
@@ -364,16 +366,8 @@ Steps:
 Be thorough — check multiple naming conventions, related files, tests.""",
         required_tools=["glob", "grep", "read_file"],
     ),
-    Skill(
-        name="continue",
-        description="Resume from the last checkpoint after hitting the tool round limit",
-        prompt="Load the latest checkpoint and continue where you left off.",
-        required_tools=[],
-    ),
-    Skill(
-        name="clean",
-        description="Delete files created during this session",
-        prompt="List files created during this session and offer to delete them.",
-        required_tools=[],
-    ),
+    # Note: `/continue` and `/clean` are handled directly as built-in commands
+    # in cli.py (checkpoint resume / delete session files). They intentionally
+    # are NOT skills here — a skill of the same name would be unreachable and
+    # would duplicate the command in /help.
 ]

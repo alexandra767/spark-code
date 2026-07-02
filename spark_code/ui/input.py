@@ -132,18 +132,26 @@ class SlashCommandCompleter(Completer):
 # ---------------------------------------------------------------------------
 
 class FilePathCompleter(Completer):
-    """Completes file paths when the input doesn't start with '/'."""
+    """Completes file paths, including absolute paths.
+
+    Defers to the slash-command completer ONLY when the user is typing a lone
+    slash-command token (e.g. "/plan"). An absolute path ("/Users/..") or a
+    path argument after other text still completes.
+    """
 
     def get_completions(self, document, complete_event):
         text = document.text_before_cursor
-        if text.startswith("/"):
-            return  # Let slash command completer handle it
-
-        # Find the last word that looks like a path
         words = text.split()
         if not words:
             return
         last_word = words[-1]
+
+        # A single token that looks like a slash command ("/word", exactly one
+        # "/") belongs to the slash-command completer. An absolute path picks up
+        # a second "/" quickly ("/Users/"), at which point we complete it.
+        if (text.lstrip().startswith("/") and len(words) == 1
+                and last_word.count("/") == 1):
+            return
 
         # Only trigger on things that look like paths
         if not ("/" in last_word or "." in last_word or last_word.startswith("~")):

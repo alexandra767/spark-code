@@ -1817,7 +1817,7 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
             return None
         return f"__SHARE__{args.strip() if args else ''}"
 
-    elif command in ("/search", "/hsearch"):
+    elif command == "/search":
         if not args:
             console.print("[#ebcb8b]Usage: /search <query> — search past sessions[/#ebcb8b]")
             return None
@@ -1938,6 +1938,28 @@ async def run_interactive(config: dict, resume_session: str = "",
         timeout=float(get(config, "model", "timeout", default=300)),
         real_model_name=real_model_name or "",
     )
+
+    # Opt-in provider failover: if the config declares a `fallback.chain`,
+    # wrap the model in a FallbackChain that auto-switches providers when one
+    # is unreachable. Dormant (no behavior change) when unconfigured.
+    _fb_cfg = config.get("fallback", {}) or {}
+    if _fb_cfg.get("chain"):
+        from .fallback import FallbackChain
+
+        def _model_factory(name, pconf):
+            return ModelClient(
+                endpoint=pconf.get("endpoint", "http://localhost:11434"),
+                model=pconf.get("model", "unknown"),
+                temperature=pconf.get("temperature", 0.7),
+                max_tokens=pconf.get("max_tokens", 8192),
+                api_key=pconf.get("api_key", ""),
+                provider=name,
+                timeout=float(pconf.get("timeout", 300)),
+            )
+
+        await model.close()  # the chain manages its own per-provider clients
+        model = FallbackChain(config.get("providers", {}), _fb_cfg, _model_factory)
+        console.print(f"  [#8899aa]Fallback chain: {' → '.join(_fb_cfg['chain'])}[/#8899aa]")
 
     # Startup connection check (non-blocking)
     try:

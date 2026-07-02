@@ -76,6 +76,38 @@ class _NoopTool(Tool):
         return "ok"
 
 
+class _ErroringModel:
+    """Model that streams an error chunk (e.g. server down)."""
+    total_input_tokens = 0
+    total_output_tokens = 0
+    provider = "test"
+    model = "test"
+
+    async def chat(self, **kwargs):
+        yield {"type": "error", "recoverable": True, "content": "API error (503): overloaded"}
+        yield {"type": "done", "usage": {}}
+
+
+class TestStreamErrorHandling:
+    def test_error_chunk_not_persisted_to_history(self):
+        model = _ErroringModel()
+        context = Context()
+        tools = ToolRegistry()
+        tools.register(_NoopTool())
+        console = Console(file=io.StringIO(), force_terminal=True)
+        perms = PermissionManager(mode="trust", always_allow=[])
+        agent = Agent(model=model, context=context, tools=tools,
+                      permissions=perms, console=console)
+
+        result = asyncio.run(agent.run("test"))
+
+        # The turn ends without persisting the error string as an assistant msg.
+        assistant_msgs = [m for m in context.messages if m.get("role") == "assistant"]
+        assert all("API error" not in (m.get("content") or "") for m in assistant_msgs), \
+            f"error leaked into history: {assistant_msgs}"
+        assert "API error" not in result
+
+
 class TestRoundWarnings:
     def test_warning_injected_into_request_but_not_persisted(self):
         """The round-limit nudge must reach the model on the relevant round,

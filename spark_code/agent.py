@@ -238,6 +238,7 @@ class Agent:
 
             repeat_detector = _RepeatDetector()
             repeat_detected = False
+            stream_error = None
 
             # Hold the async generator so we can close it (aborting the HTTP
             # stream, stopping server-side generation) on cancel.
@@ -260,6 +261,11 @@ class Agent:
 
                     elif chunk["type"] == "thinking_end":
                         renderer.clear_status()
+
+                    elif chunk["type"] == "error":
+                        # Model/transport error surfaced by the client. Record it
+                        # to show once the stream ends; don't persist to history.
+                        stream_error = chunk.get("content", "Model error")
 
                     elif chunk["type"] == "text":
                         text_parts.append(chunk["content"])
@@ -306,6 +312,14 @@ class Agent:
 
             if text:
                 full_response += text
+
+            # A transport/model error ends the turn. Show it, but don't persist
+            # the error string into conversation history.
+            if stream_error:
+                if text.strip():
+                    self.context.add_assistant(text)
+                render_error(self.console, stream_error)
+                break
 
             if repeat_detected:
                 render_warning(self.console, "Repetition loop detected — stopped generation. Try rephrasing or breaking your request into smaller parts.")
