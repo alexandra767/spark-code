@@ -251,7 +251,7 @@ class ModelClient:
         self.provider = provider
         self.model = model
         # Underlying model name (unmasked from a vLLM --served-model-name alias);
-        # used for reasoning-template detection. Falls back to `model`.
+        # display-only (shown in the startup banner). Falls back to `model`.
         self.real_model_name = real_model_name
         self.temperature = temperature
         self.max_tokens = max_tokens

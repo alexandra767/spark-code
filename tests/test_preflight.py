@@ -1,7 +1,11 @@
 import httpx
 import pytest
 
-from spark_code.preflight import context_window_warning, fetch_server_max_context
+from spark_code.preflight import (
+    context_window_warning,
+    fetch_server_max_context,
+    fetch_server_models,
+)
 
 
 def _transport(payload, status=200):
@@ -69,3 +73,10 @@ def test_no_warning_on_match():
 
 def test_no_warning_when_server_unknown():
     assert context_window_warning(32768, None) is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_server_models_returns_data_list():
+    payload = {"data": [{"id": "m1"}, {"id": "m2", "max_model_len": 32768}]}
+    got = await fetch_server_models("http://x:30000", transport=_transport(payload))
+    assert [m["id"] for m in got] == ["m1", "m2"]

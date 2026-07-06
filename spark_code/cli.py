@@ -29,12 +29,12 @@ from .instructions import load_instructions
 from .mcp.client import MCPClient
 from .mcp.registry import find_mcp_configs
 from .memory import Memory
-from .model import PROVIDERS, ModelClient, resolve_real_model_name
+from .model import PROVIDERS, ModelClient, _pick_real_model_name, resolve_real_model_name
 from .permissions import PermissionManager, resolve_mode_name
 from .pinned import PinnedFiles
 from .plan_executor import execute_plan
 from .platform_info import format_platform_prompt
-from .preflight import context_window_warning, fetch_server_max_context
+from .preflight import _extract_max_context, context_window_warning, fetch_server_models
 from .project_detect import detect_project_type
 from .projectplan import extract_keywords, fetch_rag_context
 from .skills.base import SkillRegistry, check_skill_compatibility
@@ -2256,15 +2256,20 @@ async def run_interactive(config: dict, resume_session: str = "",
     if project_type:
         system_prompt += f"\n\nThis is a {project_type}."
 
+    # Single /v1/models fetch feeds both the real-model-name banner display
+    # right below and the context-window preflight check further down —
+    # startup used to hit /v1/models twice (once per consumer); now once.
+    server_models = await fetch_server_models(
+        get(config, "model", "endpoint", default=""),
+        get(config, "model", "api_key", default=""),
+        timeout=1.5,
+    )
+
     # Resolve real model name (unmasks vLLM --served-model-name aliasing).
     # Pass the configured name so the correct entry is picked on multi-model
     # servers (Ollama lists every pulled model).
-    real_model_name = await resolve_real_model_name(
-        endpoint=get(config, "model", "endpoint", default=""),
-        api_key=get(config, "model", "api_key", default=""),
-        timeout=1.5,
-        configured_model=get(config, "model", "name", default=""),
-    )
+    real_model_name = _pick_real_model_name(
+        server_models or [], get(config, "model", "name", default=""))
 
     # Print banner
     print_banner(console, config, mcp_count=len(mcp_tools),
@@ -2317,11 +2322,10 @@ async def run_interactive(config: dict, resume_session: str = "",
 
             # Context-window drift check: does the configured context_window
             # match what the live server actually reports for this model?
-            server_max = await fetch_server_max_context(
-                get(config, "model", "endpoint"),
-                get(config, "model", "name"),
-                api_key=get(config, "model", "api_key", default=""),
-            )
+            # Reuses the /v1/models payload fetched once above — no second
+            # request.
+            server_max = _extract_max_context(
+                server_models, get(config, "model", "name", default=""))
             warning = context_window_warning(
                 get(config, "model", "context_window", default=32768), server_max)
             if warning:
