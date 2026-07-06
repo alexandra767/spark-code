@@ -142,10 +142,19 @@ class PermissionManager:
         self.last_denial_reason: str | None = None
         self.console = Console()
 
-    def check(self, tool_name: str, is_read_only: bool, details: Any = "") -> bool:
-        """Check if tool execution is allowed. Returns True if allowed."""
-        self.last_denial_reason = None
+    def allows_without_prompt(self, tool_name: str, is_read_only: bool = False) -> bool:
+        """Return True if this tool call is allowed WITHOUT ever prompting.
 
+        Single source of truth for "no prompt needed" — used by BOTH
+        check()'s pre-prompt short-circuits and agent.py's parallel-path
+        predicate (the tool-call partitioner that decides which calls can
+        run concurrently vs. must go through the full sequential/prompt
+        pipeline). Before this extraction, that policy lived in two places
+        that could silently drift apart — which is exactly how Phase 0's
+        worker auto-approve bug happened. False does NOT mean "denied": it
+        means "the caller needs to prompt (if interactive) or fail safe by
+        denying (if not)".
+        """
         # Trust mode: always allow
         if self.mode == "trust":
             return True
@@ -156,6 +165,15 @@ class PermissionManager:
 
         # Auto mode: allow read-only
         if self.mode == "auto" and is_read_only:
+            return True
+
+        return False
+
+    def check(self, tool_name: str, is_read_only: bool, details: Any = "") -> bool:
+        """Check if tool execution is allowed. Returns True if allowed."""
+        self.last_denial_reason = None
+
+        if self.allows_without_prompt(tool_name, is_read_only):
             return True
 
         # Non-interactive (background worker on the shared loop): never prompt.

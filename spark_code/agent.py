@@ -353,12 +353,8 @@ class Agent:
             parallel_tcs = []
             for tc in tool_calls:
                 tool = self.tools.get(tc["name"])
-                authorized = (
-                    self.permissions.mode == "trust"
-                    or self.permissions.mode == "auto"
-                    or tc["name"] in self.permissions.always_allow
-                    or tc["name"] in self.permissions.session_allow
-                )
+                authorized = tool is not None and self.permissions.allows_without_prompt(
+                    tc["name"], tool.is_read_only)
                 if (tool and tc.get("arguments") is not None
                         and tool.is_read_only and authorized):
                     parallel_tcs.append(tc)

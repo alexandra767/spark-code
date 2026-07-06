@@ -2,6 +2,8 @@
 
 from unittest.mock import patch
 
+import pytest
+
 from spark_code.permissions import PermissionManager
 
 
@@ -134,3 +136,74 @@ class TestNonInteractive:
                 pm.check("write_file", is_read_only=False, details="writing")
                 pm.check("read_file", is_read_only=True, details="reading")
                 pm.check("bash", is_read_only=False, details="danger")
+
+
+class TestAllowsWithoutPromptExtraction:
+    """Task 5 (Phase 1): the no-prompt policy used to live in two places —
+    check()'s pre-prompt short-circuits AND agent.py's inline parallel-path
+    predicate — and that duplication is exactly how Phase 0's worker
+    auto-approve bug happened. These tests pin down that
+    allows_without_prompt() is a drop-in equivalent for check()'s "would this
+    be allowed WITHOUT a prompt" decision, for every mode x tool-type
+    combination, so both callers can share one implementation."""
+
+    @pytest.mark.parametrize("mode", ["ask", "auto", "trust"])
+    @pytest.mark.parametrize("tool,is_read_only", [
+        ("read_file", True),
+        ("glob", True),
+        ("write_file", False),
+        ("bash", False),
+    ])
+    def test_matches_noninteractive_check(self, mode, tool, is_read_only):
+        # interactive=False means check() can never fall through to a prompt:
+        # it either returns what allows_without_prompt would, or denies. That
+        # makes this comparison a precise equivalence check across mode x
+        # tool-type, without needing to mock the prompt at all.
+        pm = PermissionManager(mode=mode, interactive=False)
+        assert pm.allows_without_prompt(tool, is_read_only) == pm.check(tool, is_read_only)
+
+    @pytest.mark.parametrize("mode", ["ask", "auto", "trust"])
+    @pytest.mark.parametrize("is_read_only", [True, False])
+    def test_matches_always_allow_list(self, mode, is_read_only):
+        pm = PermissionManager(mode=mode, always_allow=["special_tool"],
+                               interactive=False)
+        assert (pm.allows_without_prompt("special_tool", is_read_only)
+                == pm.check("special_tool", is_read_only))
+
+    @pytest.mark.parametrize("mode", ["ask", "auto", "trust"])
+    @pytest.mark.parametrize("is_read_only", [True, False])
+    def test_matches_session_allow(self, mode, is_read_only):
+        pm = PermissionManager(mode=mode, interactive=False)
+        pm.session_allow.add("write_file")
+        assert (pm.allows_without_prompt("write_file", is_read_only)
+                == pm.check("write_file", is_read_only))
+
+    def test_true_result_never_reaches_prompt_in_interactive_mode_either(self):
+        """Whenever allows_without_prompt() says True, check() must return
+        True without ever calling _prompt_user — including in INTERACTIVE
+        mode, since that's the actual pre-prompt short-circuit path both
+        callers rely on."""
+        pm = PermissionManager(mode="trust", interactive=True)
+        with patch.object(pm, "_prompt_user",
+                          side_effect=AssertionError("must not prompt")):
+            assert pm.allows_without_prompt("bash", False) is True
+            assert pm.check("bash", False) is True
+
+        pm2 = PermissionManager(mode="auto", always_allow=["glob"], interactive=True)
+        with patch.object(pm2, "_prompt_user",
+                          side_effect=AssertionError("must not prompt")):
+            assert pm2.allows_without_prompt("read_file", True) is True
+            assert pm2.check("read_file", True) is True
+            assert pm2.allows_without_prompt("glob", False) is True
+            assert pm2.check("glob", False) is True
+
+
+def test_allows_without_prompt_false_falls_through_to_prompt_when_interactive():
+    """The inverse of the above: when allows_without_prompt() says False and
+    the manager IS interactive, check() must still consult _prompt_user (the
+    extraction must not swallow the prompt path)."""
+    pm = PermissionManager(mode="ask", interactive=True)
+    assert pm.allows_without_prompt("write_file", False) is False
+    with patch.object(pm, "_prompt_user", return_value=True) as mock_prompt:
+        assert pm.check("write_file", False) is True
+    mock_prompt.assert_called_once()
