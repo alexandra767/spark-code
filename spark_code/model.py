@@ -423,9 +423,14 @@ class ModelClient:
                 error_text = body.decode("utf-8", errors="replace")[:500]
                 raise StreamError(response.status_code, error_text)
             async for line in response.aiter_lines():
-                if not line.startswith("data: "):
+                # SSE allows both `data: {...}` and the no-space `data:{...}`
+                # form; accept either (one optional leading space is stripped
+                # per the spec).
+                if not line.startswith("data:"):
                     continue
-                data = line[6:]
+                data = line[5:]
+                if data.startswith(" "):
+                    data = data[1:]
                 if data.strip() == "[DONE]":
                     break
 

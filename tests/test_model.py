@@ -182,6 +182,32 @@ class TestThinkFiltering:
 
 
 @pytest.mark.asyncio
+class TestSSEDataPrefix:
+    async def test_no_space_data_prefix_accepted(self):
+        # Audit 2026-07-06 item 8: per the SSE spec `data:{...}` (no space after
+        # the colon) is valid and identical to `data: {...}`. The parser required
+        # the trailing space and silently dropped every event from a compliant
+        # server using the no-space form — a blank turn with no error.
+        client = ModelClient(endpoint="http://localhost:11434", model="m",
+                             provider="ollama")
+        chunk = json.dumps(_delta(content="Hello from no-space SSE"))
+        lines = [f"data:{chunk}", "data:[DONE]"]
+        client._client.stream = lambda *a, **k: _FakeStreamCtx(_FakeResponse(lines))
+        out = []
+        async for c in client._stream_request_inner({"model": "m", "messages": []}):
+            out.append(c)
+        text = "".join(c["content"] for c in out if c["type"] == "text")
+        assert text == "Hello from no-space SSE"
+
+    async def test_space_form_still_works(self):
+        client = ModelClient(endpoint="http://localhost:11434", model="m",
+                             provider="ollama")
+        out = await _collect_stream(client, [_delta(content="spaced")])
+        text = "".join(c["content"] for c in out if c["type"] == "text")
+        assert text == "spaced"
+
+
+@pytest.mark.asyncio
 class TestStreamUsageAndErrors:
     async def test_done_reports_per_request_usage_keys(self):
         client = ModelClient(endpoint="http://localhost:11434", model="m", provider="ollama")
