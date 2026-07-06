@@ -1,6 +1,6 @@
 """Regression tests for pure cli.py helpers touched by the audit fixes."""
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 from rich.console import Console
 
@@ -128,8 +128,6 @@ class TestInitCommand:
         # so the real dispatch loop's "if result is None: continue" means
         # the agent is never invoked for this turn.
         assert result is None
-        agent_run = AsyncMock()
-        agent_run.assert_not_called()
         assert "already exists" in deps["console"].export_text()
 
     def test_missing_claude_md_returns_prompt_for_agent(self, tmp_path, monkeypatch):
