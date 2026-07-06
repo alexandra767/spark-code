@@ -32,6 +32,7 @@ from .permissions import PermissionManager
 from .pinned import PinnedFiles
 from .plan_executor import execute_plan
 from .platform_info import format_platform_prompt
+from .preflight import context_window_warning, fetch_server_max_context
 from .project_detect import detect_project_type
 from .projectplan import extract_keywords, fetch_rag_context
 from .skills.base import SkillRegistry, check_skill_compatibility
@@ -1968,6 +1969,18 @@ async def run_interactive(config: dict, resume_session: str = "",
             console.print(f"  [#a3be8c]{msg}[/#a3be8c]")
             # Preload model into VRAM in background
             asyncio.create_task(_warmup_model(model))
+
+            # Context-window drift check: does the configured context_window
+            # match what the live server actually reports for this model?
+            server_max = await fetch_server_max_context(
+                get(config, "model", "endpoint"),
+                get(config, "model", "name"),
+                api_key=get(config, "model", "api_key", default=""),
+            )
+            warning = context_window_warning(
+                get(config, "model", "context_window", default=32768), server_max)
+            if warning:
+                console.print(f"  [#ebcb8b]⚠ {warning}[/#ebcb8b]")
         else:
             console.print(f"  [#ebcb8b]{msg}[/#ebcb8b]")
             console.print("  [#8899aa]Session will start anyway — requests may fail until server is available[/#8899aa]")
