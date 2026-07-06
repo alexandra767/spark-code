@@ -452,7 +452,7 @@ class Agent:
         # Check permission
         if not self.permissions.check(tc["name"], tool.is_read_only,
                                       tc["arguments"]):
-            result = "Permission denied by user."
+            result = self.permissions.last_denial_reason or "Permission denied by user."
             render_tool_call(self.console, tc["name"], tc["arguments"])
             render_tool_denied(self.console, tc["name"])
             self.context.add_tool_result(tc["id"], tc["name"], result)

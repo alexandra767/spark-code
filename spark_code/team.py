@@ -258,7 +258,12 @@ class TeamManager:
         )
         # Non-interactive: a worker runs on the shared event loop, so a blocking
         # permission prompt would freeze the whole session. It keeps the lead's
-        # mode (for display/policy) but auto-decides instead of prompting.
+        # mode (for display/policy) but never prompts. It fails SAFE rather than
+        # auto-approving: it allows only what the mode would already allow
+        # without a prompt (trust allows all; auto allows read-only; always/
+        # session-allowed tools) and denies anything that would have required
+        # a prompt — so a worker still can't become an unrestricted background
+        # shell just by inheriting "ask" or "auto".
         permissions = PermissionManager(mode=self.worker_permission_mode,
                                         interactive=False)
 

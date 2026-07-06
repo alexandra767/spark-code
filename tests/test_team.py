@@ -382,7 +382,13 @@ async def test_worker_permissions_are_non_interactive(tmp_path):
     """Audit 2026-07-06 item 3: workers run on the SHARED event loop, so a
     permission prompt (blocking input()) would freeze the whole session. A worker
     in ask/auto mode must never reach _prompt_user — its PermissionManager is
-    non-interactive and auto-approves instead of prompting."""
+    non-interactive and must never prompt.
+
+    Review fix (2026-07-06): a non-interactive manager must NOT auto-approve
+    everything (that made every worker equivalent to trust mode, regardless of
+    the inherited mode). Instead it fails safe: allow exactly what the mode
+    would have allowed WITHOUT a prompt, and deny anything that would have
+    required one."""
     from unittest.mock import patch
 
     store = TaskStore(path=str(tmp_path / "tasks.json"))
@@ -396,12 +402,70 @@ async def test_worker_permissions_are_non_interactive(tmp_path):
     assert perms.mode == "ask"          # mode still inherited from the lead
     assert perms.interactive is False   # but it must not prompt
 
-    # A write that would normally prompt must auto-approve WITHOUT touching
-    # Prompt.ask (patched to raise so any prompt attempt fails the test).
+    # A write that would normally prompt must be DENIED (fail-safe), WITHOUT
+    # touching Prompt.ask (patched to raise so any prompt attempt fails the test).
     with patch("spark_code.permissions.Prompt.ask",
                side_effect=AssertionError("worker must not prompt")):
         allowed = perms.check("write_file", is_read_only=False,
                               details={"file_path": "/tmp/x", "content": "y"})
-    assert allowed is True
+    assert allowed is False
+    assert perms.last_denial_reason is not None
+    assert "non-interactive worker" in perms.last_denial_reason
+    assert "mode=ask" in perms.last_denial_reason
+    assert "write_file" in perms.last_denial_reason
+
+    await team.stop_all()
+
+
+async def test_worker_permissions_auto_mode_allows_read_denies_write(tmp_path):
+    """A worker inheriting 'auto' mode may still read files without a prompt
+    (that's what auto mode allows without asking), but a write — which auto
+    mode would normally prompt for — must be denied, not silently approved."""
+    from unittest.mock import patch
+
+    store = TaskStore(path=str(tmp_path / "tasks.json"))
+    team = TeamManager(model=SlowMockModel(), tools=ToolRegistry(),
+                       console=_make_console(), task_store=store,
+                       worker_permission_mode="auto")
+    w = await team.spawn("task", name="autoworker")
+    await asyncio.sleep(0.05)
+
+    perms = w.agent.permissions
+    assert perms.interactive is False
+
+    with patch("spark_code.permissions.Prompt.ask",
+               side_effect=AssertionError("worker must not prompt")):
+        assert perms.check("read_file", is_read_only=True,
+                           details={"file_path": "/tmp/x"}) is True
+        allowed = perms.check("bash", is_read_only=False,
+                              details={"command": "rm -rf /tmp/x"})
+    assert allowed is False
+    assert perms.last_denial_reason is not None
+
+    await team.stop_all()
+
+
+async def test_worker_permissions_trust_mode_allows_everything(tmp_path):
+    """A worker inheriting 'trust' mode (or --yolo, which uses trust) is
+    unaffected by the non-interactive fail-safe: trust still allows
+    everything, since trust mode never would have prompted anyway."""
+    from unittest.mock import patch
+
+    store = TaskStore(path=str(tmp_path / "tasks.json"))
+    team = TeamManager(model=SlowMockModel(), tools=ToolRegistry(),
+                       console=_make_console(), task_store=store,
+                       worker_permission_mode="trust")
+    w = await team.spawn("task", name="trustworker")
+    await asyncio.sleep(0.05)
+
+    perms = w.agent.permissions
+    assert perms.interactive is False
+
+    with patch("spark_code.permissions.Prompt.ask",
+               side_effect=AssertionError("worker must not prompt")):
+        assert perms.check("write_file", is_read_only=False,
+                           details={"file_path": "/tmp/x", "content": "y"}) is True
+        assert perms.check("bash", is_read_only=False,
+                           details={"command": "rm -rf /tmp/x"}) is True
 
     await team.stop_all()

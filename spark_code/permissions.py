@@ -127,18 +127,25 @@ class PermissionManager:
         ``interactive`` controls what happens when a decision would otherwise
         require a user prompt. Background workers run on the SHARED event loop,
         where a blocking ``input()`` prompt would freeze the entire session, so
-        they build a NON-interactive manager: instead of prompting it auto-decides
-        (approves) so the worker can make progress without ever calling
-        ``_prompt_user``.
+        they build a NON-interactive manager. It must never call
+        ``_prompt_user``/``Prompt.ask`` — but it also must not auto-approve
+        everything, since that would make a worker equivalent to trust mode
+        regardless of its actual mode. Instead it fails safe: it allows exactly
+        what the mode would already allow WITHOUT a prompt (trust allows all;
+        always_allow/session_allow tools; auto's read-only tools) and DENIES
+        anything that would otherwise have required a prompt.
         """
         self.mode = mode
         self.always_allow = set(always_allow or [])
         self.session_allow = set()  # Tools approved this session
         self.interactive = interactive
+        self.last_denial_reason: str | None = None
         self.console = Console()
 
     def check(self, tool_name: str, is_read_only: bool, details: Any = "") -> bool:
         """Check if tool execution is allowed. Returns True if allowed."""
+        self.last_denial_reason = None
+
         # Trust mode: always allow
         if self.mode == "trust":
             return True
@@ -151,13 +158,25 @@ class PermissionManager:
         if self.mode == "auto" and is_read_only:
             return True
 
-        # Non-interactive (background worker on the shared loop): never prompt —
-        # auto-decide instead so we don't block the event loop with input().
+        # Non-interactive (background worker on the shared loop): never prompt.
+        # Fail safe instead of auto-approving: everything reaching this point
+        # would have required a prompt, so deny it rather than reach
+        # _prompt_user/Prompt.ask (which would block the shared event loop) or
+        # silently approve it (which would make the worker equivalent to trust
+        # mode regardless of the mode it actually inherited).
         if not self.interactive:
-            return True
+            self.last_denial_reason = (
+                f"Permission denied (non-interactive worker, mode={self.mode}): "
+                f"{tool_name} requires interactive approval. Report this back "
+                "instead of retrying."
+            )
+            return False
 
         # Ask the user
-        return self._prompt_user(tool_name, details)
+        allowed = self._prompt_user(tool_name, details)
+        if not allowed:
+            self.last_denial_reason = "Permission denied by user."
+        return allowed
 
     def _prompt_user(self, tool_name: str, details: Any) -> bool:
         """Show permission prompt with styled tool details."""
