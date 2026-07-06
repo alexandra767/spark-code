@@ -229,6 +229,67 @@ def _get_latest_session() -> str:
     return ""
 
 
+def _list_sessions() -> list[dict]:
+    """Return metadata for every saved session, newest first.
+
+    Each entry: path, name (filename minus ``.json``), label, age (human
+    string like "2h ago", "" if unknown), turns, cwd. This is the single
+    place that reads ``~/.spark/history`` off disk for display purposes —
+    /history's listing and /resume's picker both consume it so they can't
+    drift out of sync with each other.
+    """
+    from datetime import datetime as _dt
+
+    history_dir = _sessions_dir()
+    if not os.path.isdir(history_dir):
+        return []
+    files = sorted(
+        [f for f in os.listdir(history_dir) if f.endswith(".json")],
+        reverse=True,
+    )
+    sessions = []
+    for f in files:
+        session_path = os.path.join(history_dir, f)
+        meta = Context.read_metadata(session_path)
+        age = ""
+        ts = meta.get("timestamp", "")
+        if ts:
+            try:
+                session_time = _dt.fromisoformat(ts)
+                delta = _dt.now() - session_time
+                if delta.days > 0:
+                    age = f"{delta.days}d ago"
+                elif delta.seconds >= 3600:
+                    age = f"{delta.seconds // 3600}h ago"
+                elif delta.seconds >= 60:
+                    age = f"{delta.seconds // 60}m ago"
+                else:
+                    age = "just now"
+            except (ValueError, TypeError):
+                pass
+        sessions.append({
+            "path": session_path,
+            "name": f[:-len(".json")],
+            "label": meta.get("label", ""),
+            "age": age,
+            "turns": meta.get("turn_count", 0),
+            "cwd": meta.get("cwd", ""),
+        })
+    return sessions
+
+
+def _resume_session_into(context: Context, path: str) -> bool:
+    """Load a saved session file into a live Context.
+
+    Shared by the startup ``--resume``/``--continue`` path, ``/history
+    <name>``, and ``/resume`` so there's exactly one seam that knows how to
+    swap a session into a running context (``Context.load`` already
+    repairs orphaned tool_calls; this just gives that call one name
+    instead of three copies).
+    """
+    return context.load(path)
+
+
 def _notify_done():
     """Play a notification sound (macOS bell)."""
     try:
@@ -1494,77 +1555,46 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
         )
 
     elif command == "/history":
-        from datetime import datetime as _dt
-        history_dir = _sessions_dir()
-        if not os.path.isdir(history_dir):
-            console.print("[#8899aa]No saved sessions yet.[/#8899aa]")
-            return None
-        sessions = sorted(
-            [f for f in os.listdir(history_dir) if f.endswith(".json")],
-            reverse=True,
-        )
+        sessions = _list_sessions()
         if not sessions:
             console.print("[#8899aa]No saved sessions yet.[/#8899aa]")
             return None
         if args.strip():
             # Resume a specific session
             target = args.strip()
-            matches = [s for s in sessions if target in s]
+            matches = [s for s in sessions if target in os.path.basename(s["path"])]
             if not matches:
                 console.print(f"[#bf616a]No session matching '{target}'[/#bf616a]")
                 return None
-            session_path = os.path.join(history_dir, matches[0])
-            if context.load(session_path):
-                meta = Context.read_metadata(session_path)
-                label = meta.get("label", "")
+            chosen = matches[0]
+            if _resume_session_into(context, chosen["path"]):
+                label = chosen["label"]
                 label_display = f"  [#d8dee9]{label}[/#d8dee9]" if label else ""
-                console.print(f"[#a3be8c]Resumed session: {matches[0]}{label_display}[/#a3be8c]")
+                console.print(f"[#a3be8c]Resumed session: {os.path.basename(chosen['path'])}{label_display}[/#a3be8c]")
             else:
                 console.print("[#bf616a]Failed to load session[/#bf616a]")
             return None
         # List recent sessions with metadata
         console.print("[bold #eceff4]Recent sessions:[/bold #eceff4]")
-        for s in sessions[:10]:
-            session_path = os.path.join(history_dir, s)
-            meta = Context.read_metadata(session_path)
-            # Time ago
-            time_str = ""
-            ts = meta.get("timestamp", "")
-            if ts:
-                try:
-                    session_time = _dt.fromisoformat(ts)
-                    delta = _dt.now() - session_time
-                    if delta.days > 0:
-                        time_str = f"{delta.days}d ago"
-                    elif delta.seconds >= 3600:
-                        time_str = f"{delta.seconds // 3600}h ago"
-                    elif delta.seconds >= 60:
-                        time_str = f"{delta.seconds // 60}m ago"
-                    else:
-                        time_str = "just now"
-                except (ValueError, TypeError):
-                    pass
-            turns = meta.get("turn_count", 0)
-            label = meta.get("label", "")
-            cwd = meta.get("cwd", "")
+        for sess in sessions[:10]:
+            cwd = sess["cwd"]
             home = os.path.expanduser("~")
             if cwd.startswith(home):
                 cwd = "~" + cwd[len(home):]
 
             # Build display line
             parts = []
-            if time_str:
-                parts.append(f"[#8899aa]{time_str:<8}[/#8899aa]")
-            if turns:
-                parts.append(f"[#8899aa]{turns} turns[/#8899aa]")
-            if label:
-                parts.append(f"[#d8dee9]{label}[/#d8dee9]")
+            if sess["age"]:
+                parts.append(f"[#8899aa]{sess['age']:<8}[/#8899aa]")
+            if sess["turns"]:
+                parts.append(f"[#8899aa]{sess['turns']} turns[/#8899aa]")
+            if sess["label"]:
+                parts.append(f"[#d8dee9]{sess['label']}[/#d8dee9]")
             if cwd:
                 parts.append(f"[#4c566a]{cwd}[/#4c566a]")
 
-            name = s.replace(".json", "")
-            detail = "  ·  ".join(p for p in parts) if parts else ""
-            console.print(f"  [#88c0d0]{name}[/#88c0d0]  {detail}")
+            detail = "  ·  ".join(parts) if parts else ""
+            console.print(f"  [#88c0d0]{sess['name']}[/#88c0d0]  {detail}")
         console.print("[#8899aa]Use /history <name> to resume  ·  spark --resume to continue last[/#8899aa]")
         return None
 
@@ -2195,7 +2225,7 @@ async def run_interactive(config: dict, resume_session: str = "",
 
     # Resume session if requested
     if resume_session:
-        if context.load(resume_session):
+        if _resume_session_into(context, resume_session):
             meta = Context.read_metadata(resume_session)
             label = meta.get("label", "")
             turns = meta.get("turn_count", 0)
