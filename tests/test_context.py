@@ -400,6 +400,32 @@ class TestEstimateTokensImages:
         assert ctx.estimate_tokens() > 5000
 
 
+class TestPrefixCacheOrdering:
+    """T2 Step 7: system-prompt content must be ordered static-first so the
+    server's prefix cache keeps the longest stable prefix. The volatile
+    platform slot (cwd now, git status / todo state later) goes LAST."""
+
+    def test_static_precedes_volatile_platform(self):
+        ctx = Context(system_prompt="STATIC_BASE_PROMPT",
+                      platform_prompt="CWD: /tmp/x (volatile)",
+                      provider_prompt="PROVIDER_STATIC")
+        combined = ctx.get_messages()[0]["content"]
+        i_sys = combined.index("STATIC_BASE_PROMPT")
+        i_prov = combined.index("PROVIDER_STATIC")
+        i_plat = combined.index("CWD: /tmp/x (volatile)")
+        assert i_sys < i_prov < i_plat, "static base + provider must precede volatile platform"
+
+    def test_reorder_preserves_all_content_and_tokens(self):
+        ctx = Context(system_prompt="BASE", platform_prompt="PLAT",
+                      provider_prompt="PROV")
+        combined = ctx.get_messages()[0]["content"]
+        assert "BASE" in combined and "PLAT" in combined and "PROV" in combined
+        # Reordering a join changes order, not content length → no token delta.
+        assert ctx.estimate_tokens() == Context(
+            system_prompt="BASE", platform_prompt="PLAT",
+            provider_prompt="PROV").estimate_tokens()
+
+
 class TestCompactSummaryParam:
     """T2: compact() accepts a model-generated summary that replaces the
     mechanical digest, while the mechanical digest stays as the offline/test

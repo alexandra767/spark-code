@@ -42,7 +42,9 @@ class TestPlatformPromptInjection:
         platform_idx = system_content.index("Platform: macOS")
         provider_idx = system_content.index("Write to CWD.")
         system_idx = system_content.index("You are Spark Code")
-        assert platform_idx < provider_idx < system_idx
+        # Prefix-cache ordering (T2 Step 7): static system base + provider first,
+        # volatile platform (cwd) LAST so the stable prefix stays cacheable.
+        assert system_idx < provider_idx < platform_idx
 
     def test_context_no_extra_prompts_by_default(self):
         ctx = Context()

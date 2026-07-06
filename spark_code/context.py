@@ -269,12 +269,20 @@ class Context:
         # Repair any orphaned tool_calls (e.g. from a mid-tool Ctrl+C) before the
         # request goes out, so the server never sees an invalid sequence.
         self.sanitize_orphaned_tool_calls()
-        parts = []
-        if self.platform_prompt:
-            parts.append(self.platform_prompt)
+        # Prefix-cache ordering (spec): STATIC content first, VOLATILE last, so
+        # the server caches the longest stable prefix across turns.
+        #   1. system_prompt — the large static base + instructions + memory +
+        #      project type (+ any pinned block at its tail, which changes only
+        #      when a pinned file's on-disk content does).
+        #   2. provider_prompt — static per-session config text.
+        #   3. platform_prompt — the volatile slot (cwd today; git status / todo
+        #      state land here later) → LAST so per-turn changes don't invalidate
+        #      the cached static prefix above it.
+        parts = [self.system_prompt]
         if self.provider_prompt:
             parts.append(self.provider_prompt)
-        parts.append(self.system_prompt)
+        if self.platform_prompt:
+            parts.append(self.platform_prompt)
         combined = "\n\n".join(parts)
         return [{"role": "system", "content": combined}] + self.messages
 
