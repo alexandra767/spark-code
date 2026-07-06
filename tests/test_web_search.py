@@ -3,8 +3,6 @@ blocking search off the event loop (via asyncio.to_thread)."""
 
 from unittest.mock import patch
 
-import pytest
-
 from spark_code.tools.web_search import WebSearchTool
 
 

@@ -1,6 +1,24 @@
 """Tests for Spark Code polish features."""
 
+import asyncio
+import io
+import json
+import os
+import tempfile
+import time as _time
+from collections import deque
+
+from rich.console import Console
+
+from spark_code.agent import Agent
 from spark_code.context import Context
+from spark_code.permissions import PermissionManager
+from spark_code.stats import SessionStats
+from spark_code.team import Worker
+from spark_code.tools.base import Tool, ToolRegistry
+from spark_code.tools.bash import detect_side_effects
+from spark_code.tools.edit_file import EditFileTool
+from spark_code.ui.output import StreamingRenderer
 
 
 class TestPlatformPromptInjection:
@@ -30,16 +48,6 @@ class TestPlatformPromptInjection:
         ctx = Context()
         messages = ctx.get_messages()
         assert messages[0]["content"].startswith("You are Spark Code")
-
-
-import asyncio
-import io
-from unittest.mock import AsyncMock, MagicMock
-from rich.console import Console
-
-from spark_code.agent import Agent
-from spark_code.permissions import PermissionManager
-from spark_code.tools.base import Tool, ToolRegistry
 
 
 class _LoopingModel:
@@ -141,9 +149,6 @@ class TestRoundWarnings:
             f"Round warnings must be transient, but were persisted: {persisted}"
 
 
-from spark_code.stats import SessionStats
-
-
 class TestTokenSpeed:
     def test_stats_has_tokens_per_sec(self):
         stats = SessionStats()
@@ -208,10 +213,6 @@ class TestCostTracking:
         assert formatted.startswith("$")
 
 
-from collections import deque
-from spark_code.team import Worker, Message
-
-
 class TestWorkerProgress:
     def test_worker_has_current_tool(self):
         w = Worker(id="1", name="test", prompt="do stuff")
@@ -227,10 +228,12 @@ class TestWorkerProgress:
 class TestWorkerFileNotifications:
     def test_notify_file_written(self):
         import io
+
         from rich.console import Console
-        from spark_code.tools.base import ToolRegistry
+
         from spark_code.task_store import TaskStore
         from spark_code.team import TeamManager
+        from spark_code.tools.base import ToolRegistry
         console = Console(file=io.StringIO(), force_terminal=True)
         team = TeamManager(model=None, tools=ToolRegistry(),
                           console=console, task_store=TaskStore())
@@ -247,10 +250,12 @@ class TestWorkerFileNotifications:
 
     def test_notify_skips_completed_workers(self):
         import io
+
         from rich.console import Console
-        from spark_code.tools.base import ToolRegistry
+
         from spark_code.task_store import TaskStore
         from spark_code.team import TeamManager
+        from spark_code.tools.base import ToolRegistry
         console = Console(file=io.StringIO(), force_terminal=True)
         team = TeamManager(model=None, tools=ToolRegistry(),
                           console=console, task_store=TaskStore())
@@ -262,9 +267,6 @@ class TestWorkerFileNotifications:
         team.workers["2"] = w2
         team.notify_file_written("worker-a", "/tmp/file.py", 50)
         assert len(w2.inbox) == 0
-
-
-from spark_code.tools.bash import detect_side_effects
 
 
 class TestBashSideEffects:
@@ -307,11 +309,6 @@ class TestBashSideEffects:
         assert len(warnings) == 1
 
 
-import json
-import os
-import tempfile
-
-
 class TestCheckpoint:
     def test_save_checkpoint(self):
         from spark_code.agent import save_checkpoint
@@ -330,7 +327,7 @@ class TestCheckpoint:
             assert data["round_count"] == 25
 
     def test_load_checkpoint(self):
-        from spark_code.agent import save_checkpoint, load_checkpoint
+        from spark_code.agent import load_checkpoint, save_checkpoint
         with tempfile.TemporaryDirectory() as tmpdir:
             checkpoint_path = os.path.join(tmpdir, "latest.json")
             messages = [{"role": "user", "content": "test"}]
@@ -386,13 +383,10 @@ class TestCompactNotification:
         assert result is None
 
 
-import time as _time
-from spark_code.ui.output import StreamingRenderer
-
-
 class TestGenerationTimer:
     def test_renderer_tracks_start_time(self):
         import io
+
         from rich.console import Console
         console = Console(file=io.StringIO(), force_terminal=True)
         renderer = StreamingRenderer(console, live_mode=False)
@@ -402,6 +396,7 @@ class TestGenerationTimer:
 
     def test_renderer_elapsed_increases(self):
         import io
+
         from rich.console import Console
         console = Console(file=io.StringIO(), force_terminal=True)
         renderer = StreamingRenderer(console, live_mode=False)
@@ -410,13 +405,10 @@ class TestGenerationTimer:
         assert renderer.elapsed > 0.05
 
 
-import asyncio
-from spark_code.tools.edit_file import EditFileTool
-
-
 class TestEditConfidence:
     def test_not_found_shows_closest_match(self):
-        import tempfile, os
+        import os
+        import tempfile
         tool = EditFileTool()
         with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, dir='/tmp') as f:
             f.write("def hello():\n    print('hello world')\n    return True\n")
@@ -434,7 +426,8 @@ class TestEditConfidence:
             os.unlink(path)
 
     def test_not_found_no_match_shows_basic_error(self):
-        import tempfile, os
+        import os
+        import tempfile
         tool = EditFileTool()
         with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, dir='/tmp') as f:
             f.write("completely different content here\n")
@@ -451,7 +444,8 @@ class TestEditConfidence:
             os.unlink(path)
 
     def test_exact_match_still_works(self):
-        import tempfile, os
+        import os
+        import tempfile
         tool = EditFileTool()
         with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, dir='/tmp') as f:
             f.write("line one\nline two\nline three\n")
@@ -478,10 +472,12 @@ class TestWorkerTimeout:
 class TestWorkerFileSummary:
     def test_team_tracks_file_changes(self):
         import io
+
         from rich.console import Console
-        from spark_code.tools.base import ToolRegistry
+
         from spark_code.task_store import TaskStore
         from spark_code.team import TeamManager
+        from spark_code.tools.base import ToolRegistry
         console = Console(file=io.StringIO(), force_terminal=True)
         team = TeamManager(model=None, tools=ToolRegistry(),
                           console=console, task_store=TaskStore())
@@ -490,10 +486,12 @@ class TestWorkerFileSummary:
 
     def test_notify_records_file_change(self):
         import io
+
         from rich.console import Console
-        from spark_code.tools.base import ToolRegistry
+
         from spark_code.task_store import TaskStore
         from spark_code.team import TeamManager
+        from spark_code.tools.base import ToolRegistry
         console = Console(file=io.StringIO(), force_terminal=True)
         team = TeamManager(model=None, tools=ToolRegistry(),
                           console=console, task_store=TaskStore())
@@ -503,10 +501,12 @@ class TestWorkerFileSummary:
 
     def test_format_file_summary(self):
         import io
+
         from rich.console import Console
-        from spark_code.tools.base import ToolRegistry
+
         from spark_code.task_store import TaskStore
         from spark_code.team import TeamManager
+        from spark_code.tools.base import ToolRegistry
         console = Console(file=io.StringIO(), force_terminal=True)
         team = TeamManager(model=None, tools=ToolRegistry(),
                           console=console, task_store=TaskStore())

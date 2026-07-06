@@ -1,9 +1,7 @@
 """Tests for spark_code.config — deep_merge, expand_env_vars, load_config, get."""
 
-import os
-import pytest
 
-from spark_code.config import deep_merge, expand_env_vars, load_config, get
+from spark_code.config import deep_merge, expand_env_vars, get, load_config
 
 
 class TestDeepMerge:
@@ -86,7 +84,8 @@ class TestSetConfigScope:
         project override on the next load).
         """
         import yaml
-        from spark_code.config import set_config, PROJECT_CONFIG_FILE
+
+        from spark_code.config import PROJECT_CONFIG_FILE, set_config
 
         proj = tmp_path / "proj"
         proj.mkdir()
@@ -105,8 +104,10 @@ class TestSetConfigScope:
 
     def test_set_writes_to_global_when_no_project_key(self, tmp_path):
         """When the project config doesn't define the key, write to global."""
-        import yaml
         from unittest.mock import patch
+
+        import yaml
+
         from spark_code.config import set_config
 
         gdir = tmp_path / "global"

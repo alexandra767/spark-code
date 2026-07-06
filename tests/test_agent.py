@@ -2,7 +2,7 @@
 
 import asyncio
 import io
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from rich.console import Console
@@ -11,7 +11,6 @@ from spark_code.agent import Agent
 from spark_code.context import Context
 from spark_code.permissions import PermissionManager
 from spark_code.tools.base import Tool, ToolRegistry
-
 
 # ---------------------------------------------------------------------------
 # Mock helpers
@@ -154,7 +153,7 @@ async def test_unknown_tool():
     ])
 
     agent = _make_agent(model)
-    result = await agent.run("Try a bad tool")
+    await agent.run("Try a bad tool")
 
     # The tool result in context should contain an error
     tool_msgs = [m for m in agent.context.messages if m["role"] == "tool"]
@@ -183,7 +182,7 @@ async def test_permission_denied():
     perms.check = MagicMock(return_value=False)
 
     agent = _make_agent(model, tools=[tool], permissions=perms)
-    result = await agent.run("Do something restricted")
+    await agent.run("Do something restricted")
 
     # The tool result should say permission denied
     tool_msgs = [m for m in agent.context.messages if m["role"] == "tool"]
@@ -224,7 +223,7 @@ async def test_empty_dict_arguments_allowed():
     ])
 
     agent = _make_agent(model, tools=[NoArgTool()])
-    result = await agent.run("Run the tool with no args")
+    await agent.run("Run the tool with no args")
 
     # The tool result should NOT contain an error — it should have executed
     tool_msgs = [m for m in agent.context.messages if m["role"] == "tool"]
@@ -259,7 +258,7 @@ async def test_none_arguments_rejected():
     agent = _make_agent(model, tools=[tool])
 
     with patch("spark_code.agent.render_tool_call"):
-        result = await agent.run("Call tool with None args")
+        await agent.run("Call tool with None args")
 
     # The tool result should contain an error about missing arguments
     tool_msgs = [m for m in agent.context.messages if m["role"] == "tool"]

@@ -1,9 +1,8 @@
 """Tests for platform detection."""
 
-import platform
 from unittest.mock import patch
 
-from spark_code.platform_info import get_platform_info, format_platform_prompt
+from spark_code.platform_info import format_platform_prompt, get_platform_info
 
 
 def test_get_platform_info_returns_dict():

@@ -1,6 +1,17 @@
 """Tests for projectplan module — RAG-enhanced project planning."""
 
-from spark_code.projectplan import extract_keywords
+from spark_code.plan_executor import (
+    _parse_parallel_spec,
+    build_task_desc,
+    extract_step_refs,
+    parse_plan,
+    parse_references,
+)
+from spark_code.projectplan import (
+    build_rag_queries,
+    extract_keywords,
+    format_references,
+)
 
 
 def test_extract_keywords_strips_stop_words():
@@ -27,8 +38,6 @@ def test_extract_keywords_lowercases():
     result = extract_keywords("Add Settings Screen")
     assert result == ["settings", "screen"]
 
-
-from spark_code.projectplan import build_rag_queries
 
 
 def test_build_rag_queries_ios():
@@ -79,8 +88,6 @@ def test_build_rag_queries_project_type_takes_precedence():
     assert any("patterns" in q.lower() for q in queries)
 
 
-from spark_code.projectplan import format_references
-
 
 def test_format_references_basic():
     raw_results = [
@@ -122,8 +129,6 @@ def test_format_references_empty():
     assert output == ""
 
 
-from spark_code.plan_executor import parse_references
-
 
 def test_parse_references_basic():
     plan_text = """## Reference Material
@@ -160,8 +165,6 @@ Build something.
     assert refs == {}
 
 
-from spark_code.plan_executor import extract_step_refs
-
 
 def test_extract_step_refs_from_title():
     nums = extract_step_refs("Create SettingsView [see Ref 1, Ref 2]", "")
@@ -182,8 +185,6 @@ def test_extract_step_refs_none():
     nums = extract_step_refs("No refs here", "Just plain text")
     assert nums == set()
 
-
-from spark_code.plan_executor import build_task_desc
 
 
 def test_build_task_desc_with_refs():
@@ -218,8 +219,12 @@ def test_build_task_desc_empty_refs_dict():
 
 def test_full_pipeline_ios():
     """End-to-end: prompt -> keywords -> queries -> format refs -> plan parse -> ref inject."""
-    from spark_code.projectplan import extract_keywords, build_rag_queries, format_references
-    from spark_code.plan_executor import parse_plan, parse_references, extract_step_refs, build_task_desc
+    from spark_code.plan_executor import (
+        build_task_desc,
+        parse_plan,
+        parse_references,
+    )
+    from spark_code.projectplan import build_rag_queries, extract_keywords, format_references
 
     # Step 1: Extract keywords
     keywords = extract_keywords("add a settings screen to GigLedger")
@@ -295,9 +300,6 @@ Add a settings screen to GigLedger.
 # ---------------------------------------------------------------------------
 # Regression tests — parallel-step parsing (audit 2026-07-02, bug 7)
 # ---------------------------------------------------------------------------
-
-from spark_code.plan_executor import parse_plan, _parse_parallel_spec
-
 
 # The exact prose from the repo's own PLAN.md — the old parser scraped every
 # integer here and produced the dependency-violating set {1,2,3,7,9,10}.

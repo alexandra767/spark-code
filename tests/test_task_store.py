@@ -1,9 +1,10 @@
 """Tests for spark_code.task_store — Task and TaskStore."""
 
 import json
-import pytest
+import os
+import time
 
-from spark_code.task_store import Task, TaskStore
+from spark_code.task_store import TaskStore
 
 
 class TestTaskStoreCreate:
@@ -75,9 +76,6 @@ class TestTaskStoreCorruptedFile:
 # ---------------------------------------------------------------------------
 # Regression tests — audit 2026-07-02 (bug 17)
 # ---------------------------------------------------------------------------
-
-import os
-import time
 
 
 class TestAtomicWrite:

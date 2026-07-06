@@ -3,11 +3,10 @@
 import asyncio
 import io
 
-import pytest
 from rich.console import Console
 
-from spark_code.tools.wait_for_workers import WaitForWorkersTool
 from spark_code.team import TeamManager, Worker
+from spark_code.tools.wait_for_workers import WaitForWorkersTool
 
 
 class TestWaitForWorkersTool:
@@ -24,8 +23,8 @@ class TestWaitForWorkersTool:
 
     def test_returns_immediately_when_no_workers(self, tmp_path):
         console = Console(file=io.StringIO(), force_terminal=True)
-        from spark_code.tools.base import ToolRegistry
         from spark_code.task_store import TaskStore
+        from spark_code.tools.base import ToolRegistry
         team = TeamManager(model=None, tools=ToolRegistry(),
                           console=console,
                           task_store=TaskStore(path=str(tmp_path / "tasks.json")))
@@ -35,8 +34,8 @@ class TestWaitForWorkersTool:
 
     def test_returns_completed_worker_results(self, tmp_path):
         console = Console(file=io.StringIO(), force_terminal=True)
-        from spark_code.tools.base import ToolRegistry
         from spark_code.task_store import TaskStore
+        from spark_code.tools.base import ToolRegistry
         team = TeamManager(model=None, tools=ToolRegistry(),
                           console=console,
                           task_store=TaskStore(path=str(tmp_path / "tasks.json")))

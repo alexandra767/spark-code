@@ -4,7 +4,6 @@ Substituted context values ({path}, {command}, ...) must be shell-quoted so a
 malicious filename can't execute arbitrary shell in the hook command.
 """
 
-import pytest
 
 from spark_code.hooks import Hook
 

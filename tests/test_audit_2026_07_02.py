@@ -12,7 +12,6 @@ from rich.console import Console
 
 from spark_code.context import Context
 
-
 # ---------------------------------------------------------------------------
 # branches.py — bug 15
 # ---------------------------------------------------------------------------
@@ -104,6 +103,7 @@ class TestWatcher:
     async def test_watch_loop_scans_off_thread(self, tmp_path):
         """The loop must invoke _scan (wrapped in asyncio.to_thread)."""
         from unittest.mock import MagicMock
+
         from spark_code.watcher import FileWatcher
 
         console = Console(file=io.StringIO(), force_terminal=True)

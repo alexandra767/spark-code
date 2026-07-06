@@ -59,7 +59,7 @@ async def test_offset_and_limit_together(tool, tmp_file):
 
 async def test_empty_file_returns_empty_message(tool, tmp_dir):
     empty_path = os.path.join(tmp_dir, "empty.py")
-    with open(empty_path, "w") as f:
+    with open(empty_path, "w"):
         pass  # write nothing
     result = await tool.execute(file_path=empty_path)
     assert "File is empty" in result

@@ -1,7 +1,6 @@
 """Tests for spark_code.permissions.PermissionManager."""
 
-import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from spark_code.permissions import PermissionManager
 

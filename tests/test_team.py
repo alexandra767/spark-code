@@ -3,13 +3,11 @@
 import asyncio
 import io
 
-import pytest
 from rich.console import Console
 
-from spark_code.team import TeamManager, Worker, Message, MAX_WORKERS_LOCAL, MAX_WORKERS_CLOUD
-from spark_code.tools.base import ToolRegistry
 from spark_code.task_store import TaskStore
-
+from spark_code.team import MAX_WORKERS_LOCAL, TeamManager
+from spark_code.tools.base import ToolRegistry
 
 # ---------------------------------------------------------------------------
 # Mock helpers

@@ -7,12 +7,11 @@ context compaction, agent parallel execution, permissions, and more.
 import asyncio
 import json
 import os
-import tempfile
 import shutil
+import tempfile
 import time
 
 import pytest
-
 
 # ── ToolCache ────────────────────────────────────────────────────────────
 
@@ -622,7 +621,6 @@ class TestFallbackChain:
 
     def test_failover_to_next_provider_on_recoverable_error(self):
         """A provider that errors before content must fail over to the next."""
-        import asyncio
         from spark_code.fallback import FallbackChain
 
         class _Fake:
@@ -662,7 +660,6 @@ class TestFallbackChain:
         assert fc.current_provider == "b"
 
     def test_all_down_yields_error(self):
-        import asyncio
         from spark_code.fallback import FallbackChain
 
         class _Down:
@@ -687,7 +684,6 @@ class TestFallbackChain:
 
     def test_no_failover_after_content_streamed(self):
         """Once real content is yielded, a later error is surfaced, not retried."""
-        import asyncio
         from spark_code.fallback import FallbackChain
 
         class _MidFail:
@@ -1005,7 +1001,7 @@ class TestSkills:
 
 class TestMultiFileUndo:
     def test_undo_depth(self):
-        from spark_code.tools.base import _backup_for_undo, MAX_UNDO_DEPTH
+        from spark_code.tools.base import MAX_UNDO_DEPTH
         assert MAX_UNDO_DEPTH == 20
 
     def test_multiple_backups(self):

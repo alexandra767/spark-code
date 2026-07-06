@@ -1,8 +1,5 @@
 """Tests for spark_code.context.Context."""
 
-import json
-import pytest
-from pathlib import Path
 
 from spark_code.context import Context
 

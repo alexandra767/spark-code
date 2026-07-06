@@ -1,7 +1,5 @@
 """Tests for spark_code.memory.Memory."""
 
-import pytest
-from pathlib import Path
 
 from spark_code.memory import Memory
 
@@ -96,7 +94,7 @@ class TestEnsureDirsCleanProject:
 class TestClaudeMemoryPathDerivation:
     def test_resolve_claude_memory_path_from_cwd(self, tmp_path, monkeypatch):
         """Bug 12: the Claude memory path is derived from the cwd encoding."""
-        from spark_code.memory import resolve_claude_memory_path, encode_cwd
+        from spark_code.memory import encode_cwd, resolve_claude_memory_path
 
         # Build a fake ~/.claude/projects/<encoded-cwd>/memory that exists.
         fake_home = tmp_path / "home"
@@ -111,7 +109,7 @@ class TestClaudeMemoryPathDerivation:
 
     def test_resolve_falls_back_when_derived_missing(self, tmp_path, monkeypatch):
         """When neither derived nor legacy path exists, returns derived path."""
-        from spark_code.memory import resolve_claude_memory_path, encode_cwd
+        from spark_code.memory import encode_cwd, resolve_claude_memory_path
 
         fake_home = tmp_path / "home"
         fake_home.mkdir()

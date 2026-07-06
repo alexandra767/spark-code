@@ -1,15 +1,16 @@
 """Tests for spark_code.model — _parse_tool_arguments and ModelClient."""
 
 import json
+
 import pytest
 
 from spark_code.model import (
+    ModelClient,
+    StreamError,
     _models_url,
     _parse_tool_arguments,
     _pick_real_model_name,
     _should_verify_tls,
-    ModelClient,
-    StreamError,
 )
 
 

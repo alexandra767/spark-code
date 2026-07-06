@@ -1,10 +1,8 @@
 """Shared test fixtures for Spark Code tests."""
 
-import asyncio
-import json
 import os
-import tempfile
 import shutil
+import tempfile
 
 import pytest
 
