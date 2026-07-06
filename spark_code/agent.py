@@ -294,6 +294,14 @@ class Agent:
                                 input_tokens=usage.get("prompt_tokens", 0),
                                 output_tokens=usage.get("completion_tokens", 0),
                             )
+                        prompt_tokens = usage.get("prompt_tokens")
+                        if prompt_tokens:
+                            # Server-reported (real tokenizer) count — feeds the
+                            # toolbar's context-left meter. Some servers (e.g.
+                            # certain Ollama configs) omit usage entirely; leave
+                            # the estimate-based fallback alone in that case
+                            # rather than recording a wrong 0.
+                            self.context.record_usage(prompt_tokens)
                         if self.stats and "_speed" in chunk:
                             speed = chunk["_speed"]
                             self.stats.record_generation_speed(

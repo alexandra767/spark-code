@@ -318,3 +318,37 @@ async def test_interrupt_mid_tool_leaves_repairable_context():
     tool_results = [m for m in msgs if m.get("role") == "tool"
                     and m.get("tool_call_id") == "call_1"]
     assert len(tool_results) == 1
+
+
+async def test_done_chunk_usage_recorded_into_context():
+    """The done chunk's usage.prompt_tokens (server-reported, real tokenizer
+    count) must reach Context.record_usage so the toolbar meter reflects
+    reality instead of the char-based estimate."""
+    model = MockModel([
+        [
+            {"type": "text", "content": "Hello!"},
+            {"type": "done", "usage": {"prompt_tokens": 4096, "completion_tokens": 12}},
+        ],
+    ])
+
+    agent = _make_agent(model)
+    await agent.run("hi")
+
+    assert agent.context.last_prompt_tokens == 4096
+
+
+async def test_done_chunk_empty_usage_does_not_record():
+    """An empty usage dict (some Ollama configs omit it) must NOT stomp an
+    already-recorded value with 0 — leave last_prompt_tokens as the estimate
+    fallback instead of a wrong zero."""
+    model = MockModel([
+        [
+            {"type": "text", "content": "Hello!"},
+            {"type": "done", "usage": {}},
+        ],
+    ])
+
+    agent = _make_agent(model)
+    await agent.run("hi")
+
+    assert agent.context.last_prompt_tokens is None

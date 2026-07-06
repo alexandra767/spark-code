@@ -232,6 +232,11 @@ INPUT_STYLE = Style.from_dict({
     "bottom-toolbar.mode": "fg:#a3be8c bold",
     "bottom-toolbar.mode-text": "fg:#d8dee9",
     "bottom-toolbar.context": "fg:#8899aa",
+    # Context-left meter, colored by how much room remains (green/yellow/red
+    # mirror the worker-status colors below for a consistent palette).
+    "bottom-toolbar.context-green": "fg:#a3be8c",
+    "bottom-toolbar.context-yellow": "fg:#ebcb8b",
+    "bottom-toolbar.context-red": "fg:#bf616a bold",
 
     # Team status in toolbar
     "bottom-toolbar.team": "fg:#88c0d0 bold",

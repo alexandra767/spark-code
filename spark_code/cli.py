@@ -561,6 +561,17 @@ def _is_error_paste(text: str) -> bool:
     return line_count >= 2 and any(ind in text for ind in indicators)
 
 
+def _context_pct_style(pct: float) -> str:
+    """Toolbar style class for a context-left percentage (0-100): green when
+    there's plenty of room, yellow approaching the limit, red about to
+    auto-compact/400."""
+    if pct > 40:
+        return "class:bottom-toolbar.context-green"
+    if pct >= 15:
+        return "class:bottom-toolbar.context-yellow"
+    return "class:bottom-toolbar.context-red"
+
+
 def build_tools() -> ToolRegistry:
     """Register all built-in tools."""
     registry = ToolRegistry()
@@ -2493,11 +2504,16 @@ async def run_interactive(config: dict, resume_session: str = "",
             if cost_str:
                 parts.append(("class:bottom-toolbar.info", f"  {cost_str}"))
 
-        # Context percentage (right side)
+        # Context percentage (right side) — server-reported usage (real
+        # tokenizer count) when the model has reported it, falling back to
+        # the char-based estimate otherwise (context.context_left handles
+        # both, and a zero/missing window safely). Colored by how much room
+        # is left so a near-full context is visible before it 400s.
         if max_tok > 0 and tokens > 0:
-            pct = max(0, 100 - (tokens / max_tok * 100))
+            pct = context.context_left(max_tok) * 100
             spacer = " " * 10
-            parts.append(("class:bottom-toolbar.context", f"{spacer}Context: {pct:.0f}%"))
+            style = _context_pct_style(pct)
+            parts.append((style, f"{spacer}ctx {int(pct)}%"))
         elif tokens > 0:
             parts.append(("class:bottom-toolbar.context", f"    {tokens:,} tokens"))
 

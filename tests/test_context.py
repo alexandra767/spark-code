@@ -356,6 +356,41 @@ class TestOrphanedToolCallSanitize:
         assert len(ctx.messages) == n_after_first
 
 
+class TestContextLeft:
+    """Real (server-reported) usage should drive the context meter instead of
+    the char-based estimate, which drifts from the model's actual tokenizer."""
+
+    def test_context_left_uses_server_usage(self):
+        ctx = Context()
+        ctx.record_usage(16384)
+        assert abs(ctx.context_left(32768) - 0.5) < 0.01
+
+    def test_context_left_falls_back_to_estimate(self):
+        ctx = Context()
+        ctx.add_user("hi")
+        assert ctx.context_left(32768) > 0.9
+
+    def test_recorded_usage_cleared_on_compact_and_clear(self):
+        ctx = Context()
+        ctx.record_usage(30000)
+        ctx.clear()
+        assert ctx.last_prompt_tokens is None
+
+    def test_recorded_usage_cleared_on_compact(self):
+        ctx = Context(system_prompt="sys")
+        for i in range(20):
+            ctx.add_user(f"message {i}")
+            ctx.add_assistant(f"response {i}")
+        ctx.record_usage(30000)
+        ctx.compact(keep_recent=6)
+        assert ctx.last_prompt_tokens is None
+
+    def test_context_left_handles_zero_window(self):
+        ctx = Context()
+        ctx.record_usage(100)
+        assert ctx.context_left(0) == 0.0
+
+
 class TestEstimateTokensImages:
     def test_image_payload_counted(self):
         ctx = Context(system_prompt="")

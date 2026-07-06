@@ -7,6 +7,7 @@ from rich.console import Console
 from spark_code.cli import (
     _auto_read_context,
     _checkpoint_resume_note,
+    _context_pct_style,
     _detect_file_mentions,
     _is_shell_command,
     _list_sessions,
@@ -92,6 +93,25 @@ class TestRedactedConfig:
         cfg = {"model": {"api_key": "secret"}}
         _redacted_config(cfg)
         assert cfg["model"]["api_key"] == "secret"
+
+
+class TestContextPctStyle:
+    """Toolbar color thresholds for the context-left meter (Phase 2 Task 1):
+    green with plenty of room, yellow approaching the limit, red about to
+    trigger auto-compaction / a context-length 400."""
+
+    def test_green_above_40(self):
+        assert _context_pct_style(41) == "class:bottom-toolbar.context-green"
+        assert _context_pct_style(100) == "class:bottom-toolbar.context-green"
+
+    def test_yellow_between_15_and_40_inclusive(self):
+        assert _context_pct_style(40) == "class:bottom-toolbar.context-yellow"
+        assert _context_pct_style(25) == "class:bottom-toolbar.context-yellow"
+        assert _context_pct_style(15) == "class:bottom-toolbar.context-yellow"
+
+    def test_red_below_15(self):
+        assert _context_pct_style(14.9) == "class:bottom-toolbar.context-red"
+        assert _context_pct_style(0) == "class:bottom-toolbar.context-red"
 
 
 def _init_command_deps():

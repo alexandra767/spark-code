@@ -151,6 +151,11 @@ class Context:
         # tool schemas so estimate_tokens — and thus auto-compaction — accounts
         # for it instead of overshooting into a context-length 400.
         self.schema_reserve_tokens = 0
+        # Server-reported prompt token count from the most recent response's
+        # usage block (set via record_usage). None until the first response
+        # arrives, or after a history change (compact/clear) makes the old
+        # count stale.
+        self.last_prompt_tokens: int | None = None
 
     def add_user(self, content: str):
         """Add a user message."""
@@ -374,6 +379,10 @@ class Context:
         # Inject summary as a user message (not system — get_messages() adds system prompt)
         self.messages = [{"role": "user", "content": summary},
                          {"role": "assistant", "content": "Understood, I have the conversation context."}] + recent
+        # The history just changed shape, so any server-reported prompt token
+        # count from before this compaction no longer reflects reality —
+        # stale usage must not keep reporting the pre-compaction window.
+        self.last_prompt_tokens = None
 
         # Post-compact check
         if self.max_tokens > 0:
@@ -406,6 +415,7 @@ class Context:
         """Clear all messages."""
         self.messages = []
         self.turn_count = 0
+        self.last_prompt_tokens = None
 
     def estimate_tokens(self) -> int:
         """Rough token estimate.
@@ -436,6 +446,27 @@ class Context:
             for tc in msg.get("tool_calls", []) or []:
                 total += len(json.dumps(tc))
         return int(total / 3.5) + self.schema_reserve_tokens
+
+    def record_usage(self, prompt_tokens: int):
+        """Record the server-reported prompt token count from the most recent
+        response's usage block. Overrides the char-based estimate for
+        context_left() until the history changes (compact/clear reset it —
+        a stale count would otherwise keep reporting the pre-compaction
+        window)."""
+        self.last_prompt_tokens = prompt_tokens
+
+    def context_left(self, window: int) -> float:
+        """Fraction of the context window still free, as 1.0 (empty) down to
+        0.0 (full). Prefers the last server-reported prompt token count
+        (accurate — it's the model's own tokenizer); falls back to
+        estimate_tokens() when the server has never reported usage (e.g. some
+        Ollama configs omit it). Never divides by zero: an unset/zero window
+        reports 0.0 left (treated as full/unknown) rather than raising."""
+        if not window:
+            return 0.0
+        tokens = self.last_prompt_tokens if self.last_prompt_tokens is not None \
+            else self.estimate_tokens()
+        return max(0.0, min(1.0, 1.0 - (tokens / window)))
 
     def save(self, path: str, label: str = "", cwd: str = ""):
         """Save conversation to file with metadata."""
