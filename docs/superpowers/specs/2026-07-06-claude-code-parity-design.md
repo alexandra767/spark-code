@@ -116,6 +116,17 @@ Deliverable: believable quality on real multi-step tasks.
   existing team/worker system remains for explicit `/team` use but the agentic
   path prefers dispatch. This is the 32K reinterpretation of Claude Code's
   subagents: context isolation first, parallelism second.
+- **Agent review pass (find-the-bugs swarm).** After substantive code changes
+  (and on demand via `/review`), reviewer subagents sweep the diff — each with
+  a distinct lens (correctness/bugs, edge cases + error handling, project
+  conventions), each in its own fresh context window. Findings pass a
+  verification step (a skeptic agent tries to refute each finding) before
+  they're reported or fixed, so the 80B's false positives die quietly.
+  Concurrency: `agents.max_concurrent` config, default 2 — vLLM batches
+  concurrent requests so extra agents queue rather than fail; reviewers route
+  to the utility 30B when dual-model routing (Phase 4) is enabled. Auto-review
+  after task completion is opt-in config (`review.auto: true`), on-demand
+  `/review` always available.
 - **True plan mode.** In plan mode the tool registry itself is filtered to
   read-only (enforced at execution, not by prompt). Model signals plan
   completion via an `exit_plan_mode` tool; the plan renders for approval;
