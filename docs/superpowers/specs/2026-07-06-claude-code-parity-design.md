@@ -122,9 +122,12 @@ Deliverable: believable quality on real multi-step tasks.
   conventions), each in its own fresh context window. Findings pass a
   verification step (a skeptic agent tries to refute each finding) before
   they're reported or fixed, so the 80B's false positives die quietly.
-  Concurrency: `agents.max_concurrent` config, default 2 — vLLM batches
-  concurrent requests so extra agents queue rather than fail; reviewers route
-  to the utility 30B when dual-model routing (Phase 4) is enabled. Auto-review
+  Concurrency: `agents.max_concurrent` config, default 3 — measured live
+  2026-07-06: the vLLM engine's KV cache holds 108,256 tokens = 11.88
+  concurrent full-32K requests, so capacity is not the constraint; shared
+  throughput (~70-80 tok/s across JARVIS + Claude UI + Spark) is. Extra agents
+  queue rather than fail; reviewers route to the utility 30B when dual-model
+  routing (Phase 4) is enabled. Auto-review
   after task completion is opt-in config (`review.auto: true`), on-demand
   `/review` always available.
 - **True plan mode.** In plan mode the tool registry itself is filtered to
