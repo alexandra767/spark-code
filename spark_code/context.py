@@ -205,8 +205,60 @@ class Context:
             "content": result,
         })
 
+    def sanitize_orphaned_tool_calls(self) -> int:
+        """Backfill synthetic results for assistant tool_calls left unanswered.
+
+        An interrupt (Ctrl+C) between an assistant ``tool_calls`` message and the
+        recording of its tool results — or reloading a session saved in that
+        state — leaves one or more ``tool_call`` ids with no matching
+        ``role:"tool"`` reply. OpenAI-compatible servers reject that sequence with
+        a 400, wedging every subsequent request. This walks the history and, for
+        each assistant ``tool_calls`` message, appends a synthetic
+        ``{"role":"tool", …, "content":"[interrupted]"}`` result for any id that
+        the immediately-following tool messages did not answer. Idempotent.
+
+        Returns the number of synthetic results inserted.
+        """
+        new_messages: list[dict] = []
+        backfilled = 0
+        i = 0
+        n = len(self.messages)
+        while i < n:
+            msg = self.messages[i]
+            new_messages.append(msg)
+            tool_calls = (msg.get("tool_calls")
+                          if msg.get("role") == "assistant" else None)
+            if tool_calls:
+                # Consume the run of tool results answering this assistant msg.
+                answered: set = set()
+                j = i + 1
+                while j < n and self.messages[j].get("role") == "tool":
+                    new_messages.append(self.messages[j])
+                    answered.add(self.messages[j].get("tool_call_id"))
+                    j += 1
+                for tc in tool_calls:
+                    cid = tc.get("id")
+                    if cid not in answered:
+                        name = tc.get("function", {}).get("name", "")
+                        new_messages.append({
+                            "role": "tool",
+                            "tool_call_id": cid,
+                            "name": name,
+                            "content": "[interrupted]",
+                        })
+                        backfilled += 1
+                i = j
+                continue
+            i += 1
+        if backfilled:
+            self.messages = new_messages
+        return backfilled
+
     def get_messages(self) -> list[dict]:
         """Return messages with system prompt prepended."""
+        # Repair any orphaned tool_calls (e.g. from a mid-tool Ctrl+C) before the
+        # request goes out, so the server never sees an invalid sequence.
+        self.sanitize_orphaned_tool_calls()
         parts = []
         if self.platform_prompt:
             parts.append(self.platform_prompt)
@@ -392,6 +444,9 @@ class Context:
             return False
         self.messages = data.get("messages", [])
         self.turn_count = data.get("turn_count", 0)
+        # A session saved mid-interrupt can carry orphaned tool_calls; repair on
+        # load so --resume / /history don't immediately 400.
+        self.sanitize_orphaned_tool_calls()
         return True
 
     @staticmethod

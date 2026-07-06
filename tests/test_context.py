@@ -237,6 +237,83 @@ class TestNarrationPreserved:
         assert ctx.messages[-1]["content"] is None
 
 
+class TestOrphanedToolCallSanitize:
+    """Audit 2026-07-06 item 2: an interrupt (Ctrl+C) between an assistant
+    tool_calls message and its tool results — or reloading a session saved in
+    that state — leaves tool_call ids with no matching role:"tool" reply, which
+    OpenAI-compatible servers reject with a 400. get_messages() and load() must
+    backfill synthetic results so the message sequence stays valid."""
+
+    def _assistant_tc(self, *ids_names):
+        return {"role": "assistant", "content": None,
+                "tool_calls": [{"id": cid, "type": "function",
+                                "function": {"name": name, "arguments": "{}"}}
+                               for cid, name in ids_names]}
+
+    def _assert_valid(self, messages):
+        for i, m in enumerate(messages):
+            if m.get("role") == "assistant" and m.get("tool_calls"):
+                answered = set()
+                j = i + 1
+                while j < len(messages) and messages[j].get("role") == "tool":
+                    answered.add(messages[j].get("tool_call_id"))
+                    j += 1
+                for tc in m["tool_calls"]:
+                    assert tc["id"] in answered, f"orphaned tool_call {tc['id']}"
+
+    def test_get_messages_backfills_orphaned_tail(self):
+        ctx = Context()
+        ctx.messages = [
+            {"role": "user", "content": "read three files"},
+            self._assistant_tc(("a", "read_file"), ("b", "read_file"),
+                               ("c", "read_file")),
+            {"role": "tool", "tool_call_id": "a", "name": "read_file", "content": "A"},
+            {"role": "tool", "tool_call_id": "b", "name": "read_file", "content": "B"},
+            # "c" was interrupted before its result was recorded.
+        ]
+        msgs = ctx.get_messages()
+        self._assert_valid(msgs[1:])  # skip the prepended system message
+        c_results = [m for m in msgs if m.get("role") == "tool"
+                     and m.get("tool_call_id") == "c"]
+        assert len(c_results) == 1
+        assert "interrupted" in c_results[0]["content"].lower()
+
+    def test_get_messages_backfills_zero_result_orphan(self):
+        # The whole tool batch was interrupted before ANY result was recorded.
+        ctx = Context()
+        ctx.messages = [
+            {"role": "user", "content": "run it"},
+            self._assistant_tc(("x", "bash")),
+        ]
+        msgs = ctx.get_messages()
+        self._assert_valid(msgs[1:])
+
+    def test_load_sanitizes_orphaned_session(self, tmp_path):
+        ctx = Context()
+        ctx.messages = [
+            {"role": "user", "content": "do it"},
+            self._assistant_tc(("x", "bash")),
+        ]
+        path = tmp_path / "orphan.json"
+        ctx.save(str(path))
+        ctx2 = Context()
+        assert ctx2.load(str(path)) is True
+        self._assert_valid(ctx2.messages)
+        assert any(m.get("role") == "tool" and m.get("tool_call_id") == "x"
+                   for m in ctx2.messages)
+
+    def test_sanitize_is_idempotent(self):
+        ctx = Context()
+        ctx.messages = [
+            {"role": "user", "content": "go"},
+            self._assistant_tc(("q", "glob")),
+        ]
+        ctx.get_messages()
+        n_after_first = len(ctx.messages)
+        ctx.get_messages()
+        assert len(ctx.messages) == n_after_first
+
+
 class TestEstimateTokensImages:
     def test_image_payload_counted(self):
         ctx = Context(system_prompt="")

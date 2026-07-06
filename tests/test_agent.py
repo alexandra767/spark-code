@@ -1,5 +1,6 @@
 """Tests for the Agent class — the core agent loop."""
 
+import asyncio
 import io
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -265,3 +266,47 @@ async def test_none_arguments_rejected():
     assert len(tool_msgs) == 1
     assert "Error" in tool_msgs[0]["content"]
     assert "no arguments" in tool_msgs[0]["content"].lower() or "truncated" in tool_msgs[0]["content"].lower()
+
+
+async def test_interrupt_mid_tool_leaves_repairable_context():
+    """Audit 2026-07-06 item 2: a CancelledError raised mid-tool (Ctrl+C during
+    execution) is a BaseException that escapes the tool-exec try/except, leaving
+    an assistant tool_calls message with no matching tool result. The next
+    get_messages() must backfill a synthetic result so the follow-up request is
+    OpenAI-valid instead of 400ing."""
+
+    class CancellingTool(Tool):
+        name = "canceller"
+        description = "raises CancelledError mid-run"
+        is_read_only = False
+        requires_permission = False
+
+        @property
+        def parameters(self):
+            return {"type": "object", "properties": {}}
+
+        async def execute(self, **kwargs):
+            raise asyncio.CancelledError()
+
+    model = MockModel([
+        [
+            {"type": "tool_call", "id": "call_1", "name": "canceller",
+             "arguments": {}},
+            {"type": "done", "usage": {}},
+        ],
+    ])
+
+    agent = _make_agent(model, tools=[CancellingTool()])
+    with patch("spark_code.agent.render_tool_call"):
+        with pytest.raises(asyncio.CancelledError):
+            await agent.run("run it")
+
+    # Orphan present: assistant tool_calls with call_1 but no tool result.
+    raw = agent.context.messages
+    assert raw[-1].get("role") == "assistant" and raw[-1].get("tool_calls")
+
+    # get_messages() repairs it into a valid alternation.
+    msgs = agent.context.get_messages()
+    tool_results = [m for m in msgs if m.get("role") == "tool"
+                    and m.get("tool_call_id") == "call_1"]
+    assert len(tool_results) == 1
