@@ -392,8 +392,14 @@ class Context:
         assistant ``tool_calls`` message it answers; if the boundary lands
         between them, walk back past the assistant tool_calls message too."""
         idx = max(0, min(idx, len(self.messages)))
-        while idx < len(self.messages) and self.messages[idx].get("role") == "tool":
+        # Clamp at 0: without the `idx > 0` guard a pathological history whose
+        # head is all tool messages would walk idx negative — Python's negative
+        # indexing then reads from the TAIL and the loop ends in IndexError.
+        while 0 < idx < len(self.messages) and self.messages[idx].get("role") == "tool":
             idx -= 1
+        if (idx == 0 and self.messages
+                and self.messages[0].get("role") == "tool"):
+            return 0
         return idx
 
     def clear(self):

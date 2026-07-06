@@ -221,6 +221,30 @@ class TestCompactionSafety:
                     f"orphaned tool result at index {i}")
 
 
+class TestSafeSplitIndexAllToolTail:
+    """Audit 2026-07-06 item 9: _safe_split_index only stopped its backward walk
+    on a non-tool role, so a (hand-corrupted / pathological) history whose head
+    is all tool messages walked idx to -1 and beyond — Python negative indexing
+    reads from the TAIL and the loop eventually raises IndexError. The walk must
+    clamp at 0."""
+
+    def _tool(self, cid):
+        return {"role": "tool", "tool_call_id": cid, "name": "bash",
+                "content": "out"}
+
+    def test_all_tool_list_returns_zero_no_exception(self):
+        ctx = Context(max_tokens=0)
+        ctx.messages = [self._tool("a"), self._tool("b"), self._tool("c")]
+        assert ctx._safe_split_index(2) == 0
+
+    def test_tool_head_clamps_at_zero(self):
+        ctx = Context(max_tokens=0)
+        ctx.messages = [self._tool("a"),
+                        {"role": "assistant", "content": "hi"}]
+        assert ctx._safe_split_index(1) == 1  # stops on the non-tool message
+        assert ctx._safe_split_index(0) == 0  # never goes negative
+
+
 class TestNarrationPreserved:
     def test_tool_calls_keep_narration_content(self):
         ctx = Context()
