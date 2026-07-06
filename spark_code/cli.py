@@ -230,17 +230,62 @@ def _get_latest_session() -> str:
     return ""
 
 
-def _list_sessions() -> list[dict]:
-    """Return metadata for every saved session, newest first.
+# How many sessions /history and /resume actually display. _list_sessions
+# eagerly parses metadata for exactly this many entries, so the display
+# slice and the metadata cap can't drift apart.
+_SESSION_DISPLAY_LIMIT = 10
 
-    Each entry: path, name (filename minus ``.json``), label, age (human
-    string like "2h ago", "" if unknown), turns, cwd. This is the single
-    place that reads ``~/.spark/history`` off disk for display purposes —
-    /history's listing and /resume's picker both consume it so they can't
-    drift out of sync with each other.
+
+def _load_session_meta(entry: dict) -> dict:
+    """Fill label/age/turns/cwd on a _list_sessions() entry (idempotent).
+
+    Metadata needs a full JSON parse of the session file, so it is loaded
+    only for entries that are actually displayed or name-matched — never
+    for the whole history directory (review amendment 2026-07-06).
     """
+    if entry.get("_meta_loaded"):
+        return entry
     from datetime import datetime as _dt
 
+    meta = Context.read_metadata(entry["path"])
+    age = ""
+    ts = meta.get("timestamp", "")
+    if ts:
+        try:
+            session_time = _dt.fromisoformat(ts)
+            delta = _dt.now() - session_time
+            if delta.days > 0:
+                age = f"{delta.days}d ago"
+            elif delta.seconds >= 3600:
+                age = f"{delta.seconds // 3600}h ago"
+            elif delta.seconds >= 60:
+                age = f"{delta.seconds // 60}m ago"
+            else:
+                age = "just now"
+        except (ValueError, TypeError):
+            pass
+    entry["label"] = meta.get("label", "")
+    entry["age"] = age
+    entry["turns"] = meta.get("turn_count", 0)
+    entry["cwd"] = meta.get("cwd", "")
+    entry["_meta_loaded"] = True
+    return entry
+
+
+def _list_sessions(meta_limit: int = _SESSION_DISPLAY_LIMIT) -> list[dict]:
+    """Return every saved session, newest first.
+
+    Each entry: path, name (filename minus ``.json``), label, age (human
+    string like "2h ago", "" if unknown), turns, cwd. Metadata requires a
+    full JSON parse, so it is eagerly loaded only for the first
+    `meta_limit` entries — the slice /history and /resume actually
+    display. Later entries keep placeholder metadata; callers that
+    name-match one of them hydrate just that entry via
+    _load_session_meta(). This is the single place that reads
+    ``~/.spark/history`` off disk for display purposes — /history's
+    listing and /resume's picker both consume it so they can't drift out
+    of sync with each other.
+    """
     history_dir = _sessions_dir()
     if not os.path.isdir(history_dir):
         return []
@@ -249,33 +294,19 @@ def _list_sessions() -> list[dict]:
         reverse=True,
     )
     sessions = []
-    for f in files:
-        session_path = os.path.join(history_dir, f)
-        meta = Context.read_metadata(session_path)
-        age = ""
-        ts = meta.get("timestamp", "")
-        if ts:
-            try:
-                session_time = _dt.fromisoformat(ts)
-                delta = _dt.now() - session_time
-                if delta.days > 0:
-                    age = f"{delta.days}d ago"
-                elif delta.seconds >= 3600:
-                    age = f"{delta.seconds // 3600}h ago"
-                elif delta.seconds >= 60:
-                    age = f"{delta.seconds // 60}m ago"
-                else:
-                    age = "just now"
-            except (ValueError, TypeError):
-                pass
-        sessions.append({
-            "path": session_path,
+    for i, f in enumerate(files):
+        entry = {
+            "path": os.path.join(history_dir, f),
             "name": f[:-len(".json")],
-            "label": meta.get("label", ""),
-            "age": age,
-            "turns": meta.get("turn_count", 0),
-            "cwd": meta.get("cwd", ""),
-        })
+            "label": "",
+            "age": "",
+            "turns": 0,
+            "cwd": "",
+            "_meta_loaded": False,
+        }
+        if i < meta_limit:
+            _load_session_meta(entry)
+        sessions.append(entry)
     return sessions
 
 
@@ -635,7 +666,7 @@ def _undo_last(console: Console, count: int = 1) -> int:
     """Restore the most recent `count` file snapshots from the undo stack.
 
     Prints status via `console` exactly as /undo's inline body used to.
-    Shared by /undo and /rewind's "conversation" option so there's one
+    Shared by /undo and /rewind's "last file edits" option so there's one
     place that knows how to pop the undo stack. Returns the number of
     operations actually restored.
     """
@@ -676,8 +707,8 @@ def _get_checkpoints() -> list[tuple[str, str]] | None:
     """Return (real_stash_ref, description) for each spark-checkpoint stash
     entry, newest first, or None if git itself is unavailable.
 
-    Shared by /rollback and /rewind's "files" option so there's one place
-    that knows how to read the checkpoint stash list.
+    Shared by /rollback and /rewind's "checkpoint" option so there's one
+    place that knows how to read the checkpoint stash list.
     """
     try:
         result = subprocess.run(
@@ -698,7 +729,7 @@ def _apply_checkpoint(console: Console, checkpoints: list[tuple[str, str]], idx:
     """Restore the working tree to the checkpoint at `idx` (0 = most recent).
 
     `apply` (not `pop`) so the checkpoint survives and can be rolled back to
-    again. Shared by /rollback <N> and /rewind's "files" option.
+    again. Shared by /rollback <N> and /rewind's "checkpoint" option.
     """
     if idx < 0 or idx >= len(checkpoints):
         console.print(f"[#bf616a]No checkpoint {idx}. Use /rollback to list.[/#bf616a]")
@@ -722,7 +753,7 @@ def _apply_checkpoint(console: Console, checkpoints: list[tuple[str, str]], idx:
 def _rewind_files(console: Console) -> bool:
     """Restore the working tree to the most recent checkpoint.
 
-    Shared by /rewind's "files" and "both" options.
+    Shared by /rewind's "checkpoint" and "both" options.
     """
     checkpoints = _get_checkpoints()
     if checkpoints is None:
@@ -783,7 +814,7 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
 - `/watch <cmd>` — Auto-run command on file changes (`/watch off` to stop)
 - `/checkpoint` — Create a restorable checkpoint (git stash)
 - `/rollback [N]` — Restore from a checkpoint
-- `/rewind` — Undo conversation and/or file changes (unified menu)
+- `/rewind` — Restore files from undo stack or checkpoint (unified menu)
 - `/continue` — Resume from last checkpoint
 - `/retry` — Re-send the last message
 - `/clean` — Delete files created this session
@@ -1672,7 +1703,7 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
             if not matches:
                 console.print(f"[#bf616a]No session matching '{target}'[/#bf616a]")
                 return None
-            chosen = matches[0]
+            chosen = _load_session_meta(matches[0])
             if _resume_session_into(context, chosen["path"]):
                 label = chosen["label"]
                 label_display = f"  [#d8dee9]{label}[/#d8dee9]" if label else ""
@@ -1682,7 +1713,7 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
             return None
         # List recent sessions with metadata
         console.print("[bold #eceff4]Recent sessions:[/bold #eceff4]")
-        for sess in sessions[:10]:
+        for sess in sessions[:_SESSION_DISPLAY_LIMIT]:
             cwd = sess["cwd"]
             home = os.path.expanduser("~")
             if cwd.startswith(home):
@@ -1709,9 +1740,10 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
         if not sessions:
             console.print("[#8899aa]No saved sessions yet.[/#8899aa]")
             return None
-        shown = sessions[:10]
+        shown = sessions[:_SESSION_DISPLAY_LIMIT]
 
         def _finish_resume(chosen: dict) -> None:
+            _load_session_meta(chosen)
             if _resume_session_into(context, chosen["path"]):
                 label_display = f"  [#d8dee9]{chosen['label']}[/#d8dee9]" if chosen["label"] else ""
                 console.print(f"[#a3be8c]Resumed session: {chosen['name']}{label_display}[/#a3be8c]")
@@ -2030,22 +2062,25 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
         return None
 
     elif command == "/rewind":
-        # Unified undo: conversation (last file op), files (latest
-        # checkpoint), or both. Delegates to /undo's and /rollback's own
-        # logic via the shared _undo_last/_rewind_files helpers so there's
-        # exactly one implementation of each restore action.
-        alias = {"conversation": "1", "files": "2", "both": "3"}
+        # Unified file restore: the undo stack (last write/edit snapshots)
+        # or the latest /checkpoint git stash, or both. Delegates to /undo's
+        # and /rollback's own logic via the shared _undo_last/_rewind_files
+        # helpers so there's exactly one implementation of each restore
+        # action. No conversation rewind exists in this codebase — the
+        # labels say exactly what each option does (plan amendment
+        # 2026-07-06; true context rewind is a Phase 2 candidate).
+        alias = {"undo": "1", "checkpoint": "2", "both": "3"}
         choice = args.strip().lower() if args else ""
         choice = alias.get(choice, choice)
         if choice and choice not in ("1", "2", "3"):
             console.print(f"[#bf616a]Unknown /rewind option: {args.strip()}[/#bf616a]")
-            console.print("[#8899aa]Use 1 (conversation), 2 (files), or 3 (both)[/#8899aa]")
+            console.print("[#8899aa]Use 1 (last file edits), 2 (checkpoint), or 3 (both)[/#8899aa]")
             return None
 
         if not choice:
             console.print("[bold #eceff4]Rewind:[/bold #eceff4]")
-            console.print("  [#88c0d0]1.[/#88c0d0] conversation  [#8899aa]undo the last file edit[/#8899aa]")
-            console.print("  [#88c0d0]2.[/#88c0d0] files         [#8899aa]restore the latest checkpoint[/#8899aa]")
+            console.print("  [#88c0d0]1.[/#88c0d0] last file edits (undo stack)")
+            console.print("  [#88c0d0]2.[/#88c0d0] checkpoint (git stash)")
             console.print("  [#88c0d0]3.[/#88c0d0] both")
             try:
                 choice = Prompt.ask(

@@ -269,6 +269,29 @@ class TestListSessions:
         assert sess["cwd"] == "/home/user/proj"
         assert sess["turns"] == 1
 
+    def test_metadata_reads_capped_to_display_slice(self, tmp_path, monkeypatch):
+        # Review amendment 2026-07-06: _list_sessions used to call
+        # Context.read_metadata (a full JSON parse) for EVERY file in
+        # ~/.spark/history on each /history or /resume invocation. Only the
+        # top-10 slice that actually gets displayed may be parsed eagerly —
+        # the rest still appear in the list (for name matching) but carry
+        # placeholder metadata until hydrated individually.
+        import spark_code.cli as cli
+        monkeypatch.setattr(cli, "_sessions_dir", lambda create=True: str(tmp_path))
+        for i in range(15):
+            (tmp_path / f"202606{10 + i}_000000_task-{i}.json").write_text(
+                '{"messages": [], "turn_count": 1}'
+            )
+        calls = []
+        real = Context.read_metadata
+        monkeypatch.setattr(
+            Context, "read_metadata",
+            staticmethod(lambda path: (calls.append(path), real(path))[1]),
+        )
+        sessions = _list_sessions()
+        assert len(sessions) == 15  # every session still listed / matchable
+        assert len(calls) <= 10     # but only the display slice is parsed
+
 
 class TestResumeSessionInto:
     def test_loads_valid_session(self, tmp_path):
@@ -372,6 +395,68 @@ class TestResumeCommand:
         assert result is None
         assert deps["context"].turn_count == 1
 
+    def _seed_14_decoys_plus_ancient(self, tmp_path):
+        """15 sessions: 14 newer decoys + 1 oldest target beyond the top-10
+        display slice, with a label distinct from its filename so output
+        assertions prove its metadata really was parsed."""
+        for i in range(14):
+            (tmp_path / f"202607{i + 1:02d}_000000_decoy-{i}.json").write_text(
+                '{"messages": [], "turn_count": 1}'
+            )
+        ctx = Context()
+        ctx.add_user("ancient work")
+        ctx.save(
+            str(tmp_path / "20260101_000000_ancient-task.json"),
+            label="the-old-one", cwd=str(tmp_path),
+        )
+
+    def test_resume_by_name_beyond_slice_parses_one_extra(self, tmp_path, monkeypatch):
+        # Review amendment 2026-07-06: a name match may hydrate exactly one
+        # entry beyond the eagerly-parsed display slice — never the whole dir.
+        import spark_code.cli as cli
+        monkeypatch.setattr(cli, "_sessions_dir", lambda create=True: str(tmp_path))
+        self._seed_14_decoys_plus_ancient(tmp_path)
+
+        calls = []
+        real = Context.read_metadata
+        monkeypatch.setattr(
+            Context, "read_metadata",
+            staticmethod(lambda path: (calls.append(path), real(path))[1]),
+        )
+
+        deps = _init_command_deps()
+        result = handle_slash_command(
+            "/resume ancient-task", deps["context"], deps["console"], deps["config"],
+            deps["skills"], deps["model"], permissions=deps["permissions"],
+        )
+        assert result is None
+        assert deps["context"].turn_count == 1
+        assert deps["context"].messages[0]["content"] == "ancient work"
+        out = deps["console"].export_text()
+        assert "Resumed session" in out
+        assert "the-old-one" in out  # label shown → matched entry hydrated
+        assert len(calls) <= 11      # top-10 slice + the one matched entry
+
+    def test_history_name_match_beyond_slice_still_resumes_with_label(
+        self, tmp_path, monkeypatch,
+    ):
+        # /history <name> must keep matching sessions beyond the display
+        # slice and still show their label (output preserved post-cap).
+        import spark_code.cli as cli
+        monkeypatch.setattr(cli, "_sessions_dir", lambda create=True: str(tmp_path))
+        self._seed_14_decoys_plus_ancient(tmp_path)
+
+        deps = _init_command_deps()
+        result = handle_slash_command(
+            "/history ancient-task", deps["context"], deps["console"], deps["config"],
+            deps["skills"], deps["model"], permissions=deps["permissions"],
+        )
+        assert result is None
+        assert deps["context"].turn_count == 1
+        out = deps["console"].export_text()
+        assert "Resumed session" in out
+        assert "the-old-one" in out
+
     def test_invalid_number_reports_error_without_crash(self, tmp_path, monkeypatch):
         import spark_code.cli as cli
         monkeypatch.setattr(cli, "_sessions_dir", lambda create=True: str(tmp_path))
@@ -439,7 +524,10 @@ class TestResumeCommand:
 # ---------------------------------------------------------------------------
 
 class TestRewindCommand:
-    def test_menu_shown_and_conversation_delegates_to_undo(self, monkeypatch):
+    def test_menu_shows_honest_labels_and_option1_delegates_to_undo(self, monkeypatch):
+        # Plan amendment 2026-07-06: no conversation rewind exists in this
+        # codebase — the menu must label the options by what they actually
+        # do (undo stack / git stash checkpoint), not fake a message rewind.
         import spark_code.cli as cli
         calls = []
         monkeypatch.setattr(cli, "_undo_last", lambda console, n: calls.append(("undo", n)))
@@ -452,9 +540,13 @@ class TestRewindCommand:
         )
         assert result is None
         assert calls == [("undo", 1)]
-        assert "Rewind" in deps["console"].export_text()
+        out = deps["console"].export_text()
+        assert "Rewind" in out
+        assert "last file edits (undo stack)" in out
+        assert "checkpoint (git stash)" in out
+        assert "conversation" not in out
 
-    def test_word_alias_conversation_skips_prompt(self, monkeypatch):
+    def test_word_alias_undo_skips_prompt(self, monkeypatch):
         import spark_code.cli as cli
         calls = []
         monkeypatch.setattr(cli, "_undo_last", lambda console, n: calls.append(("undo", n)))
@@ -465,11 +557,29 @@ class TestRewindCommand:
 
         deps = _init_command_deps()
         result = handle_slash_command(
-            "/rewind conversation", deps["context"], deps["console"], deps["config"],
+            "/rewind undo", deps["context"], deps["console"], deps["config"],
             deps["skills"], deps["model"], permissions=deps["permissions"],
         )
         assert result is None
         assert calls == [("undo", 1)]
+
+    def test_word_alias_checkpoint_delegates_to_rewind_files(self, monkeypatch):
+        import spark_code.cli as cli
+        calls = []
+        monkeypatch.setattr(cli, "_rewind_files", lambda console: calls.append("files"))
+
+        deps = _init_command_deps()
+        result = handle_slash_command(
+            "/rewind checkpoint", deps["context"], deps["console"], deps["config"],
+            deps["skills"], deps["model"], permissions=deps["permissions"],
+        )
+        assert result is None
+        assert calls == ["files"]
+
+    def test_autocomplete_text_is_honest(self):
+        from spark_code.ui.input import _BUILTIN_COMMANDS
+        assert _BUILTIN_COMMANDS["/rewind"] == "Restore files from undo stack or checkpoint"
+        assert _BUILTIN_COMMANDS["/resume"] == "Pick a past session to resume"
 
     def test_files_option_delegates_to_rewind_files(self, monkeypatch):
         import spark_code.cli as cli
