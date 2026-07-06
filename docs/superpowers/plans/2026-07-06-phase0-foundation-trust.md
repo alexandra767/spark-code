@@ -505,3 +505,23 @@ Expected: all tests pass (572 + new), ruff clean, working tree clean.
 cd ~/spark-code && git push origin main
 ```
 Expected: `main -> main` on `github.com/alexandra767/spark-code`. Verify: `git log origin/main --oneline -1` matches local HEAD.
+
+---
+
+## Amendment (2026-07-06, post-Task-2 review)
+
+Task 2's reviewer found two false-PASS risks in the plan's own smoke-script
+code (plan-mandated defects). Amended requirements for `scripts/smoke_live.py`:
+
+- **c4_bash:** the script generates a random 8-digit integer R at runtime and
+  writes `mystery.py` containing `print({R} ^ 0xA5A5)`; the prompt tells the
+  model to run it with bash and report the number; the assertion requires
+  `str(R ^ 0xA5A5)` in output. (Old `6*7*101=4242` was mentally computable —
+  the check could pass without bash ever running.)
+- **c5_multiround:** in addition to the file-existence asserts and the model's
+  claimed result matching `r"\d+ passed"`, the script itself runs
+  `sys.executable -m pytest -q` in the temp project and asserts exit 0 — the
+  authoritative signal that the generated code passes its own tests. (Old
+  `"passed" in out` matched "1 failed, 3 passed" too.)
+- **rc asserts:** c3/c4/c5 assert the one-shot exit code is 0.
+- **c7:** compares full message content across save/load, not just count.
