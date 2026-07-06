@@ -9,8 +9,10 @@ from spark_code.cli import (
     _checkpoint_resume_note,
     _detect_file_mentions,
     _is_shell_command,
+    _list_sessions,
     _redacted_config,
     _restore_checkpoint,
+    _resume_session_into,
     handle_slash_command,
 )
 from spark_code.context import Context
@@ -224,3 +226,307 @@ class TestInitCommand:
         assert result is not None
         assert "CLAUDE.md" in result
         assert "write_file" in result
+
+
+# ---------------------------------------------------------------------------
+# _list_sessions / _resume_session_into (Task 4: /resume + /rewind)
+# ---------------------------------------------------------------------------
+
+class TestListSessions:
+    def test_list_sessions_sorted_newest_first(self, tmp_path, monkeypatch):
+        import spark_code.cli as cli
+        monkeypatch.setattr(cli, "_sessions_dir", lambda create=True: str(tmp_path))
+        (tmp_path / "20260101_000000_old-task.json").write_text('{"messages": []}')
+        (tmp_path / "20260706_120000_new-task.json").write_text('{"messages": []}')
+        sessions = _list_sessions()
+        assert len(sessions) == 2
+        assert "new-task" in sessions[0]["path"]
+
+    def test_list_sessions_empty_when_dir_missing(self, tmp_path, monkeypatch):
+        import spark_code.cli as cli
+        monkeypatch.setattr(
+            cli, "_sessions_dir", lambda create=True: str(tmp_path / "does-not-exist")
+        )
+        assert _list_sessions() == []
+
+    def test_list_sessions_reads_label_turns_cwd(self, tmp_path, monkeypatch):
+        # Build the fixture with real Context.save so the shape (timestamp,
+        # turn_count, label, cwd, messages) matches what /resume will
+        # actually encounter on disk (see context.py:440).
+        import spark_code.cli as cli
+        monkeypatch.setattr(cli, "_sessions_dir", lambda create=True: str(tmp_path))
+        ctx = Context()
+        ctx.add_user("build a weather app")
+        ctx.save(
+            str(tmp_path / "20260706_120000_weather.json"),
+            label="weather-app", cwd="/home/user/proj",
+        )
+        sessions = _list_sessions()
+        assert len(sessions) == 1
+        sess = sessions[0]
+        assert sess["name"] == "20260706_120000_weather"
+        assert sess["label"] == "weather-app"
+        assert sess["cwd"] == "/home/user/proj"
+        assert sess["turns"] == 1
+
+
+class TestResumeSessionInto:
+    def test_loads_valid_session(self, tmp_path):
+        ctx = Context()
+        ctx.add_user("hi")
+        ctx.add_assistant("hello")
+        path = str(tmp_path / "session.json")
+        ctx.save(path, label="greeting", cwd=str(tmp_path))
+
+        fresh = Context()
+        assert _resume_session_into(fresh, path) is True
+        assert fresh.turn_count == 1
+        assert fresh.messages[0]["content"] == "hi"
+
+    def test_missing_file_returns_false(self, tmp_path):
+        fresh = Context()
+        assert _resume_session_into(fresh, str(tmp_path / "nope.json")) is False
+
+
+# ---------------------------------------------------------------------------
+# /resume command
+# ---------------------------------------------------------------------------
+
+class TestResumeCommand:
+    def test_no_sessions_yet(self, tmp_path, monkeypatch):
+        import spark_code.cli as cli
+        monkeypatch.setattr(
+            cli, "_sessions_dir", lambda create=True: str(tmp_path / "empty")
+        )
+        deps = _init_command_deps()
+        result = handle_slash_command(
+            "/resume", deps["context"], deps["console"], deps["config"],
+            deps["skills"], deps["model"], permissions=deps["permissions"],
+        )
+        assert result is None
+        assert "No saved sessions yet" in deps["console"].export_text()
+
+    def test_numbered_picker_prompts_and_resumes(self, tmp_path, monkeypatch):
+        import spark_code.cli as cli
+        monkeypatch.setattr(cli, "_sessions_dir", lambda create=True: str(tmp_path))
+        ctx = Context()
+        ctx.add_user("build a snake game")
+        ctx.save(
+            str(tmp_path / "20260706_120000_snake.json"),
+            label="snake-game", cwd=str(tmp_path),
+        )
+        monkeypatch.setattr(cli.Prompt, "ask", lambda *a, **k: "1")
+
+        deps = _init_command_deps()
+        result = handle_slash_command(
+            "/resume", deps["context"], deps["console"], deps["config"],
+            deps["skills"], deps["model"], permissions=deps["permissions"],
+        )
+        assert result is None
+        out = deps["console"].export_text()
+        assert "Resumed session" in out
+        assert "snake" in out
+        # Loaded into the LIVE context, same object the caller holds.
+        assert deps["context"].turn_count == 1
+        assert deps["context"].messages[0]["content"] == "build a snake game"
+        # Banner reprinted after resume (mirrors /clear's print_banner call).
+        assert "Spark Code" in out
+
+    def test_direct_number_skips_prompt(self, tmp_path, monkeypatch):
+        import spark_code.cli as cli
+        monkeypatch.setattr(cli, "_sessions_dir", lambda create=True: str(tmp_path))
+        ctx = Context()
+        ctx.add_user("hello")
+        ctx.save(
+            str(tmp_path / "20260706_120000_hi.json"),
+            label="hi-task", cwd=str(tmp_path),
+        )
+
+        def _boom(*a, **k):
+            raise AssertionError("Prompt.ask should not run when a number is given")
+        monkeypatch.setattr(cli.Prompt, "ask", _boom)
+
+        deps = _init_command_deps()
+        result = handle_slash_command(
+            "/resume 1", deps["context"], deps["console"], deps["config"],
+            deps["skills"], deps["model"], permissions=deps["permissions"],
+        )
+        assert result is None
+        assert deps["context"].turn_count == 1
+
+    def test_direct_name_skips_prompt(self, tmp_path, monkeypatch):
+        import spark_code.cli as cli
+        monkeypatch.setattr(cli, "_sessions_dir", lambda create=True: str(tmp_path))
+        ctx = Context()
+        ctx.add_user("hello")
+        ctx.save(
+            str(tmp_path / "20260706_120000_hi-task.json"),
+            label="hi-task", cwd=str(tmp_path),
+        )
+
+        deps = _init_command_deps()
+        result = handle_slash_command(
+            "/resume hi-task", deps["context"], deps["console"], deps["config"],
+            deps["skills"], deps["model"], permissions=deps["permissions"],
+        )
+        assert result is None
+        assert deps["context"].turn_count == 1
+
+    def test_invalid_number_reports_error_without_crash(self, tmp_path, monkeypatch):
+        import spark_code.cli as cli
+        monkeypatch.setattr(cli, "_sessions_dir", lambda create=True: str(tmp_path))
+        ctx = Context()
+        ctx.save(
+            str(tmp_path / "20260706_120000_only.json"),
+            label="only", cwd=str(tmp_path),
+        )
+
+        deps = _init_command_deps()
+        result = handle_slash_command(
+            "/resume 99", deps["context"], deps["console"], deps["config"],
+            deps["skills"], deps["model"], permissions=deps["permissions"],
+        )
+        assert result is None
+        assert "No session #99" in deps["console"].export_text()
+        assert deps["context"].turn_count == 0  # untouched
+
+    def test_blank_answer_cancels(self, tmp_path, monkeypatch):
+        import spark_code.cli as cli
+        monkeypatch.setattr(cli, "_sessions_dir", lambda create=True: str(tmp_path))
+        ctx = Context()
+        ctx.save(
+            str(tmp_path / "20260706_120000_only.json"),
+            label="only", cwd=str(tmp_path),
+        )
+        monkeypatch.setattr(cli.Prompt, "ask", lambda *a, **k: "")
+
+        deps = _init_command_deps()
+        result = handle_slash_command(
+            "/resume", deps["context"], deps["console"], deps["config"],
+            deps["skills"], deps["model"], permissions=deps["permissions"],
+        )
+        assert result is None
+        assert "Cancelled" in deps["console"].export_text()
+        assert deps["context"].turn_count == 0
+
+    def test_ctrl_c_during_picker_returns_cleanly(self, tmp_path, monkeypatch):
+        """Historical bug (see /clean): an uncaught KeyboardInterrupt from an
+        interactive prompt used to unwind past the REPL loop and exit the
+        whole app. /resume's picker must catch it locally and return None."""
+        import spark_code.cli as cli
+        monkeypatch.setattr(cli, "_sessions_dir", lambda create=True: str(tmp_path))
+        ctx = Context()
+        ctx.save(
+            str(tmp_path / "20260706_120000_only.json"),
+            label="only", cwd=str(tmp_path),
+        )
+
+        def _raise_kbd(*a, **k):
+            raise KeyboardInterrupt()
+        monkeypatch.setattr(cli.Prompt, "ask", _raise_kbd)
+
+        deps = _init_command_deps()
+        result = handle_slash_command(
+            "/resume", deps["context"], deps["console"], deps["config"],
+            deps["skills"], deps["model"], permissions=deps["permissions"],
+        )
+        assert result is None  # did not propagate/crash the app
+        assert deps["context"].turn_count == 0
+
+
+# ---------------------------------------------------------------------------
+# /rewind command
+# ---------------------------------------------------------------------------
+
+class TestRewindCommand:
+    def test_menu_shown_and_conversation_delegates_to_undo(self, monkeypatch):
+        import spark_code.cli as cli
+        calls = []
+        monkeypatch.setattr(cli, "_undo_last", lambda console, n: calls.append(("undo", n)))
+        monkeypatch.setattr(cli.Prompt, "ask", lambda *a, **k: "1")
+
+        deps = _init_command_deps()
+        result = handle_slash_command(
+            "/rewind", deps["context"], deps["console"], deps["config"],
+            deps["skills"], deps["model"], permissions=deps["permissions"],
+        )
+        assert result is None
+        assert calls == [("undo", 1)]
+        assert "Rewind" in deps["console"].export_text()
+
+    def test_word_alias_conversation_skips_prompt(self, monkeypatch):
+        import spark_code.cli as cli
+        calls = []
+        monkeypatch.setattr(cli, "_undo_last", lambda console, n: calls.append(("undo", n)))
+
+        def _boom(*a, **k):
+            raise AssertionError("Prompt.ask should not run when an option is given")
+        monkeypatch.setattr(cli.Prompt, "ask", _boom)
+
+        deps = _init_command_deps()
+        result = handle_slash_command(
+            "/rewind conversation", deps["context"], deps["console"], deps["config"],
+            deps["skills"], deps["model"], permissions=deps["permissions"],
+        )
+        assert result is None
+        assert calls == [("undo", 1)]
+
+    def test_files_option_delegates_to_rewind_files(self, monkeypatch):
+        import spark_code.cli as cli
+        calls = []
+        monkeypatch.setattr(cli, "_rewind_files", lambda console: calls.append("files"))
+
+        deps = _init_command_deps()
+        result = handle_slash_command(
+            "/rewind 2", deps["context"], deps["console"], deps["config"],
+            deps["skills"], deps["model"], permissions=deps["permissions"],
+        )
+        assert result is None
+        assert calls == ["files"]
+
+    def test_both_option_delegates_to_both_in_order(self, monkeypatch):
+        import spark_code.cli as cli
+        calls = []
+        monkeypatch.setattr(cli, "_undo_last", lambda console, n: calls.append(("undo", n)))
+        monkeypatch.setattr(cli, "_rewind_files", lambda console: calls.append("files"))
+
+        deps = _init_command_deps()
+        result = handle_slash_command(
+            "/rewind both", deps["context"], deps["console"], deps["config"],
+            deps["skills"], deps["model"], permissions=deps["permissions"],
+        )
+        assert result is None
+        assert calls == [("undo", 1), "files"]
+
+    def test_unknown_option_reports_error_without_crash(self, monkeypatch):
+        import spark_code.cli as cli
+        calls = []
+        monkeypatch.setattr(cli, "_undo_last", lambda console, n: calls.append(("undo", n)))
+        monkeypatch.setattr(cli, "_rewind_files", lambda console: calls.append("files"))
+
+        deps = _init_command_deps()
+        result = handle_slash_command(
+            "/rewind bogus", deps["context"], deps["console"], deps["config"],
+            deps["skills"], deps["model"], permissions=deps["permissions"],
+        )
+        assert result is None
+        assert calls == []
+        assert "Unknown /rewind option" in deps["console"].export_text()
+
+    def test_ctrl_c_during_menu_returns_cleanly(self, monkeypatch):
+        import spark_code.cli as cli
+        calls = []
+        monkeypatch.setattr(cli, "_undo_last", lambda console, n: calls.append(("undo", n)))
+        monkeypatch.setattr(cli, "_rewind_files", lambda console: calls.append("files"))
+
+        def _raise_kbd(*a, **k):
+            raise KeyboardInterrupt()
+        monkeypatch.setattr(cli.Prompt, "ask", _raise_kbd)
+
+        deps = _init_command_deps()
+        result = handle_slash_command(
+            "/rewind", deps["context"], deps["console"], deps["config"],
+            deps["skills"], deps["model"], permissions=deps["permissions"],
+        )
+        assert result is None  # did not propagate/crash the app
+        assert calls == []

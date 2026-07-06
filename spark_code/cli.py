@@ -13,6 +13,7 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.markup import escape as _esc
 from rich.panel import Panel
+from rich.prompt import Prompt
 from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
@@ -630,6 +631,109 @@ def print_banner(console: Console, config: dict, mcp_count: int = 0,
     console.print()
 
 
+def _undo_last(console: Console, count: int = 1) -> int:
+    """Restore the most recent `count` file snapshots from the undo stack.
+
+    Prints status via `console` exactly as /undo's inline body used to.
+    Shared by /undo and /rewind's "conversation" option so there's one
+    place that knows how to pop the undo stack. Returns the number of
+    operations actually restored.
+    """
+    undo_dir = os.path.expanduser("~/.spark/.undo")
+    if not os.path.isdir(undo_dir):
+        console.print("[#8899aa]Nothing to undo.[/#8899aa]")
+        return 0
+    undo_files = sorted(os.listdir(undo_dir), reverse=True)
+    if not undo_files:
+        console.print("[#8899aa]Nothing to undo.[/#8899aa]")
+        return 0
+
+    count = min(count, len(undo_files))
+    restored = 0
+    import json as _json
+    for uf in undo_files[:count]:
+        undo_meta_path = os.path.join(undo_dir, uf)
+        try:
+            with open(undo_meta_path, encoding="utf-8") as f:
+                undo_data = _json.load(f)
+            original_path = undo_data["path"]
+            original_content = undo_data["content"]
+            with open(original_path, "w", encoding="utf-8") as f:
+                f.write(original_content)
+            os.remove(undo_meta_path)
+            home = os.path.expanduser("~")
+            display = "~" + original_path[len(home):] if original_path.startswith(home) else original_path
+            console.print(f"[#a3be8c]Restored: {display}[/#a3be8c]")
+            restored += 1
+        except Exception as e:
+            console.print(f"[#bf616a]Undo failed: {e}[/#bf616a]")
+    if restored > 1:
+        console.print(f"[#a3be8c]Undid {restored} operations[/#a3be8c]")
+    return restored
+
+
+def _get_checkpoints() -> list[tuple[str, str]] | None:
+    """Return (real_stash_ref, description) for each spark-checkpoint stash
+    entry, newest first, or None if git itself is unavailable.
+
+    Shared by /rollback and /rewind's "files" option so there's one place
+    that knows how to read the checkpoint stash list.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "stash", "list"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    checkpoints = []
+    for line in result.stdout.strip().split("\n"):
+        if line and "spark-checkpoint" in line:
+            ref = line.split(":", 1)[0].strip()  # "stash@{2}"
+            checkpoints.append((ref, line))
+    return checkpoints
+
+
+def _apply_checkpoint(console: Console, checkpoints: list[tuple[str, str]], idx: int) -> bool:
+    """Restore the working tree to the checkpoint at `idx` (0 = most recent).
+
+    `apply` (not `pop`) so the checkpoint survives and can be rolled back to
+    again. Shared by /rollback <N> and /rewind's "files" option.
+    """
+    if idx < 0 or idx >= len(checkpoints):
+        console.print(f"[#bf616a]No checkpoint {idx}. Use /rollback to list.[/#bf616a]")
+        return False
+    real_ref = checkpoints[idx][0]
+    try:
+        restore_result = subprocess.run(
+            ["git", "stash", "apply", real_ref],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        console.print("[#bf616a]Git not available[/#bf616a]")
+        return False
+    if restore_result.returncode == 0:
+        console.print(f"[#a3be8c]Rolled back to checkpoint {idx}[/#a3be8c]")
+        return True
+    console.print(f"[#bf616a]{restore_result.stderr.strip()}[/#bf616a]")
+    return False
+
+
+def _rewind_files(console: Console) -> bool:
+    """Restore the working tree to the most recent checkpoint.
+
+    Shared by /rewind's "files" and "both" options.
+    """
+    checkpoints = _get_checkpoints()
+    if checkpoints is None:
+        console.print("[#bf616a]Git not available[/#bf616a]")
+        return False
+    if not checkpoints:
+        console.print("[#8899aa]No checkpoints found. Use /checkpoint first.[/#8899aa]")
+        return False
+    return _apply_checkpoint(console, checkpoints, 0)
+
+
 def handle_slash_command(cmd: str, context: Context, console: Console,
                          config: dict, skills: SkillRegistry,
                          model: ModelClient,
@@ -660,6 +764,7 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
 - `/cost` — Show session costs and budget
 - `/analytics` — Detailed analytics dashboard
 - `/history` — List and resume past sessions
+- `/resume [n]` — Pick a past session from a numbered list and resume it
 - `/search <query>` — Search past sessions by keyword
 - `/export` — Export session as markdown
 - `/share [gist]` — Export as shareable HTML (or markdown for gist)
@@ -678,6 +783,7 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
 - `/watch <cmd>` — Auto-run command on file changes (`/watch off` to stop)
 - `/checkpoint` — Create a restorable checkpoint (git stash)
 - `/rollback [N]` — Restore from a checkpoint
+- `/rewind` — Undo conversation and/or file changes (unified menu)
 - `/continue` — Resume from last checkpoint
 - `/retry` — Re-send the last message
 - `/clean` — Delete files created this session
@@ -1598,21 +1704,85 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
         console.print("[#8899aa]Use /history <name> to resume  ·  spark --resume to continue last[/#8899aa]")
         return None
 
-    elif command == "/undo":
-        undo_dir = os.path.expanduser("~/.spark/.undo")
-        if not os.path.isdir(undo_dir):
-            console.print("[#8899aa]Nothing to undo.[/#8899aa]")
+    elif command == "/resume":
+        sessions = _list_sessions()
+        if not sessions:
+            console.print("[#8899aa]No saved sessions yet.[/#8899aa]")
             return None
-        undo_files = sorted(os.listdir(undo_dir), reverse=True)
-        if not undo_files:
-            console.print("[#8899aa]Nothing to undo.[/#8899aa]")
+        shown = sessions[:10]
+
+        def _finish_resume(chosen: dict) -> None:
+            if _resume_session_into(context, chosen["path"]):
+                label_display = f"  [#d8dee9]{chosen['label']}[/#d8dee9]" if chosen["label"] else ""
+                console.print(f"[#a3be8c]Resumed session: {chosen['name']}{label_display}[/#a3be8c]")
+                print_banner(
+                    console, config,
+                    skill_count=len(skills.all()),
+                    instruction_sources=load_instructions(os.getcwd()).sources,
+                    project_type=detect_project_type(os.getcwd()),
+                    real_model_name=getattr(model, "real_model_name", "") or None,
+                )
+            else:
+                console.print("[#bf616a]Failed to load session[/#bf616a]")
+
+        if args.strip():
+            # /resume <n> or /resume <name> — skip the picker
+            target = args.strip()
+            if target.isdigit():
+                idx = int(target) - 1
+                if idx < 0 or idx >= len(shown):
+                    console.print(f"[#bf616a]No session #{target}. Use /resume to list.[/#bf616a]")
+                    return None
+                _finish_resume(shown[idx])
+            else:
+                matches = [s for s in sessions if target in s["name"]]
+                if not matches:
+                    console.print(f"[#bf616a]No session matching '{target}'[/#bf616a]")
+                    return None
+                _finish_resume(matches[0])
             return None
 
-        # Parse count: /undo 3 → undo last 3
-        count = 1
-        if args and args.strip().isdigit():
-            count = min(int(args.strip()), len(undo_files))
-        elif args and args.strip() == "list":
+        # No args — show a numbered picker and prompt for a choice.
+        console.print("[bold #eceff4]Pick a session to resume:[/bold #eceff4]")
+        for i, sess in enumerate(shown, 1):
+            parts = []
+            if sess["age"]:
+                parts.append(f"[#8899aa]{sess['age']:<8}[/#8899aa]")
+            if sess["turns"]:
+                parts.append(f"[#8899aa]{sess['turns']} turns[/#8899aa]")
+            if sess["label"]:
+                parts.append(f"[#d8dee9]{sess['label']}[/#d8dee9]")
+            detail = "  ·  ".join(parts) if parts else ""
+            console.print(f"  [#88c0d0]{i}.[/#88c0d0] {sess['name']}  {detail}")
+
+        try:
+            answer = Prompt.ask(
+                "[#8899aa]Resume which session? (number, blank to cancel)[/#8899aa]",
+                default="",
+            )
+        except KeyboardInterrupt:
+            console.print()
+            return None
+        answer = answer.strip()
+        if not answer:
+            console.print("[#8899aa]Cancelled.[/#8899aa]")
+            return None
+        if not answer.isdigit() or not (1 <= int(answer) <= len(shown)):
+            console.print(f"[#bf616a]Invalid selection: {answer}[/#bf616a]")
+            return None
+        _finish_resume(shown[int(answer) - 1])
+        return None
+
+    elif command == "/undo":
+        if args and args.strip() == "list":
+            undo_dir = os.path.expanduser("~/.spark/.undo")
+            if not os.path.isdir(undo_dir):
+                console.print("[#8899aa]Nothing to undo.[/#8899aa]")
+                return None
+            undo_files = sorted(os.listdir(undo_dir), reverse=True)
+            if not undo_files:
+                console.print("[#8899aa]Nothing to undo.[/#8899aa]")
+                return None
             # Show undo stack
             import json as _json
             console.print("[bold #eceff4]Undo stack:[/bold #eceff4]")
@@ -1628,26 +1798,11 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
                     console.print(f"  [#88c0d0]{i}.[/#88c0d0] [#8899aa](corrupt entry)[/#8899aa]")
             return None
 
-        restored = 0
-        import json as _json
-        for uf in undo_files[:count]:
-            undo_meta_path = os.path.join(undo_dir, uf)
-            try:
-                with open(undo_meta_path, encoding="utf-8") as f:
-                    undo_data = _json.load(f)
-                original_path = undo_data["path"]
-                original_content = undo_data["content"]
-                with open(original_path, "w", encoding="utf-8") as f:
-                    f.write(original_content)
-                os.remove(undo_meta_path)
-                home = os.path.expanduser("~")
-                display = "~" + original_path[len(home):] if original_path.startswith(home) else original_path
-                console.print(f"[#a3be8c]Restored: {display}[/#a3be8c]")
-                restored += 1
-            except Exception as e:
-                console.print(f"[#bf616a]Undo failed: {e}[/#bf616a]")
-        if restored > 1:
-            console.print(f"[#a3be8c]Undid {restored} operations[/#a3be8c]")
+        # Parse count: /undo 3 → undo last 3
+        count = 1
+        if args and args.strip().isdigit():
+            count = int(args.strip())
+        _undo_last(console, count)
         return None
 
     elif command == "/pin":
@@ -1856,46 +2011,59 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
 
     elif command == "/rollback":
         # Show and restore from git stash checkpoints
-        try:
-            result = subprocess.run(
-                ["git", "stash", "list"],
-                capture_output=True, text=True, timeout=10,
-            )
-            # Keep the REAL stash ref (stash@{N}) alongside each checkpoint so
-            # the display index maps correctly even when user stashes are
-            # interleaved with checkpoints.
-            checkpoints = []  # (real_ref, description)
-            for line in result.stdout.strip().split("\n"):
-                if line and "spark-checkpoint" in line:
-                    ref = line.split(":", 1)[0].strip()  # "stash@{2}"
-                    checkpoints.append((ref, line))
-            if not checkpoints:
-                console.print("[#8899aa]No checkpoints found. Use /checkpoint first.[/#8899aa]")
+        checkpoints = _get_checkpoints()
+        if checkpoints is None:
+            console.print("[#bf616a]Git not available[/#bf616a]")
+            return None
+        if not checkpoints:
+            console.print("[#8899aa]No checkpoints found. Use /checkpoint first.[/#8899aa]")
+            return None
+
+        if args and args.strip().isdigit():
+            idx = int(args.strip())
+            _apply_checkpoint(console, checkpoints, idx)
+        else:
+            console.print("[bold #eceff4]Checkpoints:[/bold #eceff4]")
+            for i, (_ref, stash) in enumerate(checkpoints[:10]):
+                console.print(f"  [#88c0d0]{i}.[/#88c0d0] [#d8dee9]{stash}[/#d8dee9]")
+            console.print("[#8899aa]Use /rollback <number> to restore[/#8899aa]")
+        return None
+
+    elif command == "/rewind":
+        # Unified undo: conversation (last file op), files (latest
+        # checkpoint), or both. Delegates to /undo's and /rollback's own
+        # logic via the shared _undo_last/_rewind_files helpers so there's
+        # exactly one implementation of each restore action.
+        alias = {"conversation": "1", "files": "2", "both": "3"}
+        choice = args.strip().lower() if args else ""
+        choice = alias.get(choice, choice)
+        if choice and choice not in ("1", "2", "3"):
+            console.print(f"[#bf616a]Unknown /rewind option: {args.strip()}[/#bf616a]")
+            console.print("[#8899aa]Use 1 (conversation), 2 (files), or 3 (both)[/#8899aa]")
+            return None
+
+        if not choice:
+            console.print("[bold #eceff4]Rewind:[/bold #eceff4]")
+            console.print("  [#88c0d0]1.[/#88c0d0] conversation  [#8899aa]undo the last file edit[/#8899aa]")
+            console.print("  [#88c0d0]2.[/#88c0d0] files         [#8899aa]restore the latest checkpoint[/#8899aa]")
+            console.print("  [#88c0d0]3.[/#88c0d0] both")
+            try:
+                choice = Prompt.ask(
+                    "[#8899aa]Rewind what?[/#8899aa]",
+                    choices=["1", "2", "3"],
+                    default="1",
+                )
+            except KeyboardInterrupt:
+                console.print()
                 return None
 
-            if args and args.strip().isdigit():
-                idx = int(args.strip())
-                if idx < 0 or idx >= len(checkpoints):
-                    console.print(f"[#bf616a]No checkpoint {idx}. Use /rollback to list.[/#bf616a]")
-                    return None
-                real_ref = checkpoints[idx][0]
-                # `apply` (not `pop`) so the checkpoint survives and can be
-                # rolled back to again.
-                restore_result = subprocess.run(
-                    ["git", "stash", "apply", real_ref],
-                    capture_output=True, text=True, timeout=10,
-                )
-                if restore_result.returncode == 0:
-                    console.print(f"[#a3be8c]Rolled back to checkpoint {idx}[/#a3be8c]")
-                else:
-                    console.print(f"[#bf616a]{restore_result.stderr.strip()}[/#bf616a]")
-            else:
-                console.print("[bold #eceff4]Checkpoints:[/bold #eceff4]")
-                for i, (_ref, stash) in enumerate(checkpoints[:10]):
-                    console.print(f"  [#88c0d0]{i}.[/#88c0d0] [#d8dee9]{stash}[/#d8dee9]")
-                console.print("[#8899aa]Use /rollback <number> to restore[/#8899aa]")
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            console.print("[#bf616a]Git not available[/#bf616a]")
+        if choice == "1":
+            _undo_last(console, 1)
+        elif choice == "2":
+            _rewind_files(console)
+        else:
+            _undo_last(console, 1)
+            _rewind_files(console)
         return None
 
     elif command == "/profile":
