@@ -278,12 +278,16 @@ class Context:
         combined = "\n\n".join(parts)
         return [{"role": "system", "content": combined}] + self.messages
 
-    def compact(self, keep_recent: int = 6) -> str | None:
-        """Compact conversation with structured summaries.
+    def compact(self, keep_recent: int = 6, summary: str | None = None) -> str | None:
+        """Compact conversation, dropping old turns for a summary.
 
-        Instead of simple truncation, creates a structured summary that
-        preserves: files modified, key decisions, errors encountered,
-        and the overall task context.
+        When ``summary`` is provided (a model-generated recap from the agent),
+        it replaces the internally-generated mechanical digest. When it is None
+        the mechanical structured digest is built instead — the offline/test
+        fallback that preserves files modified, key decisions, errors, and the
+        overall task context. Either way boundary safety (``_safe_split_index``)
+        and pinned-file survival (pinned live in ``system_prompt``, never in
+        ``messages``) are unchanged.
         """
         if len(self.messages) <= keep_recent:
             return None
@@ -301,7 +305,39 @@ class Context:
         old = self.messages[:split]
         recent = self.messages[split:]
 
-        # Build a structured summary
+        if summary is not None:
+            # Model-generated recap replaces the mechanical digest. Wrap it under
+            # the same header so downstream (and the model on the next turn) reads
+            # it as the compacted context; the text itself is preserved verbatim.
+            summary_text = f"## Conversation Summary (compacted)\n\n{summary}"
+        else:
+            summary_text = self._mechanical_digest(old)
+
+        # Inject summary as a user message (not system — get_messages() adds
+        # the system prompt itself).
+        self.messages = [{"role": "user", "content": summary_text},
+                         {"role": "assistant",
+                          "content": "Understood, I have the conversation context."}] + recent
+        # The history just changed shape, so any server-reported prompt token
+        # count from before this compaction no longer reflects reality —
+        # stale usage must not keep reporting the pre-compaction window.
+        self.last_prompt_tokens = None
+
+        # Post-compact check
+        if self.max_tokens > 0:
+            tokens = self.estimate_tokens()
+            if tokens > self.max_tokens * 0.9 and keep_recent > 2:
+                self.compact(keep_recent=max(2, keep_recent // 2))
+
+        after_count = len(self.messages)
+        after_tokens = self.estimate_tokens()
+        freed = before_tokens - after_tokens
+        return f"Context compacted: {before_count} messages → {after_count} (freed ~{freed:,} tokens)"
+
+    def _mechanical_digest(self, old: list[dict]) -> str:
+        """Build a structured, offline digest of the ``old`` messages being
+        dropped. Used as the compaction summary when no model-generated summary
+        is supplied (offline/test fallback)."""
         files_read = set()
         files_written = set()
         files_edited = set()
@@ -375,25 +411,7 @@ class Context:
         if tools_used:
             parts.append(f"### Tools used: {', '.join(sorted(tools_used))}")
 
-        summary = "\n".join(parts)
-        # Inject summary as a user message (not system — get_messages() adds system prompt)
-        self.messages = [{"role": "user", "content": summary},
-                         {"role": "assistant", "content": "Understood, I have the conversation context."}] + recent
-        # The history just changed shape, so any server-reported prompt token
-        # count from before this compaction no longer reflects reality —
-        # stale usage must not keep reporting the pre-compaction window.
-        self.last_prompt_tokens = None
-
-        # Post-compact check
-        if self.max_tokens > 0:
-            tokens = self.estimate_tokens()
-            if tokens > self.max_tokens * 0.9 and keep_recent > 2:
-                self.compact(keep_recent=max(2, keep_recent // 2))
-
-        after_count = len(self.messages)
-        after_tokens = self.estimate_tokens()
-        freed = before_tokens - after_tokens
-        return f"Context compacted: {before_count} messages → {after_count} (freed ~{freed:,} tokens)"
+        return "\n".join(parts)
 
     def _safe_split_index(self, idx: int) -> int:
         """Move ``idx`` earlier until messages[idx:] does not start with an

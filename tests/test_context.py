@@ -398,3 +398,78 @@ class TestEstimateTokensImages:
         ctx.add_user_with_image("look", big)
         # Must be counted (not ~0), so auto-compaction can trigger on images.
         assert ctx.estimate_tokens() > 5000
+
+
+class TestCompactSummaryParam:
+    """T2: compact() accepts a model-generated summary that replaces the
+    mechanical digest, while the mechanical digest stays as the offline/test
+    fallback and all boundary/pinned safety still holds."""
+
+    def _long_history(self, ctx):
+        for i in range(20):
+            ctx.add_user(f"user message {i}")
+            ctx.add_assistant(f"assistant reply {i} with some detail")
+
+    def test_provided_summary_used_verbatim(self):
+        ctx = Context(max_tokens=0)
+        self._long_history(ctx)
+        marker = "CUSTOM_SUMMARY_MARKER_XYZ preserve the DB migration decision"
+        ctx.compact(keep_recent=6, summary=marker)
+        # The first (summary) message must carry the provided text verbatim.
+        assert ctx.messages[0]["role"] == "user"
+        assert marker in ctx.messages[0]["content"]
+
+    def test_provided_summary_skips_mechanical_digest(self):
+        ctx = Context(max_tokens=0)
+        # Give the history a distinctive tool result the mechanical digest would
+        # surface under "### Tools used". A model summary must NOT include that.
+        ctx.add_user("do a thing")
+        ctx.add_assistant_tool_calls(
+            [{"id": "c1", "name": "bash", "arguments": {"command": "ls"}}])
+        ctx.add_tool_result("c1", "bash", "ok")
+        self._long_history(ctx)
+        ctx.compact(keep_recent=6, summary="MODEL SUMMARY ONLY")
+        assert "### Tools used" not in ctx.messages[0]["content"]
+        assert "MODEL SUMMARY ONLY" in ctx.messages[0]["content"]
+
+    def test_none_summary_uses_mechanical_digest(self):
+        ctx = Context(max_tokens=0)
+        self._long_history(ctx)
+        ctx.compact(keep_recent=6, summary=None)
+        # Mechanical digest header still present when no model summary supplied.
+        assert "Conversation Summary" in ctx.messages[0]["content"]
+
+    def test_model_summary_preserves_tool_boundary(self):
+        """Boundary safety (Phase 0) must still hold when a MODEL summary is
+        used: recent[] may never begin with an orphaned tool result."""
+        ctx = Context(max_tokens=0)
+        ctx.messages = [
+            {"role": "user", "content": "do a thing"},
+            {"role": "assistant", "content": None,
+             "tool_calls": [{"id": "c1", "type": "function",
+                             "function": {"name": "read_file", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "name": "read_file",
+             "content": "data"},
+            {"role": "assistant", "content": "done"},
+            {"role": "user", "content": "another"},
+            {"role": "assistant", "content": None,
+             "tool_calls": [{"id": "c2", "type": "function",
+                             "function": {"name": "bash", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c2", "name": "bash", "content": "ok"},
+        ]
+        ctx.compact(keep_recent=1, summary="MODEL SUMMARY TEXT")
+        assert "MODEL SUMMARY TEXT" in ctx.messages[0]["content"]
+        for i, m in enumerate(ctx.messages):
+            if m.get("role") == "tool":
+                prev = ctx.messages[i - 1]
+                assert prev.get("role") == "assistant" and prev.get("tool_calls"), (
+                    f"orphaned tool result at index {i}")
+
+    def test_compact_leaves_pinned_system_prompt_intact(self):
+        """Pinned files live in system_prompt (not messages), so compaction —
+        which only touches messages — must leave them untouched (survival)."""
+        pinned_block = "<!--spark:pinned-->\nimportant pinned file\n<!--/spark:pinned-->"
+        ctx = Context(system_prompt=f"base prompt\n\n{pinned_block}", max_tokens=0)
+        self._long_history(ctx)
+        ctx.compact(keep_recent=6, summary="SUMMARY")
+        assert pinned_block in ctx.system_prompt

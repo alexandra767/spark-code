@@ -41,6 +41,64 @@ CHECKPOINT_DIR = Path.home() / ".spark" / "checkpoints"
 # Cap tool results fed back into the context window.
 MAX_TOOL_RESULT_CHARS = 15000
 
+# Per-tool result budgets (chars). Tools that gush volume (file reads, greps,
+# sub-agent transcripts) get a tighter cap than the 15K default so a single
+# noisy result can't dominate the window. Head+tail truncation semantics are
+# unchanged; only the limit differs per tool. Config-overridable via
+# `tools.result_budgets`; any tool not listed falls back to MAX_TOOL_RESULT_CHARS.
+TOOL_RESULT_BUDGETS = {
+    "read_file": 10000,
+    "bash": 15000,
+    "grep": 8000,
+    "dispatch_agent": 8000,
+}
+
+# The summary request the agent sends the model when auto-compacting. Kept as a
+# module constant so /compact and the auto-trigger share one wording.
+_COMPACT_SUMMARY_ASK = (
+    "Summarize this conversation so far for your own future reference. "
+    "Preserve: task goal, key decisions, file paths touched, unresolved items. "
+    "Under 300 words."
+)
+
+
+async def generate_compaction_summary(model, context,
+                                      instructions: str | None = None) -> str | None:
+    """Ask the model for a recap of the conversation, for auto-compaction.
+
+    Sends ONE non-streamed request (the existing model client, ``stream=False``)
+    over the current history plus a summary instruction. ``instructions`` (from
+    ``/compact <instructions>``) is folded in so the recap can focus where the
+    user asked. Returns the summary text, or ``None`` on ANY failure (error
+    chunk, exception, empty output) so the caller falls back to the mechanical
+    digest and the session never wedges. Deliberately does NOT record usage —
+    this ephemeral request must not move the context meter.
+    """
+    ask = _COMPACT_SUMMARY_ASK
+    if instructions:
+        ask += f"\n\nFocus especially on: {instructions}"
+    request_messages = context.get_messages() + [{"role": "user", "content": ask}]
+    parts: list[str] = []
+    try:
+        stream = model.chat(messages=request_messages, tools=None, stream=False)
+        try:
+            async for chunk in stream:
+                ctype = chunk.get("type")
+                if ctype == "text":
+                    parts.append(chunk.get("content", ""))
+                elif ctype == "error":
+                    # A model/transport error — discard any partial and force the
+                    # mechanical fallback rather than compacting on half a recap.
+                    return None
+        finally:
+            aclose = getattr(stream, "aclose", None)
+            if aclose is not None:
+                await aclose()
+    except Exception:
+        return None
+    text = "".join(parts).strip()
+    return text or None
+
 
 def _truncate_result(result: str, limit: int = MAX_TOOL_RESULT_CHARS) -> str:
     """Truncate an over-long tool result, keeping the head AND the tail.
@@ -152,7 +210,8 @@ class Agent:
                  on_tool_start: object | None = None,
                  tool_cache: ToolCache | None = None,
                  hooks: HookManager | None = None,
-                 on_iteration: object | None = None):
+                 on_iteration: object | None = None,
+                 result_budgets: dict[str, int] | None = None):
         self.model = model
         self.context = context
         self.tools = tools
@@ -168,6 +227,12 @@ class Agent:
         # inter-agent messages are injected without corrupting a tool exchange.
         self.on_iteration = on_iteration
         self._cancelled = False
+        # Guards against the auto-compaction summary request re-triggering
+        # compaction (which would recurse). Set only while _maybe_compact runs.
+        self._compacting = False
+        # Per-tool result char budgets: module defaults merged with any config
+        # override (tools.result_budgets). Unlisted tools use the 15K default.
+        self._result_budgets = {**TOOL_RESULT_BUDGETS, **(result_budgets or {})}
         # Seed the context's schema reserve from the tool schemas we send on
         # every request (2-4K tokens of JSON that never live in `messages`), so
         # estimate_tokens/auto-compaction budget for that fixed overhead.
@@ -180,6 +245,40 @@ class Agent:
     def cancel(self):
         """Signal the agent to stop generation (called from Ctrl+C handler)."""
         self._cancelled = True
+
+    def _budget_for(self, tool_name: str) -> int:
+        """Char budget for a tool's result, from the merged per-tool map."""
+        return self._result_budgets.get(tool_name, MAX_TOOL_RESULT_CHARS)
+
+    async def _maybe_compact(self) -> str | None:
+        """Auto-compact when the real-usage meter says we're low on room.
+
+        Fires only when the context window is a KNOWN positive size AND
+        context_left(window) < 0.25 (>75% used). The sharp edge from T1:
+        context_left() returns 0.0 for a falsy/unknown window — that must NOT be
+        read as "compact now", so an unset/zero window never compacts.
+
+        Generates the summary by asking the model (one non-streamed request);
+        on ANY failure falls back to the mechanical digest so the session never
+        wedges and no message is lost. The ``_compacting`` guard ensures the
+        summary request itself can't re-trigger compaction (recursion).
+        """
+        if self._compacting:
+            return None
+        window = self.context.max_tokens
+        if not isinstance(window, int) or window <= 0:
+            return None
+        if self.context.context_left(window) >= 0.25:
+            return None
+
+        self._compacting = True
+        try:
+            summary = await generate_compaction_summary(self.model, self.context)
+        finally:
+            self._compacting = False
+        # summary is None on model failure → compact() builds the mechanical
+        # digest instead (never wedges).
+        return self.context.compact(summary=summary)
 
     async def run_without_user_add(self) -> str:
         """Run the agent loop without adding a user message.
@@ -215,12 +314,10 @@ class Agent:
                     pass
 
             # Keep the context within budget mid-turn (tool results pile up
-            # fastest inside a single turn's many rounds). Uses the safe,
-            # tool-boundary-aware compact.
-            if (self.context.max_tokens > 0
-                    and self.context.estimate_tokens()
-                    > self.context.max_tokens * 0.9):
-                self.context.compact()
+            # fastest inside a single turn's many rounds). Uses the real-usage
+            # meter, a model-generated summary, and the safe, tool-boundary-aware
+            # compact.
+            await self._maybe_compact()
 
             # Round-limit nudges are TRANSIENT — injected into this request only,
             # never persisted (else "Finish immediately." poisons every later turn).
@@ -375,7 +472,8 @@ class Agent:
                 parallel_results = await self._execute_parallel(parallel_tcs)
                 for tc, result in zip(parallel_tcs, parallel_results):
                     self.context.add_tool_result(
-                        tc["id"], tc["name"], _truncate_result(result))
+                        tc["id"], tc["name"],
+                        _truncate_result(result, self._budget_for(tc["name"])))
             elif parallel_tcs:
                 # Single auto-allowed call — run normally
                 sequential_tcs = parallel_tcs + sequential_tcs
@@ -516,7 +614,7 @@ class Agent:
         # Truncate BEFORE caching so a cache hit returns exactly what a fresh
         # execution would (otherwise a re-read re-injects the full untruncated
         # result and blows the context window).
-        truncated = _truncate_result(result)
+        truncated = _truncate_result(result, self._budget_for(tc["name"]))
         if is_streamed_bash and len(truncated) != len(result):
             t = Text("  \u23bf ... (truncated)", style="#7b88a1")
             self.console.print(t)
@@ -602,7 +700,7 @@ class Agent:
                 self.stats.record_tool_call(tc["name"], tc["arguments"])
 
             # Truncate before caching so hits match fresh executions.
-            result = _truncate_result(result)
+            result = _truncate_result(result, self._budget_for(tc["name"]))
             if (self.tool_cache
                     and tc["name"] in self.tool_cache.CACHEABLE_TOOLS
                     and not result.startswith("Error")):

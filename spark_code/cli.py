@@ -886,12 +886,10 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
         return None
 
     elif command == "/compact":
-        compact_msg = context.compact()
-        if compact_msg:
-            console.print(f"  [#ebcb8b]⚡ {compact_msg}[/#ebcb8b]")
-        else:
-            console.print("[green]Nothing to compact.[/green]")
-        return None
+        # Compaction needs a non-streamed model call for the summary, which the
+        # async REPL runs (this handler is sync). Defer via a sentinel; any
+        # `/compact <instructions>` are folded into the summary request.
+        return f"__COMPACT__{args.strip()}"
 
     elif command == "/config":
         import yaml
@@ -2424,7 +2422,8 @@ async def run_interactive(config: dict, resume_session: str = "",
 
     agent = Agent(model, context, tools, permissions, console,
                   stats=session_stats, on_tool_start=_on_tool_start,
-                  tool_cache=tool_cache, hooks=hook_manager)
+                  tool_cache=tool_cache, hooks=hook_manager,
+                  result_budgets=get(config, "tools", "result_budgets", default=None))
 
     # Initialize team system — optionally use a faster model for workers
     task_store = TaskStore()
@@ -2823,6 +2822,16 @@ async def run_interactive(config: dict, resume_session: str = "",
                         console.print(f"\n[#bf616a]Error: {e}[/#bf616a]")
                     finally:
                         team_monitor.stop()
+                elif result.startswith("__COMPACT__"):
+                    instructions = result[len("__COMPACT__"):].strip() or None
+                    from spark_code.agent import generate_compaction_summary
+                    summary = await generate_compaction_summary(
+                        model, context, instructions)
+                    compact_msg = context.compact(summary=summary)
+                    if compact_msg:
+                        console.print(f"  [#ebcb8b]⚡ {compact_msg}[/#ebcb8b]")
+                    else:
+                        console.print("[green]Nothing to compact.[/green]")
                 elif result.startswith("__TEAM_SPAWN__"):
                     prompt = result[len("__TEAM_SPAWN__"):]
                     try:
@@ -3647,7 +3656,8 @@ async def _one_shot(config: dict, prompt: str):
     tools = build_tools()
     permissions = PermissionManager(
         mode=get(config, "permissions", "mode", default="auto"))
-    agent = Agent(model, context, tools, permissions, console)
+    agent = Agent(model, context, tools, permissions, console,
+                  result_budgets=get(config, "tools", "result_budgets", default=None))
 
     try:
         await agent.run(prompt)
