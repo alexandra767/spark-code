@@ -1,10 +1,17 @@
 """Pinned files — keep key files always in context."""
 
 import os
+import re
 
 
 class PinnedFiles:
     """Manages files that stay in context across turns."""
+
+    # Delimiters marking the single pinned-files region inside the system
+    # prompt. The region is rewritten (never appended) each turn so edited or
+    # unpinned files don't accumulate stale duplicate blocks.
+    PIN_START = "<!--spark:pinned-->"
+    PIN_END = "<!--/spark:pinned-->"
 
     def __init__(self):
         self._files: dict[str, str] = {}  # path -> content
@@ -46,7 +53,12 @@ class PinnedFiles:
                 del self._files[path]
 
     def get_context(self) -> str:
-        """Get pinned files as context string for system prompt."""
+        """Get pinned files as a delimited context block for the system prompt.
+
+        The block is wrapped in ``PIN_START``/``PIN_END`` so it can be located
+        and replaced as a single region (see ``apply_to_prompt``). Returns an
+        empty string when nothing is pinned.
+        """
         if not self._files:
             return ""
         parts = []
@@ -54,7 +66,24 @@ class PinnedFiles:
         for path, content in self._files.items():
             display = "~" + path[len(home):] if path.startswith(home) else path
             parts.append(f"### {display}\n```\n{content}\n```")
-        return "# Pinned Files (always in context)\n\n" + "\n\n".join(parts)
+        body = "# Pinned Files (always in context)\n\n" + "\n\n".join(parts)
+        return f"{self.PIN_START}\n{body}\n{self.PIN_END}"
+
+    def apply_to_prompt(self, base_prompt: str) -> str:
+        """Return ``base_prompt`` with the pinned region rewritten to the current
+        pinned content (or removed entirely when nothing is pinned).
+
+        Idempotent: any existing pinned region is stripped first, so calling this
+        every turn never accumulates duplicate or stale blocks — the defect this
+        replaces (appending a fresh copy on each content change / unpin).
+        """
+        stripped = re.sub(
+            re.escape(self.PIN_START) + r".*?" + re.escape(self.PIN_END),
+            "", base_prompt, flags=re.DOTALL).rstrip()
+        block = self.get_context()
+        if block:
+            return stripped + "\n\n" + block
+        return stripped
 
     def list(self) -> list[str]:
         return list(self._files.keys())

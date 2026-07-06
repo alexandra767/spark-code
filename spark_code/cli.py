@@ -2921,13 +2921,13 @@ async def run_interactive(config: dict, resume_session: str = "",
                 finally:
                     team_monitor.stop()
             else:
-                # Refresh pinned files before each turn
+                # Refresh pinned files before each turn and rewrite the single
+                # pinned region in the system prompt (idempotent — no duplicate/
+                # stale blocks). Runs when there's a region to update or clear.
                 if pinned.count > 0:
                     pinned.refresh()
-                    pinned_ctx = pinned.get_context()
-                    # Inject pinned files into the system prompt temporarily
-                    if pinned_ctx and pinned_ctx not in context.system_prompt:
-                        context.system_prompt = context.system_prompt.rstrip() + "\n\n" + pinned_ctx
+                if pinned.count > 0 or PinnedFiles.PIN_START in context.system_prompt:
+                    context.system_prompt = pinned.apply_to_prompt(context.system_prompt)
 
                 last_user_message = user_input
 
