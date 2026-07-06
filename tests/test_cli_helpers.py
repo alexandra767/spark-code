@@ -140,6 +140,29 @@ class TestAtMentions:
         got = _detect_file_mentions("email me at alexandra@gmail.com")
         assert "gmail.com" not in got
 
+    def test_at_mention_trailing_punctuation(self, tmp_path, monkeypatch):
+        # "look at @app.py." — the regex's character class includes ".", so
+        # the raw capture is "app.py." which fails os.path.exists; the
+        # mention must not be silently dropped for ordinary sentence
+        # punctuation.
+        (tmp_path / "app.py").write_text("x = 1")
+        monkeypatch.chdir(tmp_path)
+        got = _detect_file_mentions("look at @app.py.")
+        assert got == ["app.py"]
+
+    def test_at_mention_trailing_comma_on_directory(self, tmp_path, monkeypatch):
+        (tmp_path / "src").mkdir()
+        monkeypatch.chdir(tmp_path)
+        got = _detect_file_mentions("check @src, please")
+        assert "src" in got
+
+    def test_at_mention_path_with_trailing_punct(self, tmp_path, monkeypatch):
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "app.py").write_text("x = 1")
+        monkeypatch.chdir(tmp_path)
+        got = _detect_file_mentions("see @src/app.py.")
+        assert "src/app.py" in got
+
 
 class TestAutoReadContext:
     """@dir mentions must render as a listing, not silently vanish.

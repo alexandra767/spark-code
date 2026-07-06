@@ -398,7 +398,15 @@ def _detect_file_mentions(text: str) -> list[str]:
     # "alexandra@gmail.com" is never matched.
     at_pattern = r"(?:^|\s)@([\w./-]+)"
     for token in re.findall(at_pattern, text):
-        if os.path.exists(token) and token not in found:
+        # "see @app.py." captures "app.py." — "." is in the character class,
+        # so sentence punctuation rides along and the exists() check would
+        # silently drop the mention. Retry with trailing punctuation stripped.
+        if not os.path.exists(token):
+            stripped = token.rstrip(".,;:!?)\"'")
+            if not stripped or not os.path.exists(stripped):
+                continue
+            token = stripped
+        if token not in found:
             found.append(token)
 
     # Match common file path patterns (word.ext or path/to/file.ext)
