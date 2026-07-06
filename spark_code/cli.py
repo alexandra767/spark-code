@@ -24,6 +24,7 @@ from .config import ensure_dirs, get, load_config, set_config
 from .context import AGENTIC_PROMPT, SYSTEM_PROMPT, Context
 from .custom_tools import CustomToolRegistry
 from .hooks import HookManager
+from .instructions import load_instructions
 from .mcp.client import MCPClient
 from .mcp.registry import find_mcp_configs
 from .memory import Memory
@@ -88,6 +89,11 @@ def load_spark_md() -> str:
     """Load SPARK.md or .spark/SPARK.md from the project root.
 
     Returns the file content, or empty string if not found.
+
+    Deprecated for system-prompt/banner wiring — use
+    ``spark_code.instructions.load_instructions()`` instead, which merges
+    SPARK.md with the CLAUDE.md hierarchy (Claude Code parity). Kept here
+    because other code/tests still import it directly.
     """
     for candidate in ("SPARK.md", os.path.join(".spark", "SPARK.md")):
         path = os.path.join(os.getcwd(), candidate)
@@ -443,7 +449,7 @@ _SPARK_LOGO = """\
 
 
 def print_banner(console: Console, config: dict, mcp_count: int = 0,
-                 skill_count: int = 0, spark_md_loaded: bool = False,
+                 skill_count: int = 0, instruction_sources: list[str] | None = None,
                  project_type: str = "", real_model_name: str | None = None):
     """Print startup banner — two-column layout matching Claude Code."""
     config_name = get(config, "model", "name", default="unknown")
@@ -489,11 +495,11 @@ def print_banner(console: Console, config: dict, mcp_count: int = 0,
     right.append("Web search and fetch\n", style="#8899aa")
     right.append("Send images with /image\n", style="#8899aa")
 
-    extras = (mcp_count > 0 or skill_count > 0 or spark_md_loaded or project_type)
+    extras = (mcp_count > 0 or skill_count > 0 or instruction_sources or project_type)
     if extras:
         right.append("─" * 35 + "\n", style="#3b4252")
-        if spark_md_loaded:
-            right.append("SPARK.md loaded\n", style="#a3be8c")
+        for name in instruction_sources or []:
+            right.append(f"{name} loaded\n", style="#a3be8c")
         if project_type:
             right.append(f"{project_type}\n", style="#88c0d0")
         if mcp_count > 0:
@@ -617,7 +623,7 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
         os.system("clear" if os.name != "nt" else "cls")
         print_banner(console, config,
                      skill_count=len(skills.all()),
-                     spark_md_loaded=bool(load_spark_md()),
+                     instruction_sources=load_instructions(os.getcwd()).sources,
                      project_type=detect_project_type(os.getcwd()),
                      real_model_name=getattr(model, "real_model_name", "") or None)
         return None
@@ -1928,10 +1934,11 @@ async def run_interactive(config: dict, resume_session: str = "",
     agentic = config.get("_agentic", False)
     system_prompt = AGENTIC_PROMPT if agentic else SYSTEM_PROMPT
 
-    # Load SPARK.md project instructions
-    spark_md = load_spark_md()
-    if spark_md:
-        system_prompt += f"\n\n# Project Instructions (SPARK.md)\n{spark_md}"
+    # Load unified project instructions: SPARK.md + the CLAUDE.md hierarchy
+    # (project + global), Claude Code parity — see spark_code/instructions.py.
+    instructions = load_instructions(os.getcwd())
+    if instructions.text:
+        system_prompt += f"\n\n{instructions.text}"
 
     if memory_context:
         system_prompt += f"\n\n{memory_context}"
@@ -1954,7 +1961,7 @@ async def run_interactive(config: dict, resume_session: str = "",
     # Print banner
     print_banner(console, config, mcp_count=len(mcp_tools),
                  skill_count=len(skills.all()),
-                 spark_md_loaded=bool(spark_md),
+                 instruction_sources=instructions.sources,
                  project_type=project_type,
                  real_model_name=real_model_name)
 
