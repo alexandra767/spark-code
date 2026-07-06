@@ -588,3 +588,17 @@ Note: the `get_messages()` mutating-getter rename stays deferred (load-bearing, 
 - [ ] **Step 2:** `.venv/bin/python scripts/smoke_live.py --provider llm` — 7/7. Then `--provider coder` if `curl -s http://spark-4a54.local:11434/v1/models` lists `qwen3-coder:30b`, else documented SKIP.
 - [ ] **Step 3:** Muscle-memory live checklist via pexpect against the live engine, from a temp project containing a `CLAUDE.md` with a distinctive rule (e.g. "Always address the user as Captain"): banner shows `CLAUDE.md loaded`; a reply obeys the rule (proves injection); `@`-mention of a real file gets used without the model reading it via tool; Esc interrupts mid-generation and the session continues; `/resume` lists sessions; Shift+Tab cycles ask→auto→plan in the toolbar. Paste the transcript into the final report.
 - [ ] **Step 4:** Whole-branch review gate (controller runs it per subagent-driven-development), then merge to main + `git push origin main`.
+
+---
+
+## Amendment (2026-07-06, post-Task-4 review)
+
+1. The Task 4 `/rewind` menu labels were a plan defect: `/undo` restores FILE
+   snapshots (no conversation rewind exists in the codebase). Amended contract:
+   menu options are labeled by what they do — `1 last file edits (undo stack)`,
+   `2 checkpoint (git stash)`, `3 both`; autocomplete text "Restore files from
+   undo stack or checkpoint". True conversation rewind is recorded as a Phase 2
+   candidate (context checkpointing), not faked here.
+2. `_list_sessions()` must not parse full session JSON for every file in
+   ~/.spark/history — metadata reads are capped to the entries actually
+   displayed/matched (top-10 slice or the name-matched entry).
