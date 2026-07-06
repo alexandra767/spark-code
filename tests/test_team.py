@@ -378,3 +378,32 @@ def test_get_worker_result_none_for_unknown(tmp_path):
     """get_worker_result returns None for an unknown worker name."""
     team = _make_team(tmp_path)
     assert team.get_worker_result("nope") is None
+
+
+async def test_worker_permissions_are_non_interactive(tmp_path):
+    """Audit 2026-07-06 item 3: workers run on the SHARED event loop, so a
+    permission prompt (blocking input()) would freeze the whole session. A worker
+    in ask/auto mode must never reach _prompt_user — its PermissionManager is
+    non-interactive and auto-approves instead of prompting."""
+    from unittest.mock import patch
+
+    store = TaskStore(path=str(tmp_path / "tasks.json"))
+    team = TeamManager(model=SlowMockModel(), tools=ToolRegistry(),
+                       console=_make_console(), task_store=store,
+                       worker_permission_mode="ask")
+    w = await team.spawn("task", name="noprompt")
+    await asyncio.sleep(0.05)
+
+    perms = w.agent.permissions
+    assert perms.mode == "ask"          # mode still inherited from the lead
+    assert perms.interactive is False   # but it must not prompt
+
+    # A write that would normally prompt must auto-approve WITHOUT touching
+    # Prompt.ask (patched to raise so any prompt attempt fails the test).
+    with patch("spark_code.permissions.Prompt.ask",
+               side_effect=AssertionError("worker must not prompt")):
+        allowed = perms.check("write_file", is_read_only=False,
+                              details={"file_path": "/tmp/x", "content": "y"})
+    assert allowed is True
+
+    await team.stop_all()

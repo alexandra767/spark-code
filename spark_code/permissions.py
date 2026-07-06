@@ -116,16 +116,25 @@ def _format_permission_detail(tool_name: str, args: dict[str, Any]) -> Text:
 class PermissionManager:
     """Manages tool execution permissions."""
 
-    def __init__(self, mode: str = "ask", always_allow: list[str] | None = None):
+    def __init__(self, mode: str = "ask", always_allow: list[str] | None = None,
+                 interactive: bool = True):
         """
         Modes:
           - ask: prompt for every tool call (except always_allow)
           - auto: allow read-only tools, ask for writes
           - trust: allow everything
+
+        ``interactive`` controls what happens when a decision would otherwise
+        require a user prompt. Background workers run on the SHARED event loop,
+        where a blocking ``input()`` prompt would freeze the entire session, so
+        they build a NON-interactive manager: instead of prompting it auto-decides
+        (approves) so the worker can make progress without ever calling
+        ``_prompt_user``.
         """
         self.mode = mode
         self.always_allow = set(always_allow or [])
         self.session_allow = set()  # Tools approved this session
+        self.interactive = interactive
         self.console = Console()
 
     def check(self, tool_name: str, is_read_only: bool, details: Any = "") -> bool:
@@ -140,6 +149,11 @@ class PermissionManager:
 
         # Auto mode: allow read-only
         if self.mode == "auto" and is_read_only:
+            return True
+
+        # Non-interactive (background worker on the shared loop): never prompt —
+        # auto-decide instead so we don't block the event loop with input().
+        if not self.interactive:
             return True
 
         # Ask the user

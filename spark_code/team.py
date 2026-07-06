@@ -256,7 +256,11 @@ class TeamManager:
             system_prompt=WORKER_SYSTEM_PROMPT + team_info,
             max_tokens=32768,
         )
-        permissions = PermissionManager(mode=self.worker_permission_mode)
+        # Non-interactive: a worker runs on the shared event loop, so a blocking
+        # permission prompt would freeze the whole session. It keeps the lead's
+        # mode (for display/policy) but auto-decides instead of prompting.
+        permissions = PermissionManager(mode=self.worker_permission_mode,
+                                        interactive=False)
 
         # Create a prefixed console wrapper for worker output
         worker_console = _PrefixedConsole(self.console, worker_name)
