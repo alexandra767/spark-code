@@ -2692,13 +2692,20 @@ async def run_interactive(config: dict, resume_session: str = "",
         except Exception:
             pass
 
+        # Watch the SAME fd the ISIG block above mutates (sys.stdin), not a
+        # bare 0 — they must agree or the watcher could cbreak a different fd.
+        try:
+            _esc_fd = sys.stdin.fileno()
+        except Exception:
+            _esc_fd = 0
+
         try:
             # Esc watcher starts AFTER the ISIG mutation above and restores
             # termios attrs on __exit__ (innermost scope — before the finally
             # below restores the SIGINT handler). cbreak keeps ISIG on, so
             # Ctrl+C still delivers SIGINT. The watcher thread never touches
             # agent/task directly — it marshals _cancel onto the event loop.
-            with EscWatcher(lambda: loop.call_soon_threadsafe(_cancel)):
+            with EscWatcher(lambda: loop.call_soon_threadsafe(_cancel), fd=_esc_fd):
                 result = await task
             # The agent loop handles cancellation gracefully (closes the stream,
             # keeps the partial), so `await task` returns normally instead of

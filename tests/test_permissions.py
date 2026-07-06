@@ -237,3 +237,40 @@ class TestResolveModeName:
     def test_none_and_empty_are_not_valid(self):
         assert resolve_mode_name("") is None
         assert resolve_mode_name("   ") is None
+
+
+class TestPromptSuspendsEscWatcher:
+    """The Critical final-review finding: the permission prompt reads stdin on
+    the main thread while the Esc watcher's background thread holds cbreak and
+    drains the same fd — swallowing the user's "y". _prompt_user must suspend
+    any active watcher (pause_all) around Prompt.ask so the prompt owns stdin.
+    """
+
+    def test_prompt_user_pauses_active_watcher_around_ask(self):
+        from spark_code.ui import esc_watcher
+
+        events = []
+
+        class _FakeWatcher:
+            def pause(self):
+                events.append("pause")
+
+            def resume(self):
+                events.append("resume")
+
+        fake = _FakeWatcher()
+        esc_watcher._register(fake)
+        try:
+            pm = PermissionManager(mode="ask")
+
+            def _fake_ask(*a, **k):
+                events.append("ask")
+                return "y"
+
+            with patch("spark_code.permissions.Prompt.ask", _fake_ask):
+                assert pm._prompt_user("write_file", "writing") is True
+
+            # Watcher paused BEFORE the prompt read stdin, resumed AFTER.
+            assert events == ["pause", "ask", "resume"]
+        finally:
+            esc_watcher._unregister(fake)

@@ -253,12 +253,20 @@ class PermissionManager:
             border_style=_C_YELLOW,
         ))
 
-        choice = Prompt.ask(
-            "[y]es / [N]o / [a]lways allow this tool",
-            choices=["y", "n", "a"],
-            # Default to No so a stray Enter never approves a tool call.
-            default="n",
-        )
+        # Suspend any active Esc watcher for the duration of the prompt. Without
+        # this, the watcher's background thread holds stdin in cbreak (echo off)
+        # and drains every byte from the same fd every 50 ms — so the user's "y"
+        # is swallowed, nothing echoes, and Prompt.ask hangs (or an Esc cancels
+        # the whole turn). pause_all() restores cooked/echo termios and stops
+        # the watcher reading before Prompt.ask reads, then re-arms on exit.
+        from spark_code.ui.esc_watcher import pause_all
+        with pause_all():
+            choice = Prompt.ask(
+                "[y]es / [N]o / [a]lways allow this tool",
+                choices=["y", "n", "a"],
+                # Default to No so a stray Enter never approves a tool call.
+                default="n",
+            )
 
         if choice == "a":
             self.session_allow.add(tool_name)
