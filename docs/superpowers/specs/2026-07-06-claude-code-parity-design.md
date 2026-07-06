@@ -125,9 +125,10 @@ Deliverable: believable quality on real multi-step tasks.
   done, run the project's test/build command (detected from project type or
   CLAUDE.md). A failed verification re-enters the loop instead of ending the turn.
 
-### Phase 3 — Feel & polish
+### Phase 3 — Feel & polish + IDE interoperability
 
-Deliverable: the remaining texture of Claude Code.
+Deliverable: the remaining texture of Claude Code, usable alongside Xcode,
+Cursor, and VS Code the way Claude Code is.
 
 - Streaming markdown rendering quality (code blocks, tables) during generation.
 - `patch_stdout` for background printers (worker status, notifications) so the
@@ -138,6 +139,26 @@ Deliverable: the remaining texture of Claude Code.
   like `claude -r`).
 - Banner/toolbar refinements: context %, model real-name unmasking (verify the
   existing uncommitted-then-fixed resolve path live), git branch, mode indicator.
+
+**IDE interoperability** (how Claude Code actually "works with" IDEs — a CLI
+that behaves perfectly inside and alongside editors, not an IDE plugin):
+
+- **Embedded-terminal correctness.** Spark runs clean inside Cursor/VS Code
+  integrated terminals (prompt_toolkit rendering, keybindings, Shift+Tab, Esc)
+  — verified explicitly, since that's where Claude Code lives for most users.
+- **Editor handoff.** Detect the host editor (`$TERM_PROGRAM`, running apps):
+  file references in output become openable — `cursor --goto file:line` /
+  `code --goto` for Cursor/VS Code, `xed --line` for Xcode. Configurable
+  `ui.editor` override.
+- **Diff-in-editor option.** When inside Cursor/VS Code, offer `code --diff`
+  view of proposed edits as an alternative to the inline terminal diff.
+- **Disk-first edits (already true, keep it that way).** All edits are plain
+  file writes, so Xcode/Cursor auto-reload changes instantly — same interop
+  model as Claude Code. Nothing may buffer edits in memory.
+- **Xcode build loop.** The Phase 2 verification habit uses `xcodebuild`
+  build/test (and simulator via `simctl` where relevant) for Swift projects —
+  Spark's existing project detection already identifies them. Working next to
+  Xcode on GigLedger/Boonpoint-class projects is the acceptance scenario.
 
 ## Non-goals (explicit)
 
