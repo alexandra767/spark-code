@@ -268,6 +268,15 @@ async def test_none_arguments_rejected():
     assert "no arguments" in tool_msgs[0]["content"].lower() or "truncated" in tool_msgs[0]["content"].lower()
 
 
+def test_agent_sets_schema_reserve_from_tools():
+    """Audit 2026-07-06 item 4: the agent seeds the context's schema reserve from
+    the size of the tool schemas it sends every request, so estimate_tokens (and
+    thus auto-compaction) accounts for that fixed overhead."""
+    model = MockModel([])
+    agent = _make_agent(model, tools=[MockTool()])
+    assert agent.context.schema_reserve_tokens > 0
+
+
 async def test_interrupt_mid_tool_leaves_repairable_context():
     """Audit 2026-07-06 item 2: a CancelledError raised mid-tool (Ctrl+C during
     execution) is a BaseException that escapes the tool-exec try/except, leaving

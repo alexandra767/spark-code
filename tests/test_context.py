@@ -237,6 +237,27 @@ class TestNarrationPreserved:
         assert ctx.messages[-1]["content"] is None
 
 
+class TestSchemaReserve:
+    """Audit 2026-07-06 item 4: estimate_tokens ignored the tool-schema JSON
+    sent on EVERY request (2-4K tokens) and used an optimistic 4 chars/token, so
+    the 0.8/0.9 auto-compact thresholds fired too late and long sessions 400'd on
+    context length. The estimate now adds a schema reserve plus a tighter ratio."""
+
+    def test_schema_reserve_added_to_estimate(self):
+        without = Context(system_prompt="x")
+        without.add_user("hello world")
+        base = without.estimate_tokens()
+
+        reserved = Context(system_prompt="x")
+        reserved.add_user("hello world")
+        reserved.schema_reserve_tokens = 900
+        assert reserved.estimate_tokens() >= base + 900
+
+    def test_reserve_defaults_to_zero(self):
+        ctx = Context(system_prompt="x")
+        assert ctx.schema_reserve_tokens == 0
+
+
 class TestOrphanedToolCallSanitize:
     """Audit 2026-07-06 item 2: an interrupt (Ctrl+C) between an assistant
     tool_calls message and its tool results — or reloading a session saved in

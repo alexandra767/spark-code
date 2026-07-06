@@ -168,6 +168,14 @@ class Agent:
         # inter-agent messages are injected without corrupting a tool exchange.
         self.on_iteration = on_iteration
         self._cancelled = False
+        # Seed the context's schema reserve from the tool schemas we send on
+        # every request (2-4K tokens of JSON that never live in `messages`), so
+        # estimate_tokens/auto-compaction budget for that fixed overhead.
+        try:
+            self.context.schema_reserve_tokens = (
+                len(json.dumps(self.tools.schemas())) // 4)
+        except Exception:
+            pass
 
     def cancel(self):
         """Signal the agent to stop generation (called from Ctrl+C handler)."""

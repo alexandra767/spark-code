@@ -146,6 +146,11 @@ class Context:
         self.max_tokens = max_tokens
         self.messages: list[dict] = []
         self.turn_count = 0
+        # Fixed per-request overhead of the tool schemas (sent on EVERY request
+        # but absent from `messages`). The agent seeds this from the size of its
+        # tool schemas so estimate_tokens — and thus auto-compaction — accounts
+        # for it instead of overshooting into a context-length 400.
+        self.schema_reserve_tokens = 0
 
     def add_user(self, content: str):
         """Add a user message."""
@@ -397,7 +402,14 @@ class Context:
         self.turn_count = 0
 
     def estimate_tokens(self) -> int:
-        """Rough token estimate (4 chars ≈ 1 token)."""
+        """Rough token estimate.
+
+        Uses ~3.5 chars/token (tighter than the naive 4 — code and JSON, which
+        dominate here, tokenize denser than prose) and adds ``schema_reserve_
+        tokens`` for the tool schemas sent on every request but not stored in
+        ``messages``. Both make the estimate a safe UPPER-ish bound so
+        auto-compaction fires before the real window is exceeded.
+        """
         total = len(self.system_prompt) + len(self.platform_prompt) + len(self.provider_prompt)
         for msg in self.messages:
             content = msg.get("content", "")
@@ -417,7 +429,7 @@ class Context:
                         total += len(url)
             for tc in msg.get("tool_calls", []) or []:
                 total += len(json.dumps(tc))
-        return total // 4
+        return int(total / 3.5) + self.schema_reserve_tokens
 
     def save(self, path: str, label: str = "", cwd: str = ""):
         """Save conversation to file with metadata."""
