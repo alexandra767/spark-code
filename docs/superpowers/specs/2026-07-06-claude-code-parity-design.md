@@ -124,6 +124,14 @@ Deliverable: believable quality on real multi-step tasks.
 - **Verification habit.** System prompt + round-boundary nudges: before claiming
   done, run the project's test/build command (detected from project type or
   CLAUDE.md). A failed verification re-enters the loop instead of ending the turn.
+- **Skills that fire on an 80B.** The Claude-skills bridge (built-ins +
+  `~/.claude/skills` + plugin skills) already loads; make it *work* with the
+  local model: user-invocable skills as slash commands (`/<skill-name>` like
+  Claude Code), explicit trigger hints in the system prompt (an 80B won't
+  infer skill relevance from descriptions the way Claude does), and
+  budget-aware injection (a skill's full text only enters context when
+  invoked, never preloaded — 32K is too small to carry idle skills).
+  Verified live as part of the smoke suite.
 
 ### Phase 3 — Feel & polish + IDE interoperability
 
