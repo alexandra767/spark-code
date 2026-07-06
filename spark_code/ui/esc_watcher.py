@@ -38,7 +38,15 @@ class EscWatcher:
             import termios
             import tty
             self._saved_attrs = termios.tcgetattr(self._fd)
-            tty.setcbreak(self._fd)
+            # TCSANOW, not tty.setcbreak's default TCSAFLUSH: TCSAFLUSH blocks
+            # until pending stdout has drained AND discards any not-yet-read
+            # input before applying. If the terminal is momentarily not draining
+            # output (a fast burst filling the pty buffer), that block delays the
+            # watcher from starting and the flush eats an Esc the user already
+            # pressed — so the interrupt is silently lost. TCSANOW applies
+            # immediately without draining or discarding; already-typed input
+            # stays queued for the watcher to read (and swallow if not an Esc).
+            tty.setcbreak(self._fd, when=termios.TCSANOW)
         self._thread = threading.Thread(target=self._watch, daemon=True)
         self._thread.start()
         return self
