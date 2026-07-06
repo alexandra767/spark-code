@@ -208,7 +208,38 @@ class TestInitCommand:
         # so the real dispatch loop's "if result is None: continue" means
         # the agent is never invoked for this turn.
         assert result is None
-        assert "already exists" in deps["console"].export_text()
+        output = deps["console"].export_text()
+        assert "already exists" in output
+        # The note names the discovered path so the user knows which file wins.
+        from spark_code.instructions import _find_project_claude_md
+        expected = _find_project_claude_md(str(tmp_path))
+        assert expected is not None
+        assert "".join(expected.split()) in "".join(output.split())
+
+    def test_ancestor_claude_md_from_subdir_skips_agent(self, tmp_path, monkeypatch):
+        # Finding 3: /init must use the loader's nearest-ancestor discovery, not
+        # just $CWD/CLAUDE.md. Running it from a subdirectory of a repo that
+        # already has a root CLAUDE.md must NOT write a new one that would
+        # permanently shadow the repo's — it must detect the ancestor and skip.
+        (tmp_path / "CLAUDE.md").write_text("# Root project notes")
+        subdir = tmp_path / "pkg" / "sub"
+        subdir.mkdir(parents=True)
+        monkeypatch.chdir(subdir)
+        deps = _init_command_deps()
+
+        result = handle_slash_command(
+            "/init", deps["context"], deps["console"], deps["config"],
+            deps["skills"], deps["model"], permissions=deps["permissions"],
+        )
+
+        assert result is None  # no prompt → no shadowing CLAUDE.md written
+        output = deps["console"].export_text()
+        assert "already exists" in output
+        from spark_code.instructions import _find_project_claude_md
+        expected = _find_project_claude_md(str(subdir))
+        assert expected is not None
+        # The ancestor (root) file is the one named, not a would-be subdir path.
+        assert "".join(expected.split()) in "".join(output.split())
 
     def test_missing_claude_md_returns_prompt_for_agent(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)

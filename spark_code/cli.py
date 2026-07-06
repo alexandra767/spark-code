@@ -1666,11 +1666,16 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
         )
 
     elif command == "/init":
-        # Generate a CLAUDE.md for this project (Claude Code parity).
-        claude_md_path = os.path.join(os.getcwd(), "CLAUDE.md")
-        if os.path.isfile(claude_md_path):
+        # Generate a CLAUDE.md for this project (Claude Code parity). Use the
+        # loader's nearest-ancestor discovery, not just $CWD/CLAUDE.md: running
+        # /init from a subdirectory of a repo that already has a root CLAUDE.md
+        # would otherwise write a new subdir CLAUDE.md that permanently SHADOWS
+        # the repo one the loader actually reads.
+        from spark_code.instructions import _find_project_claude_md
+        existing_claude_md = _find_project_claude_md(os.getcwd())
+        if existing_claude_md:
             console.print(
-                "[#8899aa]CLAUDE.md already exists in this project. "
+                f"[#8899aa]CLAUDE.md already exists at {existing_claude_md}. "
                 "Remove or edit it directly if you want to regenerate it.[/#8899aa]"
             )
             return None
