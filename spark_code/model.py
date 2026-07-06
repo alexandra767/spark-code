@@ -399,14 +399,15 @@ class ModelClient:
         _req_input = 0
         _req_output = 0
 
-        # Track <think>...</think> blocks so thinking tokens are hidden. Some
-        # Qwen3 reasoning chat templates prepend a <think> opener (first tokens
-        # are mid-thought, no leading tag). Key this off the *real* model name,
-        # not a vLLM --served-model-name alias.
-        _model_lc = (self.real_model_name or self.model or "").lower()
-        _starts_in_think = any(m in _model_lc for m in
-                               ("qwen3.5", "qwen3-next", "qwen3-coder-next"))
-        _in_think = _starts_in_think
+        # Track <think>...</think> blocks so thinking tokens are hidden.
+        # Detection is CONTENT-based only: we enter think-hiding when an actual
+        # <think> opener arrives in the stream (or a dedicated reasoning_content
+        # field appears). We do NOT seed _in_think from the model name/alias —
+        # doing so misclassified non-reasoning coder models (e.g. Qwen3-Coder-
+        # Next, served as alias qwen3.5:122b) that never emit </think>, routing
+        # every content token into the hidden buffer: plain answers never
+        # streamed and narration before a tool_call was silently lost.
+        _in_think = False
         _think_buf = ""
         _think_accumulated = ""   # raw hidden thinking, for the safety-net flush
         _think_notified = False   # whether we've ever emitted a thinking indicator

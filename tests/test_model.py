@@ -144,6 +144,42 @@ class TestThinkFiltering:
         assert text == "Answer"
         assert any(c["type"] == "thinking_start" for c in out)
 
+    async def test_narration_before_tool_call_is_visible(self):
+        # Audit 2026-07-06 item 1: the primary coder model (alias qwen3.5:122b,
+        # real name qwen3-coder-next) never emits </think>. Its narration
+        # preamble that precedes a tool_call must reach the screen as visible
+        # text — not be swallowed into the hidden think buffer and lost (the
+        # safety net is gated by `not tool_calls_buffer` so it won't recover it).
+        client = await self._client(real="Qwen3-Coder-Next-int4")
+        chunks = [
+            _delta(content="Let me read the file config.py."),
+            {"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "id": "call_1",
+                 "function": {"name": "read_file",
+                              "arguments": '{"path": "config.py"}'}}]}}]},
+        ]
+        out = await _collect_stream(client, chunks)
+        text = "".join(c["content"] for c in out if c["type"] == "text")
+        assert "Let me read the file config.py." in text
+        assert any(c["type"] == "tool_call" for c in out)
+
+    async def test_plain_answer_streams_incrementally(self):
+        # Audit 2026-07-06 item 1: a multi-delta plain answer from the primary
+        # model must stream incrementally (one visible `text` chunk per delta),
+        # not buffer the entire response and dump it once via the safety net.
+        # Also asserts the tok/s counter is non-zero (was 0 in the buffered path).
+        client = await self._client(real="Qwen3-Coder-Next-int4")
+        chunks = [_delta(content="First part. "),
+                  _delta(content="Second part. "),
+                  _delta(content="Third part.")]
+        out = await _collect_stream(client, chunks)
+        text_chunks = [c for c in out if c["type"] == "text"]
+        assert len(text_chunks) >= 3, "answer must stream, not dump once at the end"
+        text = "".join(c["content"] for c in text_chunks)
+        assert text == "First part. Second part. Third part."
+        done = [c for c in out if c["type"] == "done"][0]
+        assert done["_speed"]["tokens"] > 0
+
 
 @pytest.mark.asyncio
 class TestStreamUsageAndErrors:
