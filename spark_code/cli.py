@@ -385,13 +385,25 @@ def _detect_file_mentions(text: str) -> list[str]:
     """Extract file paths mentioned in user input for auto-reading.
 
     Looks for patterns like: fix auth.py, look at src/main.rs, edit config.yaml
-    Returns list of existing file paths.
+    Also honors explicit Claude Code-style `@path` mentions (files or
+    directories), which take priority over the looser heuristic below.
+    Returns list of existing paths (mentions first, then heuristic matches).
     """
     import re
+    found = []
+
+    # `@`-prefixed mentions: @auth.py, @src/app.py, @src (dir). The
+    # (?:^|\s) guard requires the "@" to open the token (start of string or
+    # preceded by whitespace) so mid-token "@" in emails like
+    # "alexandra@gmail.com" is never matched.
+    at_pattern = r"(?:^|\s)@([\w./-]+)"
+    for token in re.findall(at_pattern, text):
+        if os.path.exists(token) and token not in found:
+            found.append(token)
+
     # Match common file path patterns (word.ext or path/to/file.ext)
     pattern = r'(?:^|\s)((?:[\w./~-]+/)?[\w.-]+\.(?:py|js|ts|jsx|tsx|rs|go|java|kt|swift|rb|c|cpp|h|hpp|css|html|yaml|yml|toml|json|md|txt|sh|sql|env))\b'
     matches = re.findall(pattern, text)
-    found = []
     for match in matches:
         path = os.path.expanduser(match)
         if not os.path.isabs(path):
@@ -399,6 +411,33 @@ def _detect_file_mentions(text: str) -> list[str]:
         if os.path.isfile(path) and path not in found:
             found.append(path)
     return found
+
+
+async def _auto_read_context(paths: list[str], console) -> str:
+    """Build auto-read context blocks for file/directory mentions.
+
+    Files are read directly. Directories can't be `open()`-ed (that raises
+    IsADirectoryError, silently swallowed by the old file-only code path),
+    so they're rendered through the `list_dir` tool instead. Returns the
+    joined context blocks (empty string if nothing could be read).
+    """
+    home = os.path.expanduser("~")
+    blocks = []
+    for fpath in paths:
+        display = "~" + fpath[len(home):] if fpath.startswith(home) else fpath
+        if os.path.isdir(fpath):
+            listing = await ListDirTool().execute(path=fpath)
+            blocks.append(f"Directory listing for {display}:\n```\n{listing}\n```")
+            console.print(f"  [#4c566a]Auto-listed: {display}[/#4c566a]")
+            continue
+        try:
+            with open(fpath, encoding="utf-8", errors="replace") as f:
+                content = f.read(10000)
+            blocks.append(f"Contents of {display}:\n```\n{content}\n```")
+            console.print(f"  [#4c566a]Auto-read: {display}[/#4c566a]")
+        except OSError:
+            pass
+    return "\n\n".join(blocks)
 
 
 def _is_error_paste(text: str) -> bool:
@@ -2988,22 +3027,12 @@ async def run_interactive(config: dict, resume_session: str = "",
                         f"```\n{user_input}\n```"
                     )
 
-                # Auto-read files mentioned in the prompt
+                # Auto-read files (and list directories) mentioned in the prompt
                 mentioned = _detect_file_mentions(user_input)
                 if mentioned:
-                    file_context = []
-                    for fpath in mentioned[:3]:  # Max 3 auto-reads
-                        try:
-                            with open(fpath, encoding="utf-8", errors="replace") as f:
-                                content = f.read(10000)
-                            home = os.path.expanduser("~")
-                            display = "~" + fpath[len(home):] if fpath.startswith(home) else fpath
-                            file_context.append(f"Contents of {display}:\n```\n{content}\n```")
-                            console.print(f"  [#4c566a]Auto-read: {display}[/#4c566a]")
-                        except OSError:
-                            pass
-                    if file_context:
-                        user_input += "\n\n" + "\n\n".join(file_context)
+                    extra_context = await _auto_read_context(mentioned[:3], console)
+                    if extra_context:
+                        user_input += "\n\n" + extra_context
 
                 # In plan mode, wrap prompt to plan first. Applies to ALL
                 # requests — a short command like "delete old tests" must not

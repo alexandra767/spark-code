@@ -138,6 +138,11 @@ class FilePathCompleter(Completer):
     Defers to the slash-command completer ONLY when the user is typing a lone
     slash-command token (e.g. "/plan"). An absolute path ("/Users/..") or a
     path argument after other text still completes.
+
+    Also activates on Claude Code-style `@path` mentions (e.g. "@src/ap"):
+    the path portion after the leading "@" is completed against the
+    filesystem, and the "@" is re-prepended to the completion text so the
+    buffer becomes "@src/app.py" rather than losing the marker.
     """
 
     def get_completions(self, document, complete_event):
@@ -154,12 +159,18 @@ class FilePathCompleter(Completer):
                 and last_word.count("/") == 1):
             return
 
-        # Only trigger on things that look like paths
-        if not ("/" in last_word or "." in last_word or last_word.startswith("~")):
+        at_mention = last_word.startswith("@")
+        path_word = last_word[1:] if at_mention else last_word
+
+        # Only trigger on things that look like paths (an "@" mention always
+        # qualifies, even before any "/" or "." has been typed).
+        if not at_mention and not (
+            "/" in last_word or "." in last_word or last_word.startswith("~")
+        ):
             return
 
         # Expand ~ and resolve the directory part
-        expanded = os.path.expanduser(last_word)
+        expanded = os.path.expanduser(path_word)
         if os.path.isdir(expanded):
             directory = expanded
             prefix = ""
@@ -175,6 +186,14 @@ class FilePathCompleter(Completer):
         except OSError:
             return
 
+        # For a bare "@name" (no "/" typed yet after the "@"), the "@" itself
+        # must be replaced along with the prefix since the completion text
+        # re-inserts it. Once a "/" has been typed ("@src/ap"), the "@" sits
+        # before the directory portion already in the buffer and is left
+        # alone — only the basename ("ap") is replaced.
+        at_prefix = "@" if (at_mention and "/" not in path_word) else ""
+        replace_len = len(prefix) + len(at_prefix)
+
         for entry in sorted(entries):
             if entry.startswith(".") and not prefix.startswith("."):
                 continue
@@ -183,13 +202,13 @@ class FilePathCompleter(Completer):
             full = os.path.join(directory, entry)
             is_dir = os.path.isdir(full)
             display_suffix = "/" if is_dir else ""
-            completion = entry + display_suffix
+            completion = at_prefix + entry + display_suffix
             yield Completion(
                 text=completion,
-                start_position=-len(prefix),
+                start_position=-replace_len,
                 display=FormattedText([
                     ("class:completion.command",
-                     f" {entry}{display_suffix} "),
+                     f" {completion} "),
                 ]),
             )
 

@@ -63,3 +63,17 @@ def test_file_completer_handles_absolute_path():
 
 def test_file_completer_handles_path_argument():
     assert _count_file("cat /tmp/") > 0
+
+
+def test_at_mention_completes_directory(tmp_path, monkeypatch):
+    (tmp_path / "src").mkdir()
+    monkeypatch.chdir(tmp_path)
+    completer = FilePathCompleter()
+    text = "fix @sr"
+    doc = Document(text=text, cursor_position=len(text))
+    completions = list(completer.get_completions(doc, None))
+    assert "@src/" in [c.text for c in completions]
+    # Accepting the completion must reconstruct the buffer with the "@" kept.
+    comp = next(c for c in completions if c.text == "@src/")
+    applied = text[:len(text) + comp.start_position] + comp.text
+    assert applied == "fix @src/"

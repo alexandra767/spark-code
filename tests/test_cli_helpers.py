@@ -5,7 +5,9 @@ from unittest.mock import MagicMock
 from rich.console import Console
 
 from spark_code.cli import (
+    _auto_read_context,
     _checkpoint_resume_note,
+    _detect_file_mentions,
     _is_shell_command,
     _redacted_config,
     _restore_checkpoint,
@@ -111,6 +113,59 @@ def _init_command_deps():
         "model": MagicMock(spec=ModelClient),
         "permissions": PermissionManager(mode="auto"),
     }
+
+
+class TestAtMentions:
+    def test_at_mention_extracted(self, tmp_path, monkeypatch):
+        (tmp_path / "auth.py").write_text("x = 1")
+        monkeypatch.chdir(tmp_path)
+        got = _detect_file_mentions("fix the bug in @auth.py please")
+        assert "auth.py" in got
+
+    def test_at_mention_with_path(self, tmp_path, monkeypatch):
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "app.py").write_text("x = 1")
+        monkeypatch.chdir(tmp_path)
+        got = _detect_file_mentions("look at @src/app.py")
+        assert "src/app.py" in got
+
+    def test_at_mention_directory(self, tmp_path, monkeypatch):
+        (tmp_path / "src").mkdir()
+        monkeypatch.chdir(tmp_path)
+        got = _detect_file_mentions("what is in @src")
+        assert "src" in got
+
+    def test_email_not_treated_as_mention(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        got = _detect_file_mentions("email me at alexandra@gmail.com")
+        assert "gmail.com" not in got
+
+
+class TestAutoReadContext:
+    """@dir mentions must render as a listing, not silently vanish.
+
+    The old inline auto-read block only ever called open(fpath), which
+    raises IsADirectoryError (an OSError subclass) on a directory and was
+    swallowed by `except OSError: pass` — directories were mentioned but
+    produced zero context. _auto_read_context adds a directory branch that
+    routes through list_dir's tool logic instead.
+    """
+
+    async def test_file_mention_reads_contents(self, tmp_path):
+        (tmp_path / "auth.py").write_text("x = 1")
+        console = Console(record=True, width=120)
+        ctx = await _auto_read_context([str(tmp_path / "auth.py")], console)
+        assert "x = 1" in ctx
+        assert "Auto-read" in console.export_text()
+
+    async def test_directory_mention_lists_contents(self, tmp_path):
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "app.py").write_text("x = 1")
+        console = Console(record=True, width=120)
+        ctx = await _auto_read_context([str(tmp_path / "src")], console)
+        assert "app.py" in ctx
+        assert "Directory listing" in ctx
+        assert "Auto-listed" in console.export_text()
 
 
 class TestInitCommand:
