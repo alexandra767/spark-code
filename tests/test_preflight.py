@@ -80,3 +80,23 @@ async def test_fetch_server_models_returns_data_list():
     payload = {"data": [{"id": "m1"}, {"id": "m2", "max_model_len": 32768}]}
     got = await fetch_server_models("http://x:30000", transport=_transport(payload))
     assert [m["id"] for m in got] == ["m1", "m2"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_server_models_disables_tls_verify_for_local_hosts(monkeypatch):
+    # Self-signed local HTTPS (e.g. https://spark-4a54.local) must keep working:
+    # resolve_real_model_name always passed verify=_should_verify_tls(base), so
+    # the unified fetch must too, or banner resolution silently dies in the
+    # except and reports None.
+    captured = {}
+    real_client = httpx.AsyncClient
+
+    def spy(*args, **kwargs):
+        captured.update(kwargs)
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr("spark_code.preflight.httpx.AsyncClient", spy)
+    got = await fetch_server_models(
+        "https://x.local:30000", transport=_transport({"data": [{"id": "m"}]}))
+    assert captured.get("verify") is False
+    assert got == [{"id": "m"}]

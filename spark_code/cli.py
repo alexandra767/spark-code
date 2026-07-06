@@ -2259,10 +2259,12 @@ async def run_interactive(config: dict, resume_session: str = "",
     # Single /v1/models fetch feeds both the real-model-name banner display
     # right below and the context-window preflight check further down —
     # startup used to hit /v1/models twice (once per consumer); now once.
+    # timeout=5.0 preserves the preflight check's original budget (the
+    # stricter of the two consumers' needs; the banner tolerates it).
     server_models = await fetch_server_models(
         get(config, "model", "endpoint", default=""),
         get(config, "model", "api_key", default=""),
-        timeout=1.5,
+        timeout=5.0,
     )
 
     # Resolve real model name (unmasks vLLM --served-model-name aliasing).

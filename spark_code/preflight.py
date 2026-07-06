@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import httpx
 
-from .model import _models_url
+from .model import _models_url, _should_verify_tls
 
 
 async def fetch_server_models(
@@ -26,7 +26,10 @@ async def fetch_server_models(
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     url = _models_url(endpoint)
     try:
-        async with httpx.AsyncClient(timeout=timeout, transport=transport) as client:
+        # Same local-host TLS bypass resolve_real_model_name used: self-signed
+        # HTTPS on localhost/.local endpoints must not fail verification.
+        async with httpx.AsyncClient(timeout=timeout, transport=transport,
+                                     verify=_should_verify_tls(endpoint)) as client:
             resp = await client.get(url, headers=headers)
             if resp.status_code != 200:
                 return None
