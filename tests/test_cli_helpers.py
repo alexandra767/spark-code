@@ -4,7 +4,9 @@ from spark_code.cli import (
     _checkpoint_resume_note,
     _is_shell_command,
     _redacted_config,
+    _restore_checkpoint,
 )
+from spark_code.context import Context
 
 
 class TestCheckpointResumeNote:
@@ -16,6 +18,30 @@ class TestCheckpointResumeNote:
         note = _checkpoint_resume_note(12)
         assert note["role"] == "user"
         assert "12" in note["content"]
+
+
+class TestRestoreCheckpoint:
+    def test_restores_turn_count_so_exit_autosave_fires(self):
+        # Audit 2026-07-06 item 7: /continue restored messages but not
+        # turn_count, so in a fresh process the exit-auto-save guard
+        # (turn_count > 0) stayed False and post-continue work was never written
+        # to ~/.spark/history.
+        ctx = Context()
+        data = {"messages": [{"role": "user", "content": "hi"},
+                             {"role": "assistant", "content": "yo"}],
+                "round_count": 3}
+        _restore_checkpoint(ctx, data)
+        assert ctx.turn_count == 3
+        assert ctx.messages[0]["content"] == "hi"
+        assert ctx.messages[-1]["role"] == "user"  # resume note
+        # The original checkpoint data must not be mutated.
+        assert len(data["messages"]) == 2
+
+    def test_turn_count_falls_back_to_message_count(self):
+        ctx = Context()
+        data = {"messages": [{"role": "user", "content": "a"}]}  # no round_count
+        _restore_checkpoint(ctx, data)
+        assert ctx.turn_count > 0
 
 
 class TestShellCommandGuard:

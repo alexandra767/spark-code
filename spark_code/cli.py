@@ -156,6 +156,20 @@ def _checkpoint_resume_note(round_count: int) -> dict:
     }
 
 
+def _restore_checkpoint(context, data: dict) -> None:
+    """Restore a checkpoint's messages into ``context`` for /continue.
+
+    Re-establishes ``turn_count`` (from the saved ``round_count``, falling back
+    to the message count) so the exit-auto-save guard (``turn_count > 0``) still
+    fires in a fresh process — otherwise post-continue work is never written to
+    history. Appends a role:"user" resume note. Copies the message list so the
+    original checkpoint data is not mutated.
+    """
+    context.messages = list(data.get("messages") or [])
+    context.turn_count = data.get("round_count") or len(context.messages)
+    context.messages.append(_checkpoint_resume_note(data.get("round_count", 0)))
+
+
 def _redacted_config(config: dict) -> dict:
     """Deep-copy config with any api_key values masked, for safe display."""
     import copy
@@ -2788,12 +2802,10 @@ async def run_interactive(config: dict, resume_session: str = "",
                     if not data:
                         console.print("  [#ebcb8b]No checkpoint found.[/#ebcb8b]")
                     else:
-                        context.messages = data["messages"]
                         saved_cwd = data.get("cwd", "")
                         if saved_cwd and saved_cwd != os.getcwd():
                             console.print(f"  [#ebcb8b]Note: CWD changed. Checkpoint was in {saved_cwd}[/#ebcb8b]")
-                        context.messages.append(
-                            _checkpoint_resume_note(data.get("round_count", 0)))
+                        _restore_checkpoint(context, data)
                         console.print(f"  [#a3be8c]Checkpoint restored ({len(data['messages'])} messages). Resuming...[/#a3be8c]")
                         try:
                             team_monitor.start()
