@@ -160,6 +160,44 @@ that behaves perfectly inside and alongside editors, not an IDE plugin):
   Spark's existing project detection already identifies them. Working next to
   Xcode on GigLedger/Boonpoint-class projects is the acceptance scenario.
 
+### Phase 4 — Beyond parity (local-stack superpowers)
+
+Deliverable: capabilities Claude Code doesn't have, enabled by owning the stack.
+All four approved 2026-07-06. Independent of each other; ship in this order
+(cheapest-first, each immediately useful):
+
+- **Headless mode.** `spark -p "<prompt>" [--output json|text] [--max-rounds N]`
+  — non-interactive single run: executes the agent loop with the configured
+  permission mode (default: auto, never prompts; refused actions are reported,
+  not asked). JSON output contract: result text, files changed, commands run,
+  token/time stats, exit code semantics (0 done / nonzero failed). This is the
+  integration surface for JARVIS, cron, and revdash-style automation.
+- **Dual-model routing.** A `utility_model` config (default: `qwen3-coder:30b`
+  via Ollama :11434) receives janitorial work: compaction summaries, session
+  labels, commit-message drafting, and read-only subagent dispatches. The 80B
+  keeps the main loop. Falls back to the primary model silently if the utility
+  endpoint is down. Mirrors Claude Code's Haiku offload pattern.
+- **RAG codebase brain.** On startup (and on demand via `/index`), index the
+  current repo into the existing RAG service (:8010) as a per-project
+  collection; expose a `code_search` tool for semantic queries alongside grep.
+  Reuse the `/projectplan` query plumbing. Apple HIG/SwiftUI doc queries stay
+  available for Swift projects. Degrades gracefully (tool absent) when :8010
+  is unreachable — Spark must work away from home.
+- **iOS vision loop.** For Swift projects: a `simulator_screenshot` tool
+  (`xcrun simctl io booted screenshot`) whose image output feeds the model's
+  vision path (image support already exists for drag-and-drop). Combined with
+  the Phase 2 verification habit, enables build → screenshot → critique →
+  iterate on SwiftUI work. Requires the vision-capable served model; feature
+  no-ops with a clear message when the active model lacks vision.
+
+Also folded in (small, no approval ceremony needed):
+- **Session → training corpus export.** Opt-in config: completed Spark sessions
+  export to `~/training-corpus` in the same shape as the existing Claude
+  UI/JARVIS corpus pipeline, feeding future LoRA training.
+- **Prefix-cache-aware prompt layout** (Phase 2 engineering rule): stable
+  system-prompt ordering (static text first, volatile context last) to maximize
+  vLLM prefix-cache hits → faster time-to-first-token on every turn.
+
 ## Non-goals (explicit)
 
 - No cloud/account features (Artifacts, web, teleport, GitHub app).
