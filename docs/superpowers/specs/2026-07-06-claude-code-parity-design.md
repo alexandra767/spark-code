@@ -212,6 +212,16 @@ All four approved 2026-07-06. Independent of each other; ship in this order
   iterate on SwiftUI work. Requires the vision-capable served model; feature
   no-ops with a clear message when the active model lacks vision.
 
+- **Browser automation via MCP (added 2026-07-06).** Claude-in-Chrome-style
+  capability: wire an existing browser MCP server (Playwright MCP or Chrome
+  DevTools MCP, stdio via npx) into Spark's MCP config so the agent can drive
+  real Chrome — navigate, click, type, read pages, screenshot. Text-first:
+  accessibility-tree snapshots work with the text-only 80B; tight per-tool
+  truncation budgets are mandatory at 32K. Screenshots route to a
+  vision-capable model (Ollama 122B or Gemini) via dual-model routing.
+  Gate: Spark's MCP stdio transport verified live against a real server
+  first (the July 2 MCP fixes have only ever run against unit-test fakes).
+
 Also folded in (small, no approval ceremony needed):
 - **Session → training corpus export.** Opt-in config: completed Spark sessions
   export to `~/training-corpus` in the same shape as the existing Claude
