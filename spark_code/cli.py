@@ -2393,19 +2393,32 @@ async def run_interactive(config: dict, resume_session: str = "",
     import time as _time
 
     async def _run_with_notify(coro):
-        """Run a coroutine as a cancellable task. Ctrl+C cancels generation."""
+        """Run a coroutine as a cancellable task. Esc or Ctrl+C cancels generation."""
         import signal as _signal
+
+        from spark_code.ui.esc_watcher import EscWatcher
 
         start = _time.monotonic()
         loop = asyncio.get_running_loop()
         task = loop.create_task(coro)
 
         prev_handler = _signal.getsignal(_signal.SIGINT)
+        interrupted = {"v": False}
 
-        def _cancel_on_sigint(sig, frame):
+        def _cancel():
+            """Stop generation: signal the agent then cancel the task.
+
+            Shared by the SIGINT handler (Ctrl+C) and the Esc watcher so both
+            interrupts follow the exact same path — closing the stream so the
+            engine stops generating (the Phase 0 GPU-stop fix). Idempotent.
+            """
+            interrupted["v"] = True
             agent.cancel()
             task.cancel()
             loop.call_soon_threadsafe(lambda: None)
+
+        def _cancel_on_sigint(sig, frame):
+            _cancel()
 
         _signal.signal(_signal.SIGINT, _cancel_on_sigint)
 
@@ -2423,7 +2436,19 @@ async def run_interactive(config: dict, resume_session: str = "",
             pass
 
         try:
-            result = await task
+            # Esc watcher starts AFTER the ISIG mutation above and restores
+            # termios attrs on __exit__ (innermost scope — before the finally
+            # below restores the SIGINT handler). cbreak keeps ISIG on, so
+            # Ctrl+C still delivers SIGINT. The watcher thread never touches
+            # agent/task directly — it marshals _cancel onto the event loop.
+            with EscWatcher(lambda: loop.call_soon_threadsafe(_cancel)):
+                result = await task
+            # The agent loop handles cancellation gracefully (closes the stream,
+            # keeps the partial), so `await task` returns normally instead of
+            # raising — surface the interrupt here for Esc AND Ctrl+C alike.
+            if interrupted["v"]:
+                console.print("\n[#ebcb8b]Interrupted[/#ebcb8b]")
+                return ""
             if notify_enabled and (_time.monotonic() - start) > 5.0:
                 _notify_done()
             return result

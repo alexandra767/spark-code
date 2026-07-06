@@ -410,7 +410,7 @@ class StreamingRenderer:
         self._start_time = time.monotonic()
         if not self._live_mode:
             return
-        self._spinner = Spinner("dots", text=Text(" Generating...", style=f"bold {_C_TOOL}"))
+        self._spinner = Spinner("dots", text=Text(" Generating...  (esc to interrupt)", style=f"bold {_C_TOOL}"))
         self._live = Live(
             console=self._console,
             refresh_per_second=8,
@@ -426,7 +426,7 @@ class StreamingRenderer:
             # Update spinner text with elapsed time (reuse same Spinner for animation)
             elapsed = self.elapsed
             if elapsed > 0.5:
-                self._spinner.update(text=Text(f" Generating... ({elapsed:.1f}s)", style=f"bold {_C_TOOL}"))
+                self._spinner.update(text=Text(f" Generating... ({elapsed:.1f}s)  (esc to interrupt)", style=f"bold {_C_TOOL}"))
             return self._spinner
         try:
             return Markdown(full, code_theme="nord-darker")
