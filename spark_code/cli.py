@@ -140,6 +140,22 @@ def _make_session_label(context) -> str:
     return ""
 
 
+def _checkpoint_resume_note(round_count: int) -> dict:
+    """Build the note appended when resuming a checkpoint via /continue.
+
+    Uses role:"user" (not "system") so it never injects a second, non-leading
+    system message — get_messages() already prepends the real system prompt at
+    index 0, and a mid-history system role is rejected by strict OpenAI-compatible
+    servers. Mirrors how compaction injects its summary as a user message.
+    """
+    return {
+        "role": "user",
+        "content": (f"Session resumed from checkpoint at round "
+                    f"{round_count}/{Agent.MAX_TOOL_ROUNDS}. "
+                    f"Continue where you left off."),
+    }
+
+
 def _redacted_config(config: dict) -> dict:
     """Deep-copy config with any api_key values masked, for safe display."""
     import copy
@@ -2776,10 +2792,8 @@ async def run_interactive(config: dict, resume_session: str = "",
                         saved_cwd = data.get("cwd", "")
                         if saved_cwd and saved_cwd != os.getcwd():
                             console.print(f"  [#ebcb8b]Note: CWD changed. Checkpoint was in {saved_cwd}[/#ebcb8b]")
-                        context.messages.append({
-                            "role": "system",
-                            "content": f"Session resumed from checkpoint at round {data['round_count']}/{Agent.MAX_TOOL_ROUNDS}. Continue where you left off."
-                        })
+                        context.messages.append(
+                            _checkpoint_resume_note(data.get("round_count", 0)))
                         console.print(f"  [#a3be8c]Checkpoint restored ({len(data['messages'])} messages). Resuming...[/#a3be8c]")
                         try:
                             team_monitor.start()

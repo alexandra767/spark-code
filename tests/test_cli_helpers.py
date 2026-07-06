@@ -1,6 +1,21 @@
 """Regression tests for pure cli.py helpers touched by the audit fixes."""
 
-from spark_code.cli import _is_shell_command, _redacted_config
+from spark_code.cli import (
+    _checkpoint_resume_note,
+    _is_shell_command,
+    _redacted_config,
+)
+
+
+class TestCheckpointResumeNote:
+    def test_resume_note_uses_user_role_not_system(self):
+        # Audit 2026-07-06 item 6: /continue previously appended a second
+        # role:"system" message mid-history (get_messages already prepends the
+        # real system prompt at index 0), which strict OpenAI-compatible servers
+        # reject. The resume note must be role:"user" (mirroring compaction).
+        note = _checkpoint_resume_note(12)
+        assert note["role"] == "user"
+        assert "12" in note["content"]
 
 
 class TestShellCommandGuard:
