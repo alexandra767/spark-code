@@ -422,6 +422,28 @@ async def test_maybe_compact_unknown_window_never_fires():
     assert len(agent.context.messages) == before
 
 
+async def test_maybe_compact_skips_summary_call_when_nothing_to_compact():
+    """High usage but a too-short history (<= keep_recent) must NOT make the
+    summary model call — compact() would keep everything anyway, so a request
+    per round would be wasted."""
+    called = {"n": 0}
+
+    class CountingModel:
+        async def chat(self, **kwargs):
+            called["n"] += 1
+            yield {"type": "text", "content": "SUMMARY"}
+            yield {"type": "done", "usage": {}}
+
+    agent = _agent_with_context(CountingModel())
+    agent.context.add_user("one giant message")  # only 1 message
+    agent.context.record_usage(int(32768 * 0.9))  # 90% used
+
+    msg = await agent._maybe_compact()
+
+    assert msg is None
+    assert called["n"] == 0, "no model call when there's nothing to compact"
+
+
 async def test_maybe_compact_recursion_guard():
     """The _compacting flag prevents the summary request from re-triggering
     compaction (which would recurse)."""

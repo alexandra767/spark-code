@@ -53,6 +53,10 @@ TOOL_RESULT_BUDGETS = {
     "dispatch_agent": 8000,
 }
 
+# How many recent messages compaction keeps verbatim (the auto-trigger and
+# Context.compact's default must agree).
+_COMPACT_KEEP_RECENT = 6
+
 # The summary request the agent sends the model when auto-compacting. Kept as a
 # module constant so /compact and the auto-trigger share one wording.
 _COMPACT_SUMMARY_ASK = (
@@ -270,6 +274,11 @@ class Agent:
             return None
         if self.context.context_left(window) >= 0.25:
             return None
+        # Nothing to compact yet (compact keeps the last 6) — skip the model
+        # summary call so a few huge messages don't trigger a wasted request
+        # every round.
+        if len(self.context.messages) <= _COMPACT_KEEP_RECENT:
+            return None
 
         self._compacting = True
         try:
@@ -278,7 +287,7 @@ class Agent:
             self._compacting = False
         # summary is None on model failure → compact() builds the mechanical
         # digest instead (never wedges).
-        return self.context.compact(summary=summary)
+        return self.context.compact(keep_recent=_COMPACT_KEEP_RECENT, summary=summary)
 
     async def run_without_user_add(self) -> str:
         """Run the agent loop without adding a user message.
