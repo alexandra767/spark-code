@@ -1,12 +1,20 @@
 """Regression tests for pure cli.py helpers touched by the audit fixes."""
 
+from unittest.mock import AsyncMock, MagicMock
+
+from rich.console import Console
+
 from spark_code.cli import (
     _checkpoint_resume_note,
     _is_shell_command,
     _redacted_config,
     _restore_checkpoint,
+    handle_slash_command,
 )
 from spark_code.context import Context
+from spark_code.model import ModelClient
+from spark_code.permissions import PermissionManager
+from spark_code.skills.base import SkillRegistry
 
 
 class TestCheckpointResumeNote:
@@ -80,3 +88,63 @@ class TestRedactedConfig:
         cfg = {"model": {"api_key": "secret"}}
         _redacted_config(cfg)
         assert cfg["model"]["api_key"] == "secret"
+
+
+def _init_command_deps():
+    """Minimal handle_slash_command dependencies for /init tests."""
+    config = {
+        "model": {
+            "endpoint": "http://localhost:11434",
+            "name": "test-model",
+            "temperature": 0.7,
+            "max_tokens": 4096,
+            "api_key": "",
+            "provider": "ollama",
+        },
+        "permissions": {"mode": "auto", "always_allow": []},
+    }
+    return {
+        "context": Context(),
+        "console": Console(record=True, width=120),
+        "config": config,
+        "skills": SkillRegistry(),
+        "model": MagicMock(spec=ModelClient),
+        "permissions": PermissionManager(mode="auto"),
+    }
+
+
+class TestInitCommand:
+    def test_existing_claude_md_prints_note_and_skips_agent(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "CLAUDE.md").write_text("# Existing project notes")
+        deps = _init_command_deps()
+
+        result = handle_slash_command(
+            "/init", deps["context"], deps["console"], deps["config"],
+            deps["skills"], deps["model"], permissions=deps["permissions"],
+        )
+
+        # Handled entirely by the command itself — no prompt for the agent,
+        # so the real dispatch loop's "if result is None: continue" means
+        # the agent is never invoked for this turn.
+        assert result is None
+        agent_run = AsyncMock()
+        agent_run.assert_not_called()
+        assert "already exists" in deps["console"].export_text()
+
+    def test_missing_claude_md_returns_prompt_for_agent(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        deps = _init_command_deps()
+
+        result = handle_slash_command(
+            "/init", deps["context"], deps["console"], deps["config"],
+            deps["skills"], deps["model"], permissions=deps["permissions"],
+        )
+
+        # No CLAUDE.md yet — /init hands a one-shot prompt back to the
+        # dispatch loop, which sends it through the existing agent object
+        # (same path as any other user message), so the model writes the
+        # file itself with write_file.
+        assert result is not None
+        assert "CLAUDE.md" in result
+        assert "write_file" in result

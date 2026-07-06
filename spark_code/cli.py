@@ -598,6 +598,7 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
 **Project**
 - `/publish [name]` — Create GitHub repo and push
 - `/new <name> [desc]` — Scaffold a new project
+- `/init` — Generate a CLAUDE.md for this project
 - `/run [command]` — Run the project (auto-detect)
 - `/git sync|pr|log|stash` — Smart git commands
 - `/memory` — View/add memory / `/memory edit`
@@ -1406,6 +1407,22 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
             f"6. End with: \"Use `/publish` to push to GitHub when ready.\"\n\n"
             f"Use write_file for all file creation. Use bash only for mkdir and git init.\n"
             f"Do not ask questions — just do it."
+        )
+
+    elif command == "/init":
+        # Generate a CLAUDE.md for this project (Claude Code parity).
+        claude_md_path = os.path.join(os.getcwd(), "CLAUDE.md")
+        if os.path.isfile(claude_md_path):
+            console.print(
+                "[#8899aa]CLAUDE.md already exists in this project. "
+                "Remove or edit it directly if you want to regenerate it.[/#8899aa]"
+            )
+            return None
+        return (
+            "Analyze this project and create a CLAUDE.md file in the project root.\n"
+            "Include: what the project is, build/test/run commands you can verify from\n"
+            "project files, code style conventions you can observe, and any directory\n"
+            "layout worth knowing. Keep it under 60 lines. Write the file with write_file."
         )
 
     elif command == "/run":

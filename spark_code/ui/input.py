@@ -50,6 +50,7 @@ _BUILTIN_COMMANDS: dict[str, str] = {
     "/projectplan go": "Execute the approved project plan",
     "/publish": "Create a GitHub repo and push (auto-detects name)",
     "/new": "Scaffold a new project with git",
+    "/init": "Generate a CLAUDE.md for this project",
     "/run": "Run the project (auto-detect or specify command)",
     "/team": "Spawn a background worker agent",
     "/tasks": "Show the shared task list",
