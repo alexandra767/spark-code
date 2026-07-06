@@ -89,8 +89,10 @@ _BUILTIN_COMMANDS: dict[str, str] = {
     "/exit": "Exit Spark Code",
 }
 
-# Mode cycle order for Shift+Tab
-_MODE_CYCLE = ["ask", "auto", "trust", "plan"]
+# Mode cycle order for Shift+Tab. Trust is NOT in the cycle — it's reachable
+# via /trust, --trust, or /mode trust — matching Claude Code, where
+# bypassPermissions is never cycled into via Shift+Tab either.
+_MODE_CYCLE = ["ask", "auto", "plan"]
 
 
 # ---------------------------------------------------------------------------
@@ -272,7 +274,12 @@ def _create_bindings(
 
     @bindings.add(Keys.BackTab)
     def _cycle_mode(event):
-        """Shift+Tab to cycle permission mode: ask → auto → trust → plan."""
+        """Shift+Tab to cycle permission mode: ask → auto → plan → ask.
+
+        Trust (bypassPermissions) is deliberately not in this cycle — same
+        as Claude Code, it's only entered explicitly (/trust, --trust,
+        /mode trust), never landed on by repeated Shift+Tab presses.
+        """
         if mode_switch_callback:
             mode_switch_callback()
 

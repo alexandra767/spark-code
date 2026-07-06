@@ -8,6 +8,8 @@ from typing import Any
 
 import yaml
 
+from .permissions import resolve_mode_name
+
 logger = logging.getLogger(__name__)
 
 _ENV_VAR_RE = re.compile(r"\$\{([^}]+)\}")
@@ -144,6 +146,17 @@ def load_config(project_dir: str | None = None,
 
     # Resolve provider into model config
     config = resolve_provider(config, provider)
+
+    # Normalize permissions.mode: accept Claude Code's mode names
+    # (default/acceptEdits/bypassPermissions) in the config file too,
+    # case-insensitively. Unrecognized values are left as-is (unchanged
+    # behavior — PermissionManager already treats any non-trust/non-auto
+    # mode string like "ask", so a typo here doesn't newly break anything).
+    perms = config.get("permissions")
+    if isinstance(perms, dict) and isinstance(perms.get("mode"), str):
+        resolved_mode = resolve_mode_name(perms["mode"])
+        if resolved_mode is not None:
+            perms["mode"] = resolved_mode
 
     return config
 

@@ -6,7 +6,7 @@ Guards the start_position bug where completing a subcommand ("/plan sh" →
 
 from prompt_toolkit.document import Document
 
-from spark_code.ui.input import FilePathCompleter, SlashCommandCompleter
+from spark_code.ui.input import _MODE_CYCLE, FilePathCompleter, SlashCommandCompleter
 
 
 def _apply(text: str):
@@ -59,6 +59,13 @@ def test_file_completer_defers_lone_slash_command():
 def test_file_completer_handles_absolute_path():
     # Absolute path (two slashes) should complete against the filesystem.
     assert _count_file("/tmp/") > 0
+
+
+def test_shift_tab_mode_cycle_matches_claude_code_order():
+    """Task 5 (Phase 1): trust leaves the Shift+Tab cycle — it matches
+    Claude Code, where bypassPermissions is never cycled into, only entered
+    explicitly (here: /trust, --trust, /mode trust)."""
+    assert _MODE_CYCLE == ["ask", "auto", "plan"]
 
 
 def test_file_completer_handles_path_argument():

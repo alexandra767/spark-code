@@ -30,7 +30,7 @@ from .mcp.client import MCPClient
 from .mcp.registry import find_mcp_configs
 from .memory import Memory
 from .model import PROVIDERS, ModelClient, resolve_real_model_name
-from .permissions import PermissionManager
+from .permissions import PermissionManager, resolve_mode_name
 from .pinned import PinnedFiles
 from .plan_executor import execute_plan
 from .platform_info import format_platform_prompt
@@ -900,6 +900,14 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
                 return None
             key_path = sub_parts[1]
             value = sub_parts[2]
+            if key_path == "permissions.mode":
+                # Accept Claude Code's mode names here too, normalized to
+                # the native name BEFORE it's persisted/applied so the
+                # saved config and the live permissions object never
+                # disagree about which name is canonical.
+                resolved_mode = resolve_mode_name(value.strip())
+                if resolved_mode is not None:
+                    value = resolved_mode
             ok, msg = set_config(config, key_path, value)
             if ok:
                 # Apply to the live objects so the change takes effect this
@@ -1209,7 +1217,10 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
             return None
         valid_modes = {"ask", "auto", "trust"}
         if command == "/mode":
-            target = args.strip() if args else ""
+            target_raw = args.strip() if args else ""
+            # Resolve Claude Code's mode names too (default/acceptEdits/
+            # bypassPermissions/plan), case-insensitively.
+            target = resolve_mode_name(target_raw)
             if target == "plan":
                 # Enter plan mode: explore with reads, prompt before writes.
                 config["_plan_mode"] = True
@@ -1222,9 +1233,9 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
                 display = "plan" if config.get("_plan_mode") else permissions.mode
                 console.print(f"[#88c0d0]Current mode:[/#88c0d0] [#d8dee9]{display}[/#d8dee9]")
                 console.print("[#8899aa]Usage: /mode <ask|auto|trust|plan>  or  shift+tab to cycle[/#8899aa]")
-                console.print("[#8899aa]  ask   — confirm every tool call[/#8899aa]")
-                console.print("[#8899aa]  auto  — allow reads, ask for writes[/#8899aa]")
-                console.print("[#8899aa]  trust — allow all tool calls[/#8899aa]")
+                console.print("[#8899aa]  ask   — confirm every tool call  (Claude Code: default)[/#8899aa]")
+                console.print("[#8899aa]  auto  — allow reads, ask for writes  (Claude Code: acceptEdits)[/#8899aa]")
+                console.print("[#8899aa]  trust — allow all tool calls  (Claude Code: bypassPermissions)[/#8899aa]")
                 console.print("[#8899aa]  plan  — plan before executing (reads free, writes prompt)[/#8899aa]")
                 return None
         else:
@@ -2490,7 +2501,14 @@ async def run_interactive(config: dict, resume_session: str = "",
         config["_plan_mode"] = active
 
     def mode_switch():
-        """Cycle modes: ask → auto → trust → plan → ask (Shift+Tab)."""
+        """Cycle modes: ask → auto → plan → ask (Shift+Tab).
+
+        Trust is not in the cycle (matches Claude Code: bypassPermissions is
+        never landed on via Shift+Tab) — it's reached only via /trust,
+        --trust, or /mode trust. If the current mode is trust when
+        Shift+Tab is pressed, it's not in _MODE_CYCLE so the index lookup
+        falls back to 0 and the next press moves to "auto".
+        """
         from .ui.input import _MODE_CYCLE
         # Sync from config in case a slash command changed plan state.
         plan_mode["active"] = bool(config.get("_plan_mode", False))

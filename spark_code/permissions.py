@@ -113,6 +113,40 @@ def _format_permission_detail(tool_name: str, args: dict[str, Any]) -> Text:
     return text
 
 
+# Native Spark Code mode names. Shift+Tab only cycles through ask/auto/plan
+# (see spark_code.ui.input._MODE_CYCLE) — trust is reachable but not cycled,
+# matching Claude Code where bypassPermissions is never in the cycle.
+NATIVE_MODES = {"ask", "auto", "trust", "plan"}
+
+# Claude Code's mode names, accepted as aliases (case-insensitive) at every
+# mode-parsing site: /mode, /config set permissions.mode, config file load.
+MODE_ALIASES = {
+    "default": "ask",
+    "acceptedits": "auto",
+    "bypasspermissions": "trust",
+    "plan": "plan",
+}
+
+
+def resolve_mode_name(name: str) -> str | None:
+    """Resolve a user/config-supplied mode name to a native mode name.
+
+    Accepts Spark Code's native names (ask/auto/trust/plan) and Claude
+    Code's names (default/acceptEdits/bypassPermissions/plan) — matching is
+    case-insensitive and ignores surrounding whitespace. Returns None for
+    anything unrecognized so callers can fall back to their existing
+    "unknown mode" handling instead of silently accepting typos.
+    """
+    if not isinstance(name, str):
+        return None
+    key = name.strip().lower()
+    if not key:
+        return None
+    if key in NATIVE_MODES:
+        return key
+    return MODE_ALIASES.get(key)
+
+
 class PermissionManager:
     """Manages tool execution permissions."""
 

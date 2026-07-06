@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 import pytest
 
-from spark_code.permissions import PermissionManager
+from spark_code.permissions import PermissionManager, resolve_mode_name
 
 
 class TestTrustMode:
@@ -207,3 +207,33 @@ def test_allows_without_prompt_false_falls_through_to_prompt_when_interactive():
     with patch.object(pm, "_prompt_user", return_value=True) as mock_prompt:
         assert pm.check("write_file", False) is True
     mock_prompt.assert_called_once()
+
+
+class TestResolveModeName:
+    """Task 5 (Phase 1): Claude Code mode-name parity. resolve_mode_name()
+    is the single place aliasing lives — used at every mode-parsing site
+    (/mode, /config set permissions.mode, config file load) so they can't
+    drift apart the way the no-prompt policy did."""
+
+    def test_claude_code_mode_aliases(self):
+        assert resolve_mode_name("default") == "ask"
+        assert resolve_mode_name("acceptEdits") == "auto"
+        assert resolve_mode_name("bypassPermissions") == "trust"
+        assert resolve_mode_name("ask") == "ask"          # native names pass through
+        assert resolve_mode_name("nonsense") is None
+
+    def test_case_insensitive(self):
+        assert resolve_mode_name("DEFAULT") == "ask"
+        assert resolve_mode_name("ACCEPTEDITS") == "auto"
+        assert resolve_mode_name("BypassPermissions") == "trust"
+        assert resolve_mode_name("AUTO") == "auto"
+        assert resolve_mode_name("Trust") == "trust"
+        assert resolve_mode_name("Plan") == "plan"
+
+    def test_native_names_all_pass_through(self):
+        for name in ("ask", "auto", "trust", "plan"):
+            assert resolve_mode_name(name) == name
+
+    def test_none_and_empty_are_not_valid(self):
+        assert resolve_mode_name("") is None
+        assert resolve_mode_name("   ") is None
