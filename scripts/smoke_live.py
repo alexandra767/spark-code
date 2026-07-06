@@ -15,6 +15,8 @@ import argparse
 import asyncio
 import json
 import os
+import random
+import re
 import subprocess
 import sys
 import tempfile
@@ -76,15 +78,22 @@ class Smoke:
                            "In hello.py, change the GREETING value from "
                            "'smoke-7f3a9' to 'spark-ok-2026' by editing the "
                            "file.", self.tmp)
+        assert rc == 0, f"exit {rc}: {out[-500:]}"
         content = open(os.path.join(self.tmp, "hello.py")).read()
         assert "spark-ok-2026" in content, \
             f"file unchanged (exit {rc}): {out[-500:]}"
 
     def c4_bash(self):
+        r = random.randint(10_000_000, 99_999_999)
+        expected = r ^ 0xA5A5
+        with open(os.path.join(self.tmp, "mystery.py"), "w") as f:
+            f.write(f"print({r} ^ 0xA5A5)\n")
         rc, out = one_shot(self.provider,
-                           'Use the bash tool to run: python3 -c "print(6*7*101)" '
-                           "and report the number it prints.", self.tmp)
-        assert "4242" in out, f"bash marker missing (exit {rc}): {out[-500:]}"
+                           "Use the bash tool to run: python3 mystery.py "
+                           "and report the exact number it prints.", self.tmp)
+        assert rc == 0, f"exit {rc}: {out[-500:]}"
+        assert str(expected) in out, \
+            f"bash marker missing (exit {rc}): {out[-500:]}"
 
     def c5_multiround(self):
         rc, out = one_shot(self.provider,
@@ -93,11 +102,21 @@ class Smoke:
                            "test_fizzbuzz.py with pytest tests for n=3,5,15,7. "
                            "Then run pytest with the bash tool and report the "
                            "result.", self.tmp)
+        assert rc == 0, f"exit {rc}: {out[-500:]}"
         assert os.path.exists(os.path.join(self.tmp, "fizzbuzz.py")), \
             f"fizzbuzz.py not created (exit {rc}): {out[-500:]}"
         assert os.path.exists(os.path.join(self.tmp, "test_fizzbuzz.py")), \
             "test file not created"
-        assert "passed" in out.lower(), f"tests not run/passed: {out[-500:]}"
+        assert re.search(r"\d+ passed", out), \
+            f"tests not run/passed: {out[-500:]}"
+        # Authoritative signal: run the generated suite ourselves rather than
+        # trust the model's self-report of the pytest result.
+        proc = subprocess.run([sys.executable, "-m", "pytest", "-q"],
+                              cwd=self.tmp, capture_output=True, text=True,
+                              timeout=60)
+        assert proc.returncode == 0, (
+            f"authoritative pytest run failed (rc={proc.returncode}): "
+            f"{(proc.stdout + proc.stderr)[-500:]}")
 
     def c6_compact_survival(self):
         asyncio.run(self._compact_survival())
@@ -147,8 +166,8 @@ class Smoke:
         ctx.save(path, label="smoke", cwd=self.tmp)
         fresh = Context()
         assert fresh.load(path), "load() returned False"
-        assert len(fresh.get_messages()) == len(ctx.get_messages()), \
-            "message count changed across save/load"
+        assert fresh.get_messages() == ctx.get_messages(), \
+            "message content changed across save/load"
 
     # -- driver ------------------------------------------------------------
 
