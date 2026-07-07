@@ -385,6 +385,148 @@ class TestCompactNotification:
         assert result is None
 
 
+class TestPatchStdoutPrompt:
+    """The REPL's blocking input prompt must run under patch_stdout so a
+    background printer (file watcher, team monitor) writing to stdout while
+    the prompt is idle draws above the input line instead of corrupting it.
+
+    Scope must be exactly the prompt call — never generation, where Rich
+    Live owns the screen (see StreamingRenderer / _run_with_notify) — so
+    these tests assert patch_stdout is active only for the duration of
+    session.prompt() and is torn down (sys.stdout restored) immediately
+    after, success or failure.
+    """
+
+    def test_stdout_patched_during_prompt_call(self):
+        import sys
+
+        from prompt_toolkit.patch_stdout import StdoutProxy
+
+        from spark_code.cli import _prompt_with_patched_stdout
+
+        original_stdout = sys.stdout
+        seen = {}
+
+        class FakeSession:
+            def prompt(self):
+                seen["stdout"] = sys.stdout
+                return "hello"
+
+        result = _prompt_with_patched_stdout(FakeSession())
+
+        assert result == "hello"
+        assert isinstance(seen["stdout"], StdoutProxy)
+        # Restored immediately after the call — never leaks into the next
+        # turn (e.g. into Rich Live's ownership of the screen).
+        assert sys.stdout is original_stdout
+
+    def test_stdout_restored_even_if_prompt_raises(self):
+        import sys
+
+        from spark_code.cli import _prompt_with_patched_stdout
+
+        original_stdout = sys.stdout
+
+        class RaisingSession:
+            def prompt(self):
+                raise EOFError()
+
+        try:
+            _prompt_with_patched_stdout(RaisingSession())
+        except EOFError:
+            pass
+
+        assert sys.stdout is original_stdout
+
+    def test_main_loop_wraps_prompt_with_patched_stdout(self):
+        """The input-loop call site delegates through the helper (not a bare
+        session.prompt()) — guards against the wiring regressing back to an
+        unpatched call during future edits to the loop."""
+        import inspect
+
+        from spark_code import cli
+
+        source = inspect.getsource(cli.run_interactive)
+        assert "_prompt_with_patched_stdout(session)" in source
+
+
+class TestStreamingMarkdownGaps:
+    """StreamingRenderer must tolerate markdown split arbitrarily across
+    streamed chunks — a fence marker split mid-token, a table row split
+    mid-cell, a heading arriving char-by-character, an interrupted
+    generation that leaves a code fence never closed — without raising.
+
+    Rich's Markdown parser treats an unclosed fence as extending to end of
+    input (CommonMark semantics), so partial code blocks render as real
+    (if incomplete) ``_SparkCodeBlock`` panels mid-stream, not raw text —
+    exactly the path that historically crashes naive streaming renderers.
+    Each case forces full (lazy) rendering of every intermediate state via
+    ``console.render(...)`` — the same work Live's refresh loop performs on
+    every tick — so a crash deep in ``_SparkCodeBlock.__rich_console__`` or
+    Rich's table/inline renderers surfaces here, then asserts the FINAL
+    ``flush()`` output (captured via a recording ``Console``, ``record=True``
+    + ``export_text()`` so syntax-highlighting ANSI codes don't fracture
+    substrings) contains the full original content.
+    """
+
+    def _run_chunks(self, chunks: list[str]) -> str:
+        console = Console(file=io.StringIO(), force_terminal=True,
+                          width=100, record=True)
+        renderer = StreamingRenderer(console, live_mode=False)
+        renderer.start()
+        for chunk in chunks:
+            renderer.feed(chunk)
+            # Force full lazy evaluation of the CURRENT partial-markdown
+            # state (what Live would paint right now) without printing it —
+            # this is where a naive renderer raises on a partial construct.
+            renderable = renderer._get_renderable()
+            list(console.render(renderable, console.options))
+        renderer.flush()
+        return console.export_text()
+
+    def test_code_fence_split_mid_marker(self):
+        # The opening ``` splits across two chunks ("``" then "`py...").
+        chunks = [
+            "``", "`py\ndef foo():\n", "    return 1\n", "``", "`\n",
+            "More text after.\n",
+        ]
+        output = self._run_chunks(chunks)
+        assert "def" in output and "foo" in output
+        assert "return" in output and "1" in output
+        assert "More text after" in output
+
+    def test_table_split_mid_row(self):
+        # A cell value ("alpha") splits mid-word across chunks, and the
+        # header/separator/row lines each arrive in more than one piece.
+        chunks = [
+            "| Name ", "| Value |\n",
+            "|------|-------|\n",
+            "| alp", "ha | 1 |\n",
+            "| beta | 2 |\n",
+        ]
+        output = self._run_chunks(chunks)
+        assert "Name" in output
+        assert "Value" in output
+        assert "alpha" in output
+        assert "beta" in output
+
+    def test_heading_char_by_char(self):
+        heading = "# Hello World\n\nBody text.\n"
+        output = self._run_chunks(list(heading))
+        assert "Hello World" in output
+        assert "Body text" in output
+
+    def test_unclosed_fence_at_flush(self):
+        """Generation interrupted (Esc/Ctrl+C) mid-code-block: flush() is
+        called with the fence never closed. Must not raise, and the partial
+        code content already streamed must still appear in the final print.
+        """
+        chunks = ["```py\n", "def foo():\n", "    return 1\n"]
+        output = self._run_chunks(chunks)
+        assert "def" in output and "foo" in output
+        assert "return" in output and "1" in output
+
+
 class TestGenerationTimer:
     def test_renderer_tracks_start_time(self):
         import io

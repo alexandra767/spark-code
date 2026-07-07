@@ -9,6 +9,7 @@ import sys
 from typing import Callable
 
 import click
+from prompt_toolkit.patch_stdout import patch_stdout
 from rich.box import ROUNDED
 from rich.console import Console
 from rich.markdown import Markdown
@@ -2325,6 +2326,30 @@ def _mode_arg_candidates() -> list[str]:
     )
 
 
+def _prompt_with_patched_stdout(session):
+    """Run ``session.prompt()`` with ``patch_stdout`` scoped to just this call.
+
+    This runs inside ``run_in_executor``'s worker thread (the same thread that
+    calls ``session.prompt()``) — prompt_toolkit's ``StdoutProxy`` captures the
+    active ``AppSession``/output at construction time and the ``PromptSession``
+    it wraps must run in that same scope, so entering ``patch_stdout`` anywhere
+    else (e.g. the event-loop thread, around the ``run_in_executor`` call
+    instead of inside it) would be relying on incidental context-propagation
+    behavior of the executor rather than a guaranteed pairing.
+
+    While this is active, anything written to ``sys.stdout``/``sys.stderr``
+    (e.g. the file watcher's or team monitor's background prints, which run as
+    ordinary asyncio tasks independent of the input loop) is drawn ABOVE the
+    prompt instead of mangling the input line. This must never wrap
+    generation — Rich ``Live`` (StreamingRenderer, started only inside
+    ``_run_with_notify``) owns the screen there, and the two scopes are
+    disjoint by construction: the main loop calls this helper only while
+    idling for input, never while a generation task is running.
+    """
+    with patch_stdout(raw=True):
+        return session.prompt()
+
+
 async def run_interactive(config: dict, resume_session: str = "",
                           continue_prompt: str = ""):
     """Run interactive CLI session.
@@ -2897,7 +2922,7 @@ async def run_interactive(config: dict, resume_session: str = "",
             try:
                 user_input = await asyncio.get_event_loop().run_in_executor(
                     None,
-                    lambda: session.prompt(),
+                    lambda: _prompt_with_patched_stdout(session),
                 )
             except EOFError:
                 break
