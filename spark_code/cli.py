@@ -26,6 +26,7 @@ from .branches import BranchManager
 from .config import ensure_dirs, get, load_config, set_config
 from .context import AGENTIC_PROMPT, SYSTEM_PROMPT, Context, build_skill_prompt_section
 from .custom_tools import CustomToolRegistry
+from .editor import detect_editor, open_in_editor
 from .hooks import HookManager
 from .instructions import load_instructions
 from .mcp.client import MCPClient
@@ -903,6 +904,7 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
 - `/undo [N]` — Undo last N file operations (`/undo list` to see stack)
 - `/pin <file>` — Pin a file to always stay in context
 - `/unpin <file>` — Remove a pinned file
+- `/open <file[:line]>` — Open a file in your editor (Cursor/VS Code/Xcode)
 - `/watch <cmd>` — Auto-run command on file changes (`/watch off` to stop)
 - `/checkpoint` — Create a restorable checkpoint (git stash)
 - `/rollback [N]` — Restore from a checkpoint
@@ -2293,6 +2295,33 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
         # path target for the diff.
         return f"__REVIEW__{args.strip()}"
 
+    elif command == "/open":
+        # Hand a file off to the host editor (Phase 3 Task 4). Never blocks
+        # or raises — every failure path (no file, no editor, launch error)
+        # is a single dim console note, same message so users always land
+        # on the same fix ("set ui.editor").
+        no_editor_note = "[#8899aa]No editor detected — set ui.editor[/#8899aa]"
+        target = args.strip()
+        if not target:
+            console.print("[#ebcb8b]Usage: /open <file[:line]>[/#ebcb8b]")
+            return None
+
+        file_part, sep, line_part = target.rpartition(":")
+        if sep and line_part.isdigit():
+            raw_path, line = file_part, int(line_part)
+        else:
+            raw_path, line = target, None
+
+        path = os.path.abspath(os.path.expanduser(raw_path))
+        if not os.path.exists(path):
+            console.print(f"[#bf616a]No such file: {path}[/#bf616a]")
+            return None
+
+        editor = _resolve_editor(config)
+        if not editor or not open_in_editor(editor, path, line):
+            console.print(no_editor_note)
+        return None
+
     # Check skills (skip /plan since we handle it above)
     skill = skills.get(command)
     if skill:
@@ -2335,6 +2364,24 @@ def _mode_arg_candidates() -> list[str]:
     return sorted(NATIVE_MODES) + sorted(
         a for a in DISPLAY_ALIASES if a.lower() not in NATIVE_MODES
     )
+
+
+def _resolve_editor(config: dict) -> str | None:
+    """Resolve the effective host editor from ``ui.editor`` (Phase 3 Task 4).
+
+    A config override ("cursor"/"code"/"xed"/"none") wins outright —
+    ``detect_editor`` is never consulted in that case, matching its own
+    "config override wins (caller passes it)" contract. "auto" (the
+    default) runs real detection via the real environment/PATH. "none"
+    (or anything unrecognized) resolves to None, which disables both
+    ``/open`` and OSC 8 file-link styling.
+    """
+    editor_cfg = get(config, "ui", "editor", default="auto")
+    if editor_cfg == "auto":
+        return detect_editor()
+    if editor_cfg in ("cursor", "code", "xed"):
+        return editor_cfg
+    return None
 
 
 def _prompt_with_patched_stdout(session):
@@ -2592,7 +2639,7 @@ async def run_interactive(config: dict, resume_session: str = "",
                   tool_cache=tool_cache, hooks=hook_manager,
                   result_budgets=get(config, "tools", "result_budgets", default=None),
                   plan_state=plan_state, test_command=test_command,
-                  skills=skills)
+                  skills=skills, editor=_resolve_editor(config))
 
     # Initialize team system — optionally use a faster model for workers
     task_store = TaskStore()
@@ -3909,7 +3956,7 @@ async def _one_shot(config: dict, prompt: str):
     test_command = detect_test_command(os.getcwd(), load_instructions(os.getcwd()).text)
     agent = Agent(model, context, tools, permissions, console,
                   result_budgets=get(config, "tools", "result_budgets", default=None),
-                  test_command=test_command)
+                  test_command=test_command, editor=_resolve_editor(config))
 
     try:
         await agent.run(prompt)

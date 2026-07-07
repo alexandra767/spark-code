@@ -38,6 +38,10 @@ DEFAULT_CONFIG = {
         # notes (Phase 3 Task 3) for why "auto" needs a runtime confirmation
         # signal, not just a pre-flight guess.
         "statusline": "auto",
+        # "auto" (detect Cursor/VS Code/Xcode via spark_code.editor.detect_editor)
+        # | "cursor" | "code" | "xed" (force one) | "none" (disable /open +
+        # OSC 8 file-link styling entirely). See spark_code/editor.py.
+        "editor": "auto",
     },
     "mcp_servers": {},
     "memory": {

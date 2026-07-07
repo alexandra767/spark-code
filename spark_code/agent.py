@@ -262,7 +262,8 @@ class Agent:
                  result_budgets: dict[str, int] | None = None,
                  plan_state: PlanState | None = None,
                  test_command: str | None = None,
-                 skills: SkillRegistry | None = None):
+                 skills: SkillRegistry | None = None,
+                 editor: str | None = None):
         self.model = model
         self.context = context
         self.tools = tools
@@ -290,6 +291,11 @@ class Agent:
         self.skills = skills
         self._skill_auto_expanded = False
         self.console = console or Console()
+        # Resolved host editor (Phase 3 Task 4 — "cursor"/"code"/"xed", or
+        # None). Threaded into render_tool_call so rendered file paths get
+        # an OSC 8 hyperlink; None (the default) keeps every existing
+        # caller's output byte-identical to before this feature existed.
+        self.editor = editor
         self.output_prefix = output_prefix
         self.stats = stats
         self.on_tool_start = on_tool_start  # callback(tool_name, args)
@@ -791,7 +797,8 @@ class Agent:
         # edit diff, permission prompt, execution). Shared with the parallel
         # path via _plan_denies so the two can't drift.
         if self._plan_denies(tc, tool):
-            render_tool_call(self.console, tc["name"], tc.get("arguments") or {})
+            render_tool_call(self.console, tc["name"], tc.get("arguments") or {},
+                            editor=self.editor)
             render_tool_denied(self.console, tc["name"])
             self.context.add_tool_result(tc["id"], tc["name"], PLAN_DENIAL)
             return
@@ -801,7 +808,7 @@ class Agent:
             result = (f"Error: Tool '{tc['name']}' called with no arguments. "
                       "The response may have been truncated due to token limits.")
             self.context.add_tool_result(tc["id"], tc["name"], result)
-            render_tool_call(self.console, tc["name"], tc["arguments"])
+            render_tool_call(self.console, tc["name"], tc["arguments"], editor=self.editor)
             render_tool_error(self.console, tc["name"],
                               "Missing arguments — response may have been truncated")
             return
@@ -831,7 +838,7 @@ class Agent:
         if not self.permissions.check(tc["name"], tool.is_read_only,
                                       tc["arguments"]):
             result = self.permissions.last_denial_reason or "Permission denied by user."
-            render_tool_call(self.console, tc["name"], tc["arguments"])
+            render_tool_call(self.console, tc["name"], tc["arguments"], editor=self.editor)
             render_tool_denied(self.console, tc["name"])
             self.context.add_tool_result(tc["id"], tc["name"], result)
             return
@@ -850,7 +857,7 @@ class Agent:
                 f"before_{tc['name']}", hook_ctx, self.console)
 
         # Display tool call
-        render_tool_call(self.console, tc["name"], tc["arguments"])
+        render_tool_call(self.console, tc["name"], tc["arguments"], editor=self.editor)
 
         # Check cache for read-only tools
         if (self.tool_cache
@@ -989,7 +996,7 @@ class Agent:
                     f"before_{tc['name']}", {"tool": tc["name"], **tc["arguments"]},
                     self.console)
 
-            render_tool_call(self.console, tc["name"], tc["arguments"])
+            render_tool_call(self.console, tc["name"], tc["arguments"], editor=self.editor)
 
             try:
                 result = await tool.execute(**tc["arguments"])

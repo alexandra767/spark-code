@@ -13,6 +13,7 @@ Uses Nord-inspired colors matching Claude Code's palette:
 """
 
 import os
+import sys
 import time
 from typing import Any
 
@@ -25,6 +26,8 @@ from rich.rule import Rule
 from rich.spinner import Spinner
 from rich.syntax import Syntax
 from rich.text import Text
+
+from ..editor import file_link
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -101,13 +104,21 @@ def _tool_label(name: str) -> str:
     return _TOOL_LABELS.get(name, name)
 
 
-def _format_tool_args(name: str, args: dict[str, Any]) -> Text:
-    """Format tool arguments — Claude Code style per-tool formatting."""
+def _format_tool_args(name: str, args: dict[str, Any], editor: str | None = None) -> Text:
+    """Format tool arguments — Claude Code style per-tool formatting.
+
+    ``editor`` (Phase 3 Task 4) is None by default — every path renders with
+    the plain ``_C_PATH`` style, byte-identical to before this feature. Only
+    a caller that resolved a real editor (config/detection) and knows stdout
+    is a live terminal passes a non-None value, which layers an OSC 8
+    hyperlink onto the SAME style string (see ``_path_style``) — the
+    rendered path TEXT never changes, only its style.
+    """
     text = Text()
 
     if name == "read_file":
         path = args.get("file_path", "")
-        text.append(_abbreviate_path(path), style=_C_PATH)
+        text.append(_abbreviate_path(path), style=_path_style(path, editor))
         extras = []
         if args.get("offset"):
             extras.append(f"offset={args['offset']}")
@@ -120,12 +131,12 @@ def _format_tool_args(name: str, args: dict[str, Any]) -> Text:
         path = args.get("file_path", "")
         content = args.get("content", "")
         line_count = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
-        text.append(_abbreviate_path(path), style=_C_PATH)
+        text.append(_abbreviate_path(path), style=_path_style(path, editor))
         text.append(f"  ({line_count} lines)", style=_C_DIM)
 
     elif name == "edit_file":
         path = args.get("file_path", "")
-        text.append(_abbreviate_path(path), style=_C_PATH)
+        text.append(_abbreviate_path(path), style=_path_style(path, editor))
         old = args.get("old_string", "")
         new = args.get("new_string", "")
         old_lines = old.count("\n") + (1 if old else 0)
@@ -149,7 +160,7 @@ def _format_tool_args(name: str, args: dict[str, Any]) -> Text:
         path = args.get("path", "")
         if path:
             text.append("  in ", style=_C_DIM)
-            text.append(_abbreviate_path(path), style=_C_PATH)
+            text.append(_abbreviate_path(path), style=_path_style(path, editor))
         file_glob = args.get("glob", "")
         if file_glob:
             text.append(f"  ({file_glob})", style=_C_DIM)
@@ -160,11 +171,11 @@ def _format_tool_args(name: str, args: dict[str, Any]) -> Text:
         path = args.get("path", "")
         if path:
             text.append("  in ", style=_C_DIM)
-            text.append(_abbreviate_path(path), style=_C_PATH)
+            text.append(_abbreviate_path(path), style=_path_style(path, editor))
 
     elif name == "list_dir":
         path = args.get("path", args.get("directory", ""))
-        text.append(_abbreviate_path(path) if path else ".", style=_C_PATH)
+        text.append(_abbreviate_path(path) if path else ".", style=_path_style(path, editor))
 
     elif name == "web_search":
         query = args.get("query", "")
@@ -206,17 +217,61 @@ def _abbreviate_path(path: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# OSC 8 file links (Phase 3 Task 4)
+# ---------------------------------------------------------------------------
+
+def _should_linkify(editor: str | None, isatty=None) -> bool:
+    """Gate for OSC 8 hyperlinks on rendered file paths: an editor must be
+    resolved (not None/"none") AND stdout must be a real terminal.
+
+    ``isatty`` is an injectable zero-arg callable for tests (defaults to
+    ``sys.stdout.isatty``) — piped/redirected output and test consoles
+    (which capture to a StringIO, not a real tty) get plain paths, same as
+    before this feature existed.
+    """
+    if not editor or editor == "none":
+        return False
+    check = isatty if isatty is not None else sys.stdout.isatty
+    try:
+        return bool(check())
+    except Exception:
+        return False
+
+
+def _path_style(path: str, editor: str | None, isatty=None) -> str:
+    """Base path style (``_C_PATH``), optionally layered with an OSC 8
+    hyperlink (Rich's ``"<style> link <url>"`` syntax). ``editor`` defaults
+    to None everywhere it isn't explicitly threaded through, which keeps
+    ``_should_linkify`` False and this function byte-identical to the
+    pre-Task-4 ``_C_PATH``-only style — existing rendering tests (none of
+    which pass ``editor``) are unaffected.
+    """
+    if not path or not _should_linkify(editor, isatty=isatty):
+        return _C_PATH
+    try:
+        return f"{_C_PATH} link {file_link(path)}"
+    except Exception:
+        return _C_PATH
+
+
+# ---------------------------------------------------------------------------
 # Tool-call rendering
 # ---------------------------------------------------------------------------
 
-def render_tool_call(console: Console, name: str, args: dict[str, Any] | str = ""):
-    """Render a tool invocation — Claude Code style."""
+def render_tool_call(console: Console, name: str, args: dict[str, Any] | str = "",
+                     editor: str | None = None):
+    """Render a tool invocation — Claude Code style.
+
+    ``editor`` (Phase 3 Task 4): the resolved host editor ("cursor"/"code"/
+    "xed") to link rendered file paths to via OSC 8, or None (default) to
+    render plain paths exactly as before this feature existed.
+    """
     label = _tool_label(name)
 
     if isinstance(args, str):
         args_text = Text(args, style=_C_TEXT)
     else:
-        args_text = _format_tool_args(name, args)
+        args_text = _format_tool_args(name, args, editor=editor)
 
     header = Text()
     header.append(f"  {label} ", style=_C_TOOL_BOLD)

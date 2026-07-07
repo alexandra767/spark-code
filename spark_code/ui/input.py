@@ -64,6 +64,7 @@ _BUILTIN_COMMANDS: dict[str, str] = {
     "/undo": "Undo last file write/edit",
     "/pin": "Pin a file to always stay in context",
     "/unpin": "Remove a pinned file",
+    "/open": "Open a file (optionally file:line) in your editor",
     "/git": "Smart git: /git sync, /git pr, /git log",
     "/fork": "Branch the conversation (save + start fresh)",
     "/snippet": "Save/run reusable prompts",
