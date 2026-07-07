@@ -114,16 +114,54 @@ RESERVED_COMMAND_NAMES = frozenset(
 class SlashCommandCompleter(Completer):
     """Completions triggered only when input starts with '/'."""
 
-    def __init__(self, commands: dict[str, str] | None = None):
+    def __init__(
+        self,
+        commands: dict[str, str] | None = None,
+        value_providers: dict[str, Callable[[], list[str]]] | None = None,
+    ):
         super().__init__()
         self._commands: dict[str, str] = dict(_BUILTIN_COMMANDS)
         if commands:
             self._commands.update(commands)
+        # Zero-arg callables, keyed by command name (e.g. "/model"), returning
+        # candidate argument strings — called lazily per keystroke (Phase 3
+        # Task 1) so a slow or failing provider (e.g. session listing, a
+        # config read) never blocks typing.
+        self._value_providers: dict[str, Callable[[], list[str]]] = dict(
+            value_providers or {}
+        )
 
     def get_completions(self, document, complete_event):
         text = document.text_before_cursor.lstrip()
         if not text.startswith("/"):
             return
+
+        # Argument completion: "<command> <partial-arg>" where <command> has
+        # a registered value provider. This must be checked before the
+        # whole-phrase command matching below and must compute
+        # start_position from the PARTIAL ARG's length only — never the
+        # full text — or accepting a completion corrupts the command portion
+        # the same way the subcommand bug below once did (e.g. "/model co"
+        # must become "/model coder", not "/mod/model coder").
+        if " " in text:
+            cmd, _, rest = text.partition(" ")
+            provider = self._value_providers.get(cmd)
+            if provider is not None:
+                partial = rest.rsplit(" ", 1)[-1]
+                try:
+                    candidates = provider()
+                except Exception:
+                    candidates = []
+                for value in candidates:
+                    if value.startswith(partial) and value != partial:
+                        yield Completion(
+                            text=value,
+                            start_position=-len(partial),
+                            display=FormattedText([
+                                ("class:completion.command", f" {value} "),
+                            ]),
+                        )
+                return
 
         # Match against the ENTIRE slash phrase typed so far, not just the first
         # token — otherwise completing "/plan sh" → "/plan show" replaces only
@@ -316,6 +354,7 @@ def create_session(
     team_display_callback: Callable | None = None,
     mode_switch_callback: Callable | None = None,
     command_descriptions: dict[str, str] | None = None,
+    value_providers: dict[str, Callable[[], list[str]]] | None = None,
 ) -> PromptSession:
     """Create a prompt session with slash-command autocomplete and
     a persistent bottom toolbar.
@@ -352,7 +391,9 @@ def create_session(
         # win" precedence, just for autocomplete instead of dispatch.
         if name not in extra_commands and name not in _BUILTIN_COMMANDS:
             extra_commands[name] = ""
-    slash_completer = SlashCommandCompleter(commands=extra_commands)
+    slash_completer = SlashCommandCompleter(
+        commands=extra_commands, value_providers=value_providers
+    )
     file_completer = FilePathCompleter()
     completer = merge_completers([slash_completer, file_completer])
 

@@ -110,3 +110,34 @@ def test_at_mention_completes_directory(tmp_path, monkeypatch):
     comp = next(c for c in completions if c.text == "@src/")
     applied = text[:len(text) + comp.start_position] + comp.text
     assert applied == "fix @src/"
+
+
+def _completions(completer, text):
+    doc = Document(text, cursor_position=len(text))
+    return [c.text for c in completer.get_completions(doc, None)]
+
+
+def test_argument_completion_from_provider():
+    c = SlashCommandCompleter(value_providers={"/model": lambda: ["llm", "coder", "gemini"]})
+    got = _completions(c, "/model co")
+    assert any(x.endswith("coder") for x in got)
+    assert not any(x.endswith("gemini") for x in got)
+
+
+def test_argument_completion_lists_all_on_bare_space():
+    c = SlashCommandCompleter(value_providers={"/model": lambda: ["llm", "coder"]})
+    got = _completions(c, "/model ")
+    assert len(got) == 2
+
+
+def test_provider_exception_yields_no_completions():
+    def boom():
+        raise RuntimeError("x")
+    c = SlashCommandCompleter(value_providers={"/model": boom})
+    assert _completions(c, "/model l") == []
+
+
+def test_command_completion_unchanged_without_arg():
+    c = SlashCommandCompleter(value_providers={"/model": lambda: ["llm"]})
+    got = _completions(c, "/mod")
+    assert any("/model" in x for x in got)

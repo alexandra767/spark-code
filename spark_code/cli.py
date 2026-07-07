@@ -6,6 +6,7 @@ import mimetypes
 import os
 import subprocess
 import sys
+from typing import Callable
 
 import click
 from rich.box import ROUNDED
@@ -2741,6 +2742,28 @@ async def run_interactive(config: dict, resume_session: str = "",
         team_manager.status, console, display_fn=team_display
     )
 
+    def _resume_names_provider() -> list[str]:
+        # _list_sessions is defined earlier in this same module, so this
+        # reference is already lazy by construction (looked up at call time,
+        # not at lambda-creation time) — no separate import needed to dodge
+        # a cycle, unlike a provider sourced from another module.
+        return [s["name"] for s in _list_sessions()[:_SESSION_DISPLAY_LIMIT]]
+
+    # Argument-aware autocomplete (Phase 3 Task 1): providers are called
+    # lazily per keystroke by SlashCommandCompleter, which already swallows
+    # exceptions — so a stale config or a session-listing hiccup can only
+    # cost a missing suggestion, never a crashed prompt.
+    value_providers: dict[str, Callable[[], list[str]]] = {
+        "/model": lambda: list(config.get("providers", {}).keys()),
+        "/providers": lambda: list(config.get("providers", {}).keys()),
+        "/mode": lambda: [
+            "ask", "auto", "plan", "trust",
+            "default", "acceptEdits", "bypassPermissions",
+        ],
+        "/resume": _resume_names_provider,
+        "/rewind": lambda: ["undo", "checkpoint", "both"],
+    }
+
     # Input session with history, autocomplete, and status footer
     session = create_session(
         skill_names=skills.names(),
@@ -2749,6 +2772,7 @@ async def run_interactive(config: dict, resume_session: str = "",
         team_callback=team_callback,
         team_display_callback=team_display,
         mode_switch_callback=mode_switch,
+        value_providers=value_providers,
     )
 
     # Notification sound config
