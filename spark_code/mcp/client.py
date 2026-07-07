@@ -1,5 +1,6 @@
 """MCP client — connects to MCP servers and exposes their tools."""
 
+import asyncio
 from typing import Any
 
 from ..tools.base import Tool
@@ -108,6 +109,18 @@ class MCPClient:
 
             return mcp_tools
 
+        except asyncio.CancelledError:
+            # A cancellation (e.g. an outer asyncio.wait_for timeout firing
+            # while we're awaiting `initialize`) raises CancelledError, which
+            # is a BaseException — NOT caught by the `except Exception` below.
+            # Without this branch the transport (and its spawned subprocess +
+            # reader/stderr tasks) would be orphaned, since it isn't yet in
+            # self.servers to be torn down by disconnect_all. stop() is
+            # idempotent and safe even when the handshake never completed
+            # (it guards a None process), then we re-raise so the cancellation
+            # keeps propagating.
+            await transport.stop()
+            raise
         except Exception as e:
             await transport.stop()
             raise RuntimeError(f"Failed to connect to MCP server '{name}': {e}")

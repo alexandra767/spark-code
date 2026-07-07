@@ -409,6 +409,61 @@ class TestMcpServers:
         assert "1/2" in mcp.detail
         assert "did not respond" in mcp.detail
 
+    async def test_timed_out_stdio_connect_tears_down_subprocess(self, monkeypatch):
+        """A stdio server that never answers `initialize` must NOT leak its
+        subprocess when the per-server timeout cancels the connect.
+
+        This exercises the REAL _default_mcp_connect + a real spawned process
+        (`sleep`, which accepts the spawn but never speaks JSON-RPC), unlike
+        the pure-asyncio sleep connectors above which spawn nothing. The
+        timeout cancellation raises CancelledError (a BaseException) inside
+        MCPClient.connect's `initialize` await; if connect's cleanup isn't
+        cancellation-aware, transport.stop() is skipped and the subprocess is
+        orphaned — the zombie-process class this fix closes.
+        """
+        from spark_code import doctor as doctor_mod
+        from spark_code.mcp.transport import StdioTransport
+
+        created: list[StdioTransport] = []
+        real_init = StdioTransport.__init__
+
+        def recording_init(self, *args, **kwargs):
+            real_init(self, *args, **kwargs)
+            created.append(self)
+
+        monkeypatch.setattr(StdioTransport, "__init__", recording_init)
+        monkeypatch.setattr("spark_code.doctor.load_keys", lambda: {})
+        monkeypatch.setattr(doctor_mod, "_MCP_TIMEOUT", 0.3)
+        payload = {"data": [{"id": "qwen3.5:122b"}]}
+        config = _base_config(
+            mcp_servers={"stuck": {"command": "sleep", "args": ["60"]}})
+
+        try:
+            checks = await run_doctor(
+                config, transport=_transport(payload), utility_transport=_transport(payload),
+                rag_transport=_transport({"status": "ok"}),
+                mcp_connector=None,  # the REAL _default_mcp_connect, spawns a process
+                git_runner=_FakeGitRunner(),
+            )
+            mcp = next(c for c in checks if c.name == "MCP servers")
+            assert mcp.status == "fail"
+            assert "did not respond" in mcp.detail
+            # The subprocess spawned for the stuck server must have been torn
+            # down — returncode set means terminated + reaped, not orphaned.
+            assert created, "expected a StdioTransport to have been spawned"
+            for t in created:
+                assert t.process is not None
+                assert t.process.returncode is not None, (
+                    "MCP subprocess leaked — not terminated after timeout cancel")
+        finally:
+            # Safety net: a RED run (bug present) would otherwise leave a real
+            # `sleep 60` orphan behind — clean up any survivor explicitly.
+            for t in created:
+                try:
+                    await t.stop()
+                except Exception:
+                    pass
+
 
 @pytest.mark.asyncio
 class TestEditor:
