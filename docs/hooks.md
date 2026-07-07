@@ -96,9 +96,12 @@ This fires only when the bash command the agent is about to run contains
 test suite runs and its pass/fail is printed inline, but (today) a failing
 run does not stop the commit — treat the printed result as a nudge to
 `/undo`/fix before you actually push, the same way the agent's own
-verification-habit nudge works. If you want a harder gate, wrap it:
-`command: "pytest -q && echo COMMIT_OK || echo COMMIT_BLOCKED"` and watch
-for the marker in the hook's console line.
+verification-habit nudge works. If you want a harder gate with extra
+markers, note that **shell operators like `&&`/`||` do not work in a hook
+command** (no shell runs it — see [Substitution is argv-safe](#substitution-is-argv-safe));
+put the logic in a script instead: `command: "./scripts/commit-gate.sh"`.
+Spark prints a one-time dim warning if a hook command contains a bare
+`&&`/`||`/`;`/`|`, so this degradation never happens silently.
 
 ## Guarantees
 
@@ -139,7 +142,10 @@ One consequence: **no shell is invoked for the hook author either.**
 template is tokenized with `shlex.split` into
 `['black', '{path}', '&&', 'ruff', 'check', '{path}']`, and `&&` is passed
 as a literal (nonsensical) argument to `black`, not interpreted as a shell
-operator. If you need multi-step logic:
+operator. Spark detects this and prints a **one-time dim warning** when a
+hook command contains a bare `&&`/`||`/`;`/`|` token, so the dropped second
+half never fails silently behind a green `hook: ...` line. If you need
+multi-step logic:
 
 - put it in a script and call the script — `command: "./scripts/lint.sh {path}"`
   keeps the chaining inside a program you control, or

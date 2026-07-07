@@ -104,6 +104,65 @@ async def test_hook_manager_run_hooks_with_malformed_template_does_not_raise():
 
 
 # ---------------------------------------------------------------------------
+# Shell-operator degradation warning (review fix 2): a hook command with a
+# bare &&/||/;/| token silently drops the second half (no shell) — warn so
+# the degradation is visible, but never fail the hook.
+# ---------------------------------------------------------------------------
+
+
+async def test_shell_operator_command_triggers_dim_warning():
+    import io
+
+    from rich.console import Console
+
+    hm = HookManager({
+        "hooks": {"after_write_file": [
+            {"command": "echo a && echo b", "pattern": "*.py"},
+        ]},
+    })
+    buf = io.StringIO()
+    console = Console(file=buf, force_terminal=False, width=200)
+    await hm.run_hooks("after_write_file", {"path": "x.py"}, console)
+    out = buf.getvalue()
+    assert "shell operator" in out.lower()
+
+
+async def test_plain_command_has_no_shell_operator_warning():
+    import io
+
+    from rich.console import Console
+
+    hm = HookManager({
+        "hooks": {"after_write_file": [
+            {"command": "echo hello", "pattern": "*.py"},
+        ]},
+    })
+    buf = io.StringIO()
+    console = Console(file=buf, force_terminal=False, width=200)
+    await hm.run_hooks("after_write_file", {"path": "x.py"}, console)
+    out = buf.getvalue()
+    assert "shell operator" not in out.lower()
+
+
+async def test_shell_operator_warning_fires_once_per_hook():
+    import io
+
+    from rich.console import Console
+
+    hm = HookManager({
+        "hooks": {"after_write_file": [
+            {"command": "echo a | echo b", "pattern": "*.py"},
+        ]},
+    })
+    buf = io.StringIO()
+    console = Console(file=buf, force_terminal=False, width=200)
+    await hm.run_hooks("after_write_file", {"path": "x.py"}, console)
+    await hm.run_hooks("after_write_file", {"path": "y.py"}, console)
+    out = buf.getvalue()
+    assert out.lower().count("shell operator") == 1
+
+
+# ---------------------------------------------------------------------------
 # /hooks command (Task 6) — read-only listing.
 # ---------------------------------------------------------------------------
 
@@ -205,3 +264,59 @@ def test_hooks_command_with_no_hooks_configured():
 
     assert result is None
     assert "No hooks configured" in buf.getvalue()
+
+
+def test_hooks_command_display_is_markup_safe():
+    """A hook command containing Rich markup must render VERBATIM (brackets
+    intact) — /hooks is an audit of a possibly-untrusted .spark/config.yaml,
+    so the literal command must never be altered/consumed by markup."""
+    import io
+
+    from rich.console import Console
+
+    from spark_code.cli import handle_slash_command
+    from spark_code.context import Context
+    from spark_code.model import ModelClient
+    from spark_code.permissions import PermissionManager
+    from spark_code.skills.base import SkillRegistry
+
+    buf = io.StringIO()
+    console = Console(file=buf, force_terminal=False, width=200)
+    context = Context()
+    skills = SkillRegistry()
+    from unittest.mock import MagicMock
+    model = MagicMock(spec=ModelClient)
+    model.total_input_tokens = 0
+    model.total_output_tokens = 0
+    permissions = PermissionManager(mode="auto")
+
+    config = {
+        "model": {
+            "endpoint": "http://localhost:11434",
+            "name": "test-model",
+            "temperature": 0.7,
+            "max_tokens": 4096,
+            "context_window": 32768,
+            "api_key": "",
+            "provider": "ollama",
+        },
+        "permissions": {"mode": "auto", "always_allow": []},
+        "hooks": {
+            "after_write_file": [
+                {"command": "echo [bold]INJ[/bold]", "pattern": "[red]P[/red]"},
+            ],
+        },
+    }
+
+    result = handle_slash_command(
+        "/hooks", context, console, config, skills, model,
+        permissions=permissions,
+    )
+
+    assert result is None
+    output = buf.getvalue()
+    # The markup tags must survive verbatim in both the command and pattern
+    # columns — if Rich consumed them, "[bold]"/"[red]" would be gone.
+    assert "[bold]" in output
+    assert "INJ" in output
+    assert "[red]" in output

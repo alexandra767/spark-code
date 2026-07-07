@@ -34,6 +34,12 @@ import shlex
 
 logger = logging.getLogger(__name__)
 
+# Shell operators that DON'T work in a hook command: hooks run argv-exec
+# (no shell), so a bare `&&`/`||`/`;`/`|` token becomes a literal argument
+# to the first program and the "second half" silently never runs. We warn
+# on these so that silent degradation is visible (wrap in `sh -c '...'`).
+_SHELL_OPERATORS = frozenset({"&&", "||", ";", "|"})
+
 
 class Hook:
     """A single hook definition."""
@@ -42,6 +48,21 @@ class Hook:
         self.command = command
         self.pattern = pattern
         self.timeout = timeout
+        # One-shot latch so the shell-operator degradation warning fires at
+        # most once per hook (per session), not on every matching tool call.
+        self._warned_shell_op = False
+
+    def has_shell_operator(self) -> bool:
+        """True if the command template, once tokenized, contains a bare
+        shell operator (&&, ||, ;, |) as its own token. Such a command
+        silently drops everything after the operator (no shell runs it) —
+        callers use this to surface the degradation. Never raises: a
+        malformed template (unbalanced quotes) just returns False."""
+        try:
+            tokens = shlex.split(self.command)
+        except ValueError:
+            return False
+        return any(t in _SHELL_OPERATORS for t in tokens)
 
     def matches(self, path: str) -> bool:
         """Check if hook pattern matches the given path."""
@@ -179,6 +200,21 @@ class HookManager:
             elif command_text:
                 if not hook.matches_text(command_text):
                     continue
+
+            # Surface silent degradation: a hook whose command uses a bare
+            # shell operator (&&, ||, ;, |) drops everything after it since
+            # no shell runs it — warn once per hook so a green "hook: ..."
+            # line isn't mistaken for the whole command having succeeded.
+            if (console and not hook._warned_shell_op
+                    and hook.has_shell_operator()):
+                hook._warned_shell_op = True
+                from rich.text import Text
+                console.print(Text(
+                    "  hook: shell operators (&&, ||, ;, |) don't work — "
+                    "hooks run without a shell; wrap in sh -c '...' "
+                    "(see docs/hooks.md)",
+                    style="dim"))
+
             success, output = await hook.run(context)
             results.append((success, output))
 

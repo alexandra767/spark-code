@@ -1370,7 +1370,17 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
         table.add_column("Timeout", style="#8899aa", justify="right")
         for event in hm.get_events():
             for hook in hm.get_hooks(event):
-                table.add_row(event, hook.pattern, hook.command, f"{hook.timeout}s")
+                # Wrap pattern/command in Text() so a config-supplied value
+                # containing Rich markup (e.g. `echo [bold]x[/bold]`) renders
+                # VERBATIM — /hooks is an audit of a possibly-untrusted
+                # .spark/config.yaml, so its own display must not let a hook
+                # command consume/alter its markup. (event is a fixed key.)
+                table.add_row(
+                    event,
+                    Text(hook.pattern, style="#d8dee9"),
+                    Text(hook.command, style="#d8dee9"),
+                    f"{hook.timeout}s",
+                )
         console.print(table)
         return None
 
