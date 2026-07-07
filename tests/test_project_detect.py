@@ -186,14 +186,82 @@ def test_detect_test_command_go(project_dir):
 
 
 def test_detect_test_command_swift_package(project_dir):
+    """Package.swift (SwiftPM) -> 'swift test', which is runnable as-is —
+    changed from bare 'xcodebuild' per Task 6,
+    docs/superpowers/plans/2026-07-07-phase3-polish-ide.md (bare xcodebuild
+    needs -scheme/-destination args it doesn't have here)."""
     with open(os.path.join(project_dir, "Package.swift"), "w") as f:
         f.write("// swift-tools-version:5.9\n")
-    assert detect_test_command(project_dir, "") == "xcodebuild"
+    assert detect_test_command(project_dir, "") == "swift test"
 
 
-def test_detect_test_command_xcodeproj(project_dir):
+def test_detect_test_command_xcodeproj_bare_returns_none(project_dir):
+    """A bare .xcodeproj (no Makefile test target, no Package.swift) -> None,
+    not bare 'xcodebuild' — per Task 6, docs/superpowers/plans/
+    2026-07-07-phase3-polish-ide.md, nudging an unrunnable command (bare
+    xcodebuild has no -scheme/-destination) is worse than no nudge."""
     os.mkdir(os.path.join(project_dir, "MyApp.xcodeproj"))
-    assert detect_test_command(project_dir, "") == "xcodebuild"
+    assert detect_test_command(project_dir, "") is None
+
+
+def test_detect_test_command_package_swift_with_xcodeproj_prefers_swift_test(project_dir):
+    """A SwiftPM package that also ships an .xcodeproj wrapper still resolves
+    to 'swift test' — Package.swift is checked before the bare-xcodeproj
+    fallthrough, so SwiftPM wins."""
+    with open(os.path.join(project_dir, "Package.swift"), "w") as f:
+        f.write("// swift-tools-version:5.9\n")
+    os.mkdir(os.path.join(project_dir, "MyApp.xcodeproj"))
+    assert detect_test_command(project_dir, "") == "swift test"
+
+
+def test_detect_test_command_makefile_with_test_target_beats_pyproject(project_dir):
+    """A Makefile with a 'test:' target outranks the pyproject.toml ->
+    pytest inference (Task 6: 'make test' wraps whatever the project actually
+    needs, e.g. an xcodebuild invocation with scheme/destination)."""
+    with open(os.path.join(project_dir, "pyproject.toml"), "w") as f:
+        f.write('[project]\nname = "myapp"\n')
+    with open(os.path.join(project_dir, "Makefile"), "w") as f:
+        f.write("test:\n\tpytest -q\n")
+    assert detect_test_command(project_dir, "") == "make test"
+
+
+def test_detect_test_command_makefile_without_test_target_falls_through(project_dir):
+    """A Makefile that exists but has no 'test:' target must not short-circuit
+    detection — falls through to the pyproject.toml -> pytest inference."""
+    with open(os.path.join(project_dir, "pyproject.toml"), "w") as f:
+        f.write('[project]\nname = "myapp"\n')
+    with open(os.path.join(project_dir, "Makefile"), "w") as f:
+        f.write("build:\n\tswift build\n")
+    assert detect_test_command(project_dir, "") == "pytest"
+
+
+def test_detect_test_command_makefile_test_target_not_fooled_by_substring(project_dir):
+    """'^test:' is anchored to the start of a line — a 'pytest:' or
+    '.PHONY: test' line must not false-match as a real 'test:' target."""
+    with open(os.path.join(project_dir, "pyproject.toml"), "w") as f:
+        f.write('[project]\nname = "myapp"\n')
+    with open(os.path.join(project_dir, "Makefile"), "w") as f:
+        f.write(".PHONY: test\npytest:\n\tpytest -q\n")
+    assert detect_test_command(project_dir, "") == "pytest"
+
+
+def test_detect_test_command_makefile_for_xcode_project(project_dir):
+    """A bare .xcodeproj with a Makefile 'test:' target resolves to
+    'make test' — the documented iOS convention where Make wraps xcodebuild
+    with the correct scheme/destination args."""
+    os.mkdir(os.path.join(project_dir, "MyApp.xcodeproj"))
+    with open(os.path.join(project_dir, "Makefile"), "w") as f:
+        f.write("test:\n\txcodebuild test -scheme MyApp -destination 'generic/platform=iOS Simulator'\n")
+    assert detect_test_command(project_dir, "") == "make test"
+
+
+def test_detect_test_command_instructions_override_wins_over_makefile(project_dir):
+    """An explicit instructions-text override still wins even when a Makefile
+    test target is present — instructions are checked first, unconditionally."""
+    with open(os.path.join(project_dir, "Makefile"), "w") as f:
+        f.write("test:\n\tmake-specific-runner\n")
+    instructions = "## Testing\n\nRun `npm test` before committing.\n"
+    assert detect_test_command(project_dir, instructions) == "npm test"
 
 
 def test_detect_test_command_instructions_override_wins(project_dir):
