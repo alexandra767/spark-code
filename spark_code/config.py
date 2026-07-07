@@ -51,6 +51,20 @@ DEFAULT_CONFIG = {
         "diff_in_editor": False,
     },
     "mcp_servers": {},
+    # Phase 4 Task 2: the utility model for janitorial work (compaction
+    # summaries, /review lens+skeptic dispatch, session labels) so the
+    # primary model's context/GPU time stays on the main loop. On by
+    # default, pointed at the real 30B on the DGX's Ollama instance — set
+    # to `null` in config.yaml to disable. See spark_code/routing.py.
+    "utility_model": {
+        "endpoint": "http://spark-4a54.local:11434",
+        "model": "qwen3-coder:30b",
+        "provider": "ollama",
+    },
+    # `use_for` scopes which consumers actually route to it (default: all).
+    "routing": {
+        "use_for": ["compaction", "review", "labels"],
+    },
     "memory": {
         "enabled": True,
         "global_path": "~/.spark/memory/",

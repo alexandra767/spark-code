@@ -429,10 +429,11 @@ def _fill_history(ctx, n=20):
         ctx.add_assistant(f"assistant reply {i} with detail{pad}")
 
 
-def _agent_with_context(model, max_tokens=32768):
+def _agent_with_context(model, max_tokens=32768, utility_model=None):
     from spark_code.context import Context
     agent = _make_agent(model)
     agent.context = Context(max_tokens=max_tokens)
+    agent.utility_model = utility_model
     return agent
 
 
@@ -631,6 +632,78 @@ async def test_maybe_compact_model_raises_falls_back():
 
     assert msg is not None
     assert len(agent.context.messages) < before
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 Task 2: dual-model routing — Agent.utility_model wiring
+# ---------------------------------------------------------------------------
+
+
+async def test_maybe_compact_prefers_utility_model_when_set():
+    """A configured utility_model handles the summary request instead of the
+    primary — the primary model is never called."""
+    primary_calls = {"n": 0}
+
+    class CountingPrimary:
+        async def chat(self, **kwargs):
+            primary_calls["n"] += 1
+            yield {"type": "text", "content": "PRIMARY SUMMARY"}
+            yield {"type": "done", "usage": {}}
+
+    utility = MockModel([
+        [{"type": "text", "content": "UTILITY SUMMARY"}, {"type": "done", "usage": {}}],
+    ])
+    agent = _agent_with_context(CountingPrimary(), utility_model=utility)
+    _fill_history(agent.context)
+    agent.context.record_usage(int(32768 * 0.85))
+
+    msg = await agent._maybe_compact()
+
+    assert msg is not None
+    assert "UTILITY SUMMARY" in agent.context.messages[0]["content"]
+    assert primary_calls["n"] == 0, "primary must not be called when utility succeeds"
+
+
+async def test_maybe_compact_utility_failure_falls_back_to_primary_silently():
+    """The utility model raises — the operation still succeeds via the
+    primary (never falls all the way to the mechanical digest, since the
+    primary itself works fine)."""
+    class RaisingUtility:
+        async def chat(self, **kwargs):
+            if False:
+                yield {}
+            raise ConnectionError("utility model unreachable")
+
+    primary = MockModel([
+        [{"type": "text", "content": "PRIMARY SUMMARY"}, {"type": "done", "usage": {}}],
+    ])
+    agent = _agent_with_context(primary, utility_model=RaisingUtility())
+    _fill_history(agent.context)
+    agent.context.record_usage(int(32768 * 0.85))
+
+    msg = await agent._maybe_compact()
+
+    assert msg is not None
+    # The PRIMARY's real (model-generated) summary was used — not the
+    # mechanical digest, which is built from the raw message history and
+    # would never contain this literal string.
+    assert "PRIMARY SUMMARY" in agent.context.messages[0]["content"]
+
+
+async def test_maybe_compact_no_utility_model_behaves_as_before():
+    """utility_model=None (the default) — unchanged pre-Task-2 behavior."""
+    model = MockModel([
+        [{"type": "text", "content": "ONLY MODEL SUMMARY"}, {"type": "done", "usage": {}}],
+    ])
+    agent = _agent_with_context(model)  # utility_model defaults to None
+    assert agent.utility_model is None
+    _fill_history(agent.context)
+    agent.context.record_usage(int(32768 * 0.85))
+
+    msg = await agent._maybe_compact()
+
+    assert msg is not None
+    assert "ONLY MODEL SUMMARY" in agent.context.messages[0]["content"]
 
 
 async def test_generate_compaction_summary_folds_instructions():

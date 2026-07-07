@@ -28,10 +28,12 @@ class RecordingSubagent:
         self.lens_calls = []
         self.skeptic_calls = []
         self.agent_types = []
+        self.models = []  # the `model` object each dispatch was called with
         self._lens_reply = lens_reply
         self._skeptic_reply = skeptic_reply
 
     async def __call__(self, model, prompt, agent_type, config, lead_mode):
+        self.models.append(model)
         self.agent_types.append(agent_type)
         if "refute" in prompt.lower():
             self.skeptic_calls.append(prompt)
@@ -77,6 +79,78 @@ async def test_conventions_lens_gets_instructions(monkeypatch):
         instructions_text="ALWAYS_SNAKE_CASE_RULE")
     hits = [p for p in rec.lens_calls if "ALWAYS_SNAKE_CASE_RULE" in p]
     assert len(hits) == 1  # exactly the conventions lens carries the rules
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 Task 2: dual-model routing — utility_model wiring
+# ---------------------------------------------------------------------------
+
+
+async def test_review_diff_prefers_utility_model_when_configured(monkeypatch):
+    """Every lens dispatch goes to the utility model, not the lead's primary,
+    when utility_model is given and 'review' is use_for-enabled (default)."""
+    rec = RecordingSubagent(lens_reply="NONE")
+    monkeypatch.setattr(review, "run_subagent", rec)
+    primary, utility = "PRIMARY_80B", "UTILITY_30B"
+    diff = "diff --git a/foo.py b/foo.py\n@@ -1 +1 @@\n+bad = code"
+
+    await review.review_diff(primary, _cfg(), "auto", diff, utility_model=utility)
+
+    assert len(rec.models) == 3
+    assert all(m == utility for m in rec.models), "every lens should use the utility model"
+
+
+async def test_review_diff_no_utility_model_uses_primary(monkeypatch):
+    """utility_model=None (the default) — unchanged pre-Task-2 behavior:
+    every dispatch uses the lead's primary model."""
+    rec = RecordingSubagent(lens_reply="NONE")
+    monkeypatch.setattr(review, "run_subagent", rec)
+    primary = "PRIMARY_80B"
+    diff = "diff --git a/foo.py b/foo.py\n@@ -1 +1 @@\n+bad = code"
+
+    await review.review_diff(primary, _cfg(), "auto", diff)
+
+    assert len(rec.models) == 3
+    assert all(m == primary for m in rec.models)
+
+
+async def test_review_diff_use_for_gating_excludes_review(monkeypatch):
+    """utility_model is configured but routing.use_for scopes it away from
+    'review' → every dispatch still uses the primary."""
+    rec = RecordingSubagent(lens_reply="NONE")
+    monkeypatch.setattr(review, "run_subagent", rec)
+    primary, utility = "PRIMARY_80B", "UTILITY_30B"
+    diff = "diff --git a/foo.py b/foo.py\n@@ -1 +1 @@\n+bad = code"
+    config = _cfg()
+    config["routing"] = {"use_for": ["compaction", "labels"]}  # no "review"
+
+    await review.review_diff(primary, config, "auto", diff, utility_model=utility)
+
+    assert len(rec.models) == 3
+    assert all(m == primary for m in rec.models)
+
+
+async def test_review_diff_utility_failure_falls_back_to_primary_per_dispatch(monkeypatch):
+    """A lens dispatched to the utility model that fails (returns the
+    dispatch_agent error sentinel) is silently retried against the primary —
+    the finding still surfaces, it isn't counted as a lens error."""
+    utility, primary = "UTILITY_30B", "PRIMARY_80B"
+
+    async def flaky_run_subagent(model, prompt, agent_type, config, lead_mode):
+        if model == utility:
+            return "[dispatch_agent error] ConnectionError: unreachable"
+        return "CRITICAL|foo.py:1|a real bug"
+
+    monkeypatch.setattr(review, "run_subagent", flaky_run_subagent)
+    diff = "diff --git a/foo.py b/foo.py\n@@ -1 +1 @@\n+bad = code"
+
+    out = await review.review_diff(primary, _cfg(), "auto", diff, utility_model=utility)
+
+    assert out.lens_errors == 0, "utility failure must fall back, not count as a lens error"
+    # All 3 lenses report the identical finding (same fixture reply) → the
+    # dedup pass collapses them to 1, which is what matters here: the finding
+    # survived at all, proving the fallback (not the dedup) is under test.
+    assert len(out.confirmed) + len(out.refuted) + len(out.overflow) == 1
 
 
 # ---------------------------------------------------------------------------

@@ -46,6 +46,7 @@ from .platform_info import format_platform_prompt
 from .preflight import _extract_max_context, context_window_warning, fetch_server_models
 from .project_detect import detect_project_type, detect_test_command
 from .projectplan import extract_keywords, fetch_rag_context
+from .routing import get_utility_client, resolve_utility_for
 from .skills.base import SkillRegistry, check_skill_compatibility
 from .snippets import SnippetLibrary
 from .stats import SessionStats
@@ -831,19 +832,27 @@ def _rewind_files(console: Console) -> bool:
 
 
 async def _handle_compact(model, context: Context, console: Console,
-                          instructions: str | None):
+                          instructions: str | None, utility_model=None):
     """Run the /compact flow: model summary, then compact — Ctrl+C-safe.
 
     Every sibling sentinel branch in the REPL guards its await with a
     KeyboardInterrupt handler; the __COMPACT__ branch initially didn't, so
     Ctrl+C during the (long) summary request unwound past the REPL loop and
     killed the whole session. Catch it here: cancel cleanly, touch nothing.
+
+    ``utility_model`` (Phase 4 Task 2, already use_for-gated by the caller
+    via ``routing.resolve_utility_for`` — same as the auto-compact path in
+    Agent._maybe_compact) is preferred for the summary request, silently
+    falling back to ``model`` on failure.
     """
     from spark_code.agent import generate_compaction_summary
+    from spark_code.routing import call_with_fallback
     try:
         # Summary-request tokens count toward ModelClient lifetime /stats
         # totals — intentional: those tokens were really spent.
-        summary = await generate_compaction_summary(model, context, instructions)
+        summary = await call_with_fallback(
+            utility_model, model,
+            lambda m: generate_compaction_summary(m, context, instructions))
     except KeyboardInterrupt:
         console.print("\n[#ebcb8b]Compaction cancelled.[/#ebcb8b]")
         return
@@ -2635,13 +2644,25 @@ async def run_interactive(config: dict, resume_session: str = "",
     # Initialize file watcher (lazy — started by /watch)
     file_watcher = None
 
+    # Dual-model routing (Phase 4 Task 2): an optional cheaper utility model
+    # (default: the real 30B on Ollama, see routing.DEFAULT_UTILITY_MODEL)
+    # for compaction summaries and the /review swarm, built ONCE here and
+    # reused for the rest of the session. Its lifecycle is independent of
+    # the primary `model` — a /model switch below only rebinds `model`, and
+    # session teardown closes each separately. Building a ModelClient just
+    # sets up an httpx.AsyncClient (no request, no VRAM load), so an unused
+    # or use_for-gated-off utility model costs nothing even when GPU memory
+    # is tight next to a big primary model — see get_utility_client.
+    utility_model = get_utility_client(config)
+
     agent = Agent(model, context, tools, permissions, console,
                   stats=session_stats, on_tool_start=_on_tool_start,
                   tool_cache=tool_cache, hooks=hook_manager,
                   result_budgets=get(config, "tools", "result_budgets", default=None),
                   plan_state=plan_state, test_command=test_command,
                   skills=skills, editor=_resolve_editor(config),
-                  diff_in_editor=get(config, "ui", "diff_in_editor", default=False))
+                  diff_in_editor=get(config, "ui", "diff_in_editor", default=False),
+                  utility_model=resolve_utility_for(config, "compaction", utility_model))
 
     # Initialize team system — optionally use a faster model for workers
     task_store = TaskStore()
@@ -3093,14 +3114,18 @@ async def run_interactive(config: dict, resume_session: str = "",
                 elif result.startswith("__COMPACT__"):
                     instructions = result[len("__COMPACT__"):].strip() or None
                     # Ctrl+C-safe (sibling-branch pattern) — see _handle_compact.
-                    await _handle_compact(model, context, console, instructions)
+                    await _handle_compact(
+                        model, context, console, instructions,
+                        utility_model=resolve_utility_for(
+                            config, "compaction", utility_model))
                 elif result.startswith("__REVIEW__"):
                     from .review import run_review
                     review_target = result[len("__REVIEW__"):].strip()
                     lead_mode = getattr(permissions, "mode", "ask") or "ask"
                     try:
                         await run_review(model, config, console, lead_mode,
-                                         target=review_target)
+                                         target=review_target,
+                                         utility_model=utility_model)
                     except KeyboardInterrupt:
                         console.print("\n[#ebcb8b]Review cancelled.[/#ebcb8b]")
                     except Exception as e:
@@ -3563,9 +3588,14 @@ async def run_interactive(config: dict, resume_session: str = "",
                     config["model"]["endpoint"] = pconf.get("endpoint", "http://localhost:11434")
                     config["model"]["provider"] = provider_name
 
-                    # Update every holder of the model client — the agent AND the
-                    # team manager (which kept the now-closed client, so /team
-                    # after a switch would hit a closed httpx client).
+                    # Update every holder of the PRIMARY model client — the
+                    # agent AND the team manager (which kept the now-closed
+                    # client, so /team after a switch would hit a closed
+                    # httpx client). Deliberately does NOT touch
+                    # agent.utility_model/worker_model_obj — Task 2's utility
+                    # client (like the pre-existing worker model) has its own
+                    # lifecycle, independent of the primary model switching
+                    # providers.
                     agent.model = model
                     if team_manager is not None:
                         team_manager.model = model
@@ -3689,7 +3719,8 @@ async def run_interactive(config: dict, resume_session: str = "",
                 try:
                     await maybe_auto_review(model, config, console, lead_mode,
                                             wrote_this_turn=wrote,
-                                            changed_files=changed)
+                                            changed_files=changed,
+                                            utility_model=utility_model)
                 except KeyboardInterrupt:
                     console.print("\n[#ebcb8b]Auto-review cancelled.[/#ebcb8b]")
                 except Exception as e:
@@ -3721,6 +3752,15 @@ async def run_interactive(config: dict, resume_session: str = "",
                 pass
         await team_manager.stop_all()
         await model.close()
+        # Own lifecycle (Phase 4 Task 2): never touched by a primary /model
+        # switch, closed only here at real session end — same treatment as
+        # worker_model_obj would ideally get (pre-existing gap, not this
+        # task's to fix), but explicit for the client this task introduces.
+        if utility_model is not None:
+            try:
+                await utility_model.close()
+            except Exception:
+                pass
         await mcp_client.disconnect_all()
         # Remove any diff-in-editor temp files (Task 5) created this
         # session. Also atexit-registered in spark_code.editor as a
@@ -4038,11 +4078,17 @@ async def _one_shot(config: dict, prompt: str, output: str = "text",
             if cmd:
                 commands_run.append(cmd)
 
+    # Dual-model routing (Phase 4 Task 2) — same pattern as run_interactive:
+    # built once, own lifecycle, use_for-gated for compaction (the only
+    # routing consumer reachable from a headless one-shot run — /review and
+    # /compact are interactive-only commands).
+    utility_model = get_utility_client(config)
     agent = Agent(model, context, tools, permissions, console,
                   stats=stats, on_tool_start=_on_tool_start,
                   result_budgets=get(config, "tools", "result_budgets", default=None),
                   test_command=test_command, editor=_resolve_editor(config),
-                  diff_in_editor=get(config, "ui", "diff_in_editor", default=False))
+                  diff_in_editor=get(config, "ui", "diff_in_editor", default=False),
+                  utility_model=resolve_utility_for(config, "compaction", utility_model))
     if max_rounds is not None:
         # Instance attribute shadows the class constant — same pattern
         # dispatch.py already uses to give sub-agents their own round cap.
@@ -4061,6 +4107,11 @@ async def _one_shot(config: dict, prompt: str, output: str = "text",
         error = str(e)
     finally:
         await model.close()
+        if utility_model is not None:
+            try:
+                await utility_model.close()
+            except Exception:
+                pass
         from .editor import cleanup_diff_temp_dirs
         cleanup_diff_temp_dirs()
 

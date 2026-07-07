@@ -37,6 +37,7 @@ from .agent import _truncate_result
 from .config import get
 from .dispatch import run_subagent
 from .instructions import load_instructions
+from .routing import call_with_fallback, resolve_utility_for
 
 # Diff budget: head+tail cap so a giant refactor doesn't blow the sub-agent's
 # context (reuses the agent's head+tail truncation so exit codes / tails stay).
@@ -345,21 +346,48 @@ def _parse_verdict(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _is_subagent_error(result: object) -> bool:
+    """True iff a ``run_subagent`` result is its own error sentinel.
+
+    ``run_subagent`` never raises (it catches everything internally and
+    returns a ``"[dispatch_agent error] ..."`` string instead — see
+    dispatch.py), so a raised-exception check alone would never see a
+    utility-model failure; this is the ``is_failure`` predicate
+    ``call_with_fallback`` needs to actually retry against the primary.
+    """
+    return isinstance(result, str) and result.startswith("[dispatch_agent error]")
+
+
 async def review_diff(model, config: dict, lead_mode: str, diff_text: str,
-                      instructions_text: str = "") -> ReviewOutcome:
+                      instructions_text: str = "",
+                      utility_model=None) -> ReviewOutcome:
     """Run the swarm over a diff string and return the verified outcome.
 
     Empty diff → no dispatches. Lenses and skeptics run concurrently; each
     ``run_subagent`` acquires the shared semaphore, so total concurrency is
     bounded by ``agents.max_concurrent`` regardless of how many we launch.
+
+    ``utility_model`` (Phase 4 Task 2) — when given AND ``routing.use_for``
+    includes ``"review"`` — is preferred for every lens/skeptic dispatch,
+    falling back to ``model`` (the lead's primary) per-dispatch on failure.
+    ``None`` (the default) reproduces the pre-Task-2 behavior exactly: every
+    dispatch just uses ``model``.
     """
     if not diff_text or not diff_text.strip():
         return ReviewOutcome(dispatched=False)
 
+    utility = resolve_utility_for(config, "review", utility_model)
+
+    async def _dispatch(prompt: str) -> str:
+        return await call_with_fallback(
+            utility, model,
+            lambda m: run_subagent(m, prompt, "reviewer", config, lead_mode),
+            is_failure=_is_subagent_error,
+        )
+
     # --- 1. lenses (concurrent) --------------------------------------------
     lens_coros = [
-        run_subagent(model, _lens_prompt(lens, diff_text, instructions_text),
-                     "reviewer", config, lead_mode)
+        _dispatch(_lens_prompt(lens, diff_text, instructions_text))
         for lens in LENSES
     ]
     lens_results = await asyncio.gather(*lens_coros, return_exceptions=True)
@@ -388,8 +416,7 @@ async def review_diff(model, config: dict, lead_mode: str, diff_text: str,
     overflow = findings[SKEPTIC_CAP:]
 
     skeptic_coros = [
-        run_subagent(model, _skeptic_prompt(f, diff_text),
-                     "reviewer", config, lead_mode)
+        _dispatch(_skeptic_prompt(f, diff_text))
         for f in to_verify
     ]
     skeptic_results = await asyncio.gather(*skeptic_coros, return_exceptions=True)
@@ -561,9 +588,14 @@ def render_review(console: Console, outcome: ReviewOutcome) -> None:
 async def run_review(model, config: dict, console: Console, lead_mode: str,
                      target: str = "", cwd: str | None = None,
                      instructions_text: str | None = None,
-                     paths: list[str] | None = None) -> ReviewOutcome:
+                     paths: list[str] | None = None,
+                     utility_model=None) -> ReviewOutcome:
     """The ``/review [target]`` command (and auto-review): collect the diff,
-    run the swarm, render the result. Returns the outcome for callers/tests."""
+    run the swarm, render the result. Returns the outcome for callers/tests.
+
+    ``utility_model`` (Phase 4 Task 2) is threaded straight to
+    :func:`review_diff` — see its docstring for the routing/fallback rules.
+    """
     cwd = cwd or os.getcwd()
     if instructions_text is None:
         try:
@@ -584,7 +616,8 @@ async def run_review(model, config: dict, console: Console, lead_mode: str,
         f"[#88c0d0]Reviewing {diff.label} with 3 lenses "
         f"(correctness · edge cases · conventions)…[/#88c0d0]")
     outcome = await review_diff(model, config, lead_mode, diff.text,
-                                instructions_text or "")
+                                instructions_text or "",
+                                utility_model=utility_model)
     outcome.label = diff.label
     render_review(console, outcome)
     return outcome
@@ -599,7 +632,8 @@ async def maybe_auto_review(model, config: dict, console: Console,
                             lead_mode: str, wrote_this_turn: bool,
                             cwd: str | None = None,
                             instructions_text: str | None = None,
-                            changed_files: list[str] | None = None
+                            changed_files: list[str] | None = None,
+                            utility_model=None,
                             ) -> ReviewOutcome | None:
     """Config-gated post-turn hook. No-op (returns None, zero dispatches) unless
     ``review.auto`` is enabled and a write/edit succeeded this turn.
@@ -614,4 +648,4 @@ async def maybe_auto_review(model, config: dict, console: Console,
                   "review swarm…[/#4c566a]")
     return await run_review(model, config, console, lead_mode,
                             cwd=cwd, instructions_text=instructions_text,
-                            paths=changed_files)
+                            paths=changed_files, utility_model=utility_model)

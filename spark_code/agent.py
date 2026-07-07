@@ -21,6 +21,7 @@ from .context import Context
 from .model import ModelClient
 from .permissions import PermissionManager
 from .plan_mode import PLAN_DENIAL, PLAN_NUDGE, PlanState
+from .routing import call_with_fallback
 from .skills.base import SkillRegistry
 from .tools.base import ToolRegistry
 from .ui.input import RESERVED_COMMAND_NAMES
@@ -264,8 +265,18 @@ class Agent:
                  test_command: str | None = None,
                  skills: SkillRegistry | None = None,
                  editor: str | None = None,
-                 diff_in_editor: bool = False):
+                 diff_in_editor: bool = False,
+                 utility_model: ModelClient | None = None):
         self.model = model
+        # Phase 4 Task 2: an optional cheaper model for the auto-compaction
+        # summary request. Resolved and use_for-gated ONCE by the caller
+        # (get_utility_client + routing.enabled_for, see cli.py) — the Agent
+        # itself just holds whatever it was handed and falls back to
+        # ``self.model`` per call via routing.call_with_fallback if this is
+        # None or the utility call fails. Never rebuilt/closed by the Agent —
+        # its lifecycle is the caller's (a primary /model switch reassigns
+        # ``self.model`` only, this is untouched).
+        self.utility_model = utility_model
         self.context = context
         self.tools = tools
         self.permissions = permissions
@@ -508,7 +519,14 @@ class Agent:
 
         self._compacting = True
         try:
-            summary = await generate_compaction_summary(self.model, self.context)
+            # Phase 4 Task 2: prefer the utility model (if configured and
+            # use_for-gated in) for the summary request; a raise/timeout/None
+            # result there silently retries against the primary model — this
+            # ONLY changes which model gets asked, not the existing "None on
+            # any failure → mechanical digest" contract callers rely on.
+            summary = await call_with_fallback(
+                self.utility_model, self.model,
+                lambda m: generate_compaction_summary(m, self.context))
         finally:
             self._compacting = False
         # summary is None on model failure → compact() builds the mechanical
