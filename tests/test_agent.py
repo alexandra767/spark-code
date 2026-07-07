@@ -358,9 +358,13 @@ async def test_done_chunk_empty_usage_does_not_record():
 
 
 def _fill_history(ctx, n=20):
+    # Messages are padded so the compactable slice is a meaningful share of the
+    # window — the anti-thrash gain guard (slice >= 5% of window) must see a
+    # compaction that can plausibly help, like a real long session's history.
+    pad = " lorem ipsum dolor sit amet consectetur" * 40  # ~1.6K chars
     for i in range(n):
-        ctx.add_user(f"user message {i}")
-        ctx.add_assistant(f"assistant reply {i} with detail")
+        ctx.add_user(f"user message {i}{pad}")
+        ctx.add_assistant(f"assistant reply {i} with detail{pad}")
 
 
 def _agent_with_context(model, max_tokens=32768):
@@ -460,6 +464,70 @@ async def test_maybe_compact_recursion_guard():
 
     assert msg is None
     assert len(agent.context.messages) == before
+
+
+async def test_maybe_compact_no_thrash_with_giant_static_prompt():
+    """Reviewer repro (review round 1): a huge STATIC system prompt (e.g. big
+    pinned files) parks usage in the 75-90% band while the message list is tiny.
+    Compaction can free ~nothing there, so _maybe_compact must NOT fire a
+    full-context summary request every round — the compactable-slice gain guard
+    (slice < 5% of window) skips entirely: no request, no compact, all 5 rounds."""
+    called = {"n": 0}
+
+    class CountingModel:
+        async def chat(self, **kwargs):
+            called["n"] += 1
+            yield {"type": "text", "content": "SUMMARY"}
+            yield {"type": "done", "usage": {}}
+
+    from spark_code.context import Context
+    agent = _make_agent(CountingModel())
+    # ~100K chars of static prompt → estimate ≈ 28.6K of a 32K window (~87% used).
+    agent.context = Context(system_prompt="P" * 100000, max_tokens=32768)
+    for i in range(5):  # 10 small messages — more than keep_recent (6)
+        agent.context.add_user(f"small message {i}")
+        agent.context.add_assistant(f"small reply {i}")
+    # Sanity: the raw trigger condition IS met (this is the thrash band)...
+    assert agent.context.context_left(32768) < 0.25
+    before = list(agent.context.messages)
+
+    for _ in range(5):  # five rounds, per the reviewer's repro
+        assert await agent._maybe_compact() is None
+
+    # ...but the gain guard must have blocked every round: zero summary
+    # requests, history untouched.
+    assert called["n"] == 0
+    assert agent.context.messages == before
+
+
+async def test_maybe_compact_cooldown_blocks_rapid_refire():
+    """Anti-thrash cooldown: never auto-compact twice within 5 rounds, even if
+    every other guard would allow an immediate refire."""
+    called = {"n": 0}
+
+    class CountingModel:
+        async def chat(self, **kwargs):
+            called["n"] += 1
+            yield {"type": "text", "content": "SUMMARY"}
+            yield {"type": "done", "usage": {}}
+
+    agent = _agent_with_context(CountingModel())
+    _fill_history(agent.context)
+    agent.context.record_usage(int(32768 * 0.8))
+
+    assert await agent._maybe_compact() is not None  # round 1: fires
+    assert called["n"] == 1
+
+    # Re-inflate so context_left and the gain guard would BOTH allow a refire.
+    _fill_history(agent.context)
+    agent.context.record_usage(int(32768 * 0.8))
+
+    for _ in range(4):  # rounds 2-5: inside the cooldown window
+        assert await agent._maybe_compact() is None
+    assert called["n"] == 1, "no summary requests during cooldown"
+
+    assert await agent._maybe_compact() is not None  # round 6: allowed again
+    assert called["n"] == 2
 
 
 async def test_maybe_compact_model_failure_falls_back_to_mechanical():

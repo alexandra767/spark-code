@@ -57,6 +57,14 @@ TOOL_RESULT_BUDGETS = {
 # Context.compact's default must agree).
 _COMPACT_KEEP_RECENT = 6
 
+# Anti-thrash guards (review round 1): only compact when it can plausibly help.
+# Skip when the removable slice estimates under this fraction of the window (a
+# giant STATIC prompt can park usage in the 75-90% band while compaction frees
+# ~nothing — without this, a full-context summary request fired EVERY round);
+# and never auto-compact twice within this many rounds.
+_COMPACT_MIN_GAIN_FRACTION = 0.05
+_COMPACT_COOLDOWN_ROUNDS = 5
+
 # The summary request the agent sends the model when auto-compacting. Kept as a
 # module constant so /compact and the auto-trigger share one wording.
 _COMPACT_SUMMARY_ASK = (
@@ -84,6 +92,8 @@ async def generate_compaction_summary(model, context,
     request_messages = context.get_messages() + [{"role": "user", "content": ask}]
     parts: list[str] = []
     try:
+        # NOTE: this request's tokens DO count toward the ModelClient's lifetime
+        # /stats totals — intentional: those tokens were really spent.
         stream = model.chat(messages=request_messages, tools=None, stream=False)
         try:
             async for chunk in stream:
@@ -234,6 +244,11 @@ class Agent:
         # Guards against the auto-compaction summary request re-triggering
         # compaction (which would recurse). Set only while _maybe_compact runs.
         self._compacting = False
+        # Anti-thrash cooldown state: _maybe_compact calls are the round clock
+        # (one call per round boundary); a successful compact stamps the round
+        # so another can't fire within _COMPACT_COOLDOWN_ROUNDS.
+        self._compact_round_index = 0
+        self._last_compact_round: int | None = None
         # Per-tool result char budgets: module defaults merged with any config
         # override (tools.result_budgets). Unlisted tools use the 15K default.
         self._result_budgets = {**TOOL_RESULT_BUDGETS, **(result_budgets or {})}
@@ -255,12 +270,19 @@ class Agent:
         return self._result_budgets.get(tool_name, MAX_TOOL_RESULT_CHARS)
 
     async def _maybe_compact(self) -> str | None:
-        """Auto-compact when the real-usage meter says we're low on room.
+        """Auto-compact when the real-usage meter says we're low on room AND
+        compaction can plausibly help.
 
         Fires only when the context window is a KNOWN positive size AND
         context_left(window) < 0.25 (>75% used). The sharp edge from T1:
         context_left() returns 0.0 for a falsy/unknown window — that must NOT be
         read as "compact now", so an unset/zero window never compacts.
+
+        Anti-thrash guards (review round 1): (a) the removable slice must
+        estimate at least 5% of the window — a giant STATIC prompt (big pinned
+        files) can park usage in the 75-90% band while compaction frees
+        ~nothing, which previously fired a full-context summary request EVERY
+        round; (b) a 5-round cooldown after any successful compact.
 
         Generates the summary by asking the model (one non-streamed request);
         on ANY failure falls back to the mechanical digest so the session never
@@ -269,15 +291,23 @@ class Agent:
         """
         if self._compacting:
             return None
+        # One _maybe_compact call per round boundary — this IS the round clock.
+        self._compact_round_index += 1
         window = self.context.max_tokens
         if not isinstance(window, int) or window <= 0:
             return None
         if self.context.context_left(window) >= 0.25:
             return None
-        # Nothing to compact yet (compact keeps the last 6) — skip the model
-        # summary call so a few huge messages don't trigger a wasted request
-        # every round.
-        if len(self.context.messages) <= _COMPACT_KEEP_RECENT:
+        # Cooldown: never auto-compact twice within _COMPACT_COOLDOWN_ROUNDS.
+        if (self._last_compact_round is not None
+                and (self._compact_round_index - self._last_compact_round)
+                < _COMPACT_COOLDOWN_ROUNDS):
+            return None
+        # Gain guard: skip entirely (no summary request, no compact) unless the
+        # removable slice is worth at least 5% of the window. Also covers the
+        # nothing-to-compact case (slice estimate 0 when len <= keep_recent).
+        if (self.context.estimate_compactable_tokens(_COMPACT_KEEP_RECENT)
+                < window * _COMPACT_MIN_GAIN_FRACTION):
             return None
 
         self._compacting = True
@@ -287,7 +317,11 @@ class Agent:
             self._compacting = False
         # summary is None on model failure → compact() builds the mechanical
         # digest instead (never wedges).
-        return self.context.compact(keep_recent=_COMPACT_KEEP_RECENT, summary=summary)
+        result = self.context.compact(keep_recent=_COMPACT_KEEP_RECENT,
+                                      summary=summary)
+        if result is not None:
+            self._last_compact_round = self._compact_round_index
+        return result
 
     async def run_without_user_add(self) -> str:
         """Run the agent loop without adding a user message.

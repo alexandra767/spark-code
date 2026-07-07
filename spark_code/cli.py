@@ -776,6 +776,33 @@ def _rewind_files(console: Console) -> bool:
     return _apply_checkpoint(console, checkpoints, 0)
 
 
+async def _handle_compact(model, context: Context, console: Console,
+                          instructions: str | None):
+    """Run the /compact flow: model summary, then compact — Ctrl+C-safe.
+
+    Every sibling sentinel branch in the REPL guards its await with a
+    KeyboardInterrupt handler; the __COMPACT__ branch initially didn't, so
+    Ctrl+C during the (long) summary request unwound past the REPL loop and
+    killed the whole session. Catch it here: cancel cleanly, touch nothing.
+    """
+    from spark_code.agent import generate_compaction_summary
+    try:
+        # Summary-request tokens count toward ModelClient lifetime /stats
+        # totals — intentional: those tokens were really spent.
+        summary = await generate_compaction_summary(model, context, instructions)
+    except KeyboardInterrupt:
+        console.print("\n[#ebcb8b]Compaction cancelled.[/#ebcb8b]")
+        return
+    except Exception as e:
+        console.print(f"\n[#bf616a]Error: {e}[/#bf616a]")
+        return
+    compact_msg = context.compact(summary=summary)
+    if compact_msg:
+        console.print(f"  [#ebcb8b]⚡ {compact_msg}[/#ebcb8b]")
+    else:
+        console.print("[green]Nothing to compact.[/green]")
+
+
 def handle_slash_command(cmd: str, context: Context, console: Console,
                          config: dict, skills: SkillRegistry,
                          model: ModelClient,
@@ -2824,14 +2851,8 @@ async def run_interactive(config: dict, resume_session: str = "",
                         team_monitor.stop()
                 elif result.startswith("__COMPACT__"):
                     instructions = result[len("__COMPACT__"):].strip() or None
-                    from spark_code.agent import generate_compaction_summary
-                    summary = await generate_compaction_summary(
-                        model, context, instructions)
-                    compact_msg = context.compact(summary=summary)
-                    if compact_msg:
-                        console.print(f"  [#ebcb8b]⚡ {compact_msg}[/#ebcb8b]")
-                    else:
-                        console.print("[green]Nothing to compact.[/green]")
+                    # Ctrl+C-safe (sibling-branch pattern) — see _handle_compact.
+                    await _handle_compact(model, context, console, instructions)
                 elif result.startswith("__TEAM_SPAWN__"):
                     prompt = result[len("__TEAM_SPAWN__"):]
                     try:
@@ -3393,11 +3414,19 @@ async def run_interactive(config: dict, resume_session: str = "",
                 if pct > 75 and pct <= 80:
                     console.print(f"[#ebcb8b]Context usage: {pct:.0f}% — consider /compact[/#ebcb8b]")
 
-            # Auto-compact if getting large
-            if context.estimate_tokens() > context.max_tokens * 0.8:
-                compact_msg = context.compact()
-                if compact_msg:
-                    console.print(f"  [#ebcb8b]⚡ {compact_msg}[/#ebcb8b]")
+            # Auto-compact if getting large — routed through the agent's guarded
+            # path (real-usage trigger, unknown-window guard, anti-thrash gain +
+            # cooldown guards, model summary with mechanical fallback) so this
+            # site can never disagree with the in-loop round-boundary trigger.
+            # The old inline check here also fired on max_tokens=0 (unknown
+            # window) — the shared path fixes that edge too.
+            try:
+                compact_msg = await agent._maybe_compact()
+            except KeyboardInterrupt:
+                console.print("\n[#ebcb8b]Compaction cancelled.[/#ebcb8b]")
+                compact_msg = None
+            if compact_msg:
+                console.print(f"  [#ebcb8b]⚡ {compact_msg}[/#ebcb8b]")
 
     finally:
         # Auto-save conversation history with label and cwd

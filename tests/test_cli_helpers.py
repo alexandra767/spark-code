@@ -691,3 +691,80 @@ class TestRewindCommand:
         )
         assert result is None  # did not propagate/crash the app
         assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# /compact — model-summary flow (__COMPACT__ sentinel → _handle_compact)
+# ---------------------------------------------------------------------------
+
+class TestHandleCompact:
+    """Review round 1 (Important #2): the __COMPACT__ REPL branch awaited the
+    summary request WITHOUT the KeyboardInterrupt guard every sibling sentinel
+    branch has — Ctrl+C during /compact unwound past the REPL and killed the
+    whole session. _handle_compact must catch it locally, print a cancel note,
+    and leave the history untouched."""
+
+    def _console(self):
+        import io
+        return Console(file=io.StringIO(), record=True, force_terminal=True)
+
+    def _filled_context(self):
+        ctx = Context()
+        pad = " lorem ipsum dolor sit amet" * 40
+        for i in range(10):
+            ctx.add_user(f"user {i}{pad}")
+            ctx.add_assistant(f"reply {i}{pad}")
+        return ctx
+
+    async def test_ctrl_c_during_summary_cancels_cleanly(self):
+        from spark_code.cli import _handle_compact
+
+        class KbdModel:
+            async def chat(self, **kwargs):
+                raise KeyboardInterrupt()
+                yield  # pragma: no cover — makes this an async generator
+
+        ctx = self._filled_context()
+        before = list(ctx.messages)
+        console = self._console()
+
+        # Must NOT propagate (a raise here is the session-killing bug).
+        await _handle_compact(KbdModel(), ctx, console, None)
+
+        assert "Compaction cancelled" in console.export_text()
+        assert ctx.messages == before  # nothing compacted, nothing lost
+
+    async def test_success_path_compacts_with_model_summary(self):
+        from spark_code.cli import _handle_compact
+
+        class OkModel:
+            async def chat(self, **kwargs):
+                yield {"type": "text", "content": "THE RECAP"}
+                yield {"type": "done", "usage": {}}
+
+        ctx = self._filled_context()
+        before = len(ctx.messages)
+        console = self._console()
+
+        await _handle_compact(OkModel(), ctx, console, "focus on parser work")
+
+        assert len(ctx.messages) < before
+        assert "THE RECAP" in ctx.messages[0]["content"]
+        assert "Context compacted" in console.export_text()
+
+    async def test_nothing_to_compact_message(self):
+        from spark_code.cli import _handle_compact
+
+        class OkModel:
+            async def chat(self, **kwargs):
+                yield {"type": "text", "content": "RECAP"}
+                yield {"type": "done", "usage": {}}
+
+        ctx = Context()
+        ctx.add_user("just one message")
+        console = self._console()
+
+        await _handle_compact(OkModel(), ctx, console, None)
+
+        assert "Nothing to compact" in console.export_text()
+        assert len(ctx.messages) == 1

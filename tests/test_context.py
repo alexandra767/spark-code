@@ -400,6 +400,43 @@ class TestEstimateTokensImages:
         assert ctx.estimate_tokens() > 5000
 
 
+class TestEstimateCompactableTokens:
+    """Anti-thrash support (review round 1): _maybe_compact must know how much
+    compact() could actually remove — the system prompt and the keep_recent
+    tail survive compaction, so only the removable slice counts."""
+
+    def test_zero_when_history_at_or_under_keep_recent(self):
+        ctx = Context()
+        for i in range(3):
+            ctx.add_user(f"m{i}")
+        assert ctx.estimate_compactable_tokens(6) == 0
+
+    def test_counts_only_the_removable_slice(self):
+        # Giant system prompt must NOT count — it survives compaction.
+        ctx = Context(system_prompt="S" * 100000)
+        for i in range(10):
+            ctx.add_user("x" * 350)  # ~100 tokens each
+        est = ctx.estimate_compactable_tokens(6)
+        # 10 messages, keep 6 → 4 removable * ~100 tokens each.
+        assert 300 <= est <= 500
+
+    def test_respects_safe_split_boundary(self):
+        # The removable slice ends at the SAFE split, exactly like compact().
+        ctx = Context()
+        ctx.messages = [
+            {"role": "user", "content": "u" * 700},
+            {"role": "assistant", "content": None,
+             "tool_calls": [{"id": "c1", "type": "function",
+                             "function": {"name": "bash", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "name": "bash",
+             "content": "t" * 700},
+        ]
+        # keep_recent=1 → naive split lands ON the tool result; the safe split
+        # walks back past its assistant parent → only message 0 is removable.
+        est = ctx.estimate_compactable_tokens(1)
+        assert 150 <= est <= 250  # ~700 chars / 3.5
+
+
 class TestPrefixCacheOrdering:
     """T2 Step 7: system-prompt content must be ordered static-first so the
     server's prefix cache keeps the longest stable prefix. The volatile
