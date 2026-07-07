@@ -38,6 +38,13 @@ logger = logging.getLogger(__name__)
 # + model only — the key itself lives in the keys file, never in config.yaml).
 PROVIDER_PRESETS: dict[str, dict] = {
     "anthropic": {
+        # DELIBERATELY Anthropic's OpenAI-SDK compatibility layer
+        # (api.anthropic.com/v1/ → /v1/chat/completions, Bearer auth) — the
+        # shape ModelClient already speaks — NOT the native Anthropic API
+        # (/v1/messages + x-api-key header). Don't "fix" this into the native
+        # endpoint; ModelClient can't talk to it. Caveat: the compat layer
+        # lacks prompt caching and ignores response_format (Anthropic's
+        # documented limitations) — fine for general coding use here.
         "endpoint": "https://api.anthropic.com/v1/",
         "model": "claude-sonnet-4-5",
         "key_env": "ANTHROPIC_API_KEY",
@@ -169,6 +176,9 @@ def mask(value: str) -> str:
     """
     if not value:
         return ""
+    # The ≤8-char full-mask is a SECURITY guarantee (first-3 and last-4 can't
+    # overlap and leak the whole value), NOT a cosmetic "always looks nicely
+    # masked" one — do not widen this branch to reveal chars on short values.
     if len(value) <= 8:
         return "…" * min(len(value), 4)
     return f"{value[:3]}…{value[-4:]}"
