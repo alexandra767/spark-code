@@ -529,7 +529,8 @@ class Agent:
             # Display results for parallel calls
             if parallel_tcs and parallel_results:
                 for tc, result in zip(parallel_tcs, parallel_results):
-                    render_tool_result(self.console, result, tool_name=tc["name"])
+                    render_tool_result(self.console, result, tool_name=tc["name"],
+                                      **self._todo_render_kwargs(tc["name"]))
 
             # Continue loop — model will process tool results
 
@@ -553,6 +554,17 @@ class Agent:
                 pass
 
         return full_response
+
+    def _todo_render_kwargs(self, tool_name: str) -> dict:
+        """Extra kwargs for render_tool_result when ``tool_name`` is
+        ``todo_write`` — hands the CURRENT (post-update) items to the
+        renderer so it draws the live checklist panel instead of a generic
+        confirmation line. Empty for every other tool."""
+        if tool_name != "todo_write":
+            return {}
+        tool = self.tools.get(tool_name)
+        items = getattr(tool, "items", None)
+        return {"todo_items": items} if items is not None else {}
 
     async def _execute_single_tool(self, tc: dict):
         """Execute a single tool call with all the checks and display."""
@@ -689,7 +701,8 @@ class Agent:
         if is_streamed_bash:
             pass
         else:
-            render_tool_result(self.console, result, tool_name=tc["name"])
+            render_tool_result(self.console, result, tool_name=tc["name"],
+                               **self._todo_render_kwargs(tc["name"]))
 
         # Run post-hooks
         if self.hooks and self.hooks.has_hooks(f"after_{tc['name']}"):

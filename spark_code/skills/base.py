@@ -18,7 +18,7 @@ CLAUDE_TOOL_ALIASES = {
     "LS": "list_dir",
     "WebSearch": "web_search",
     "WebFetch": "web_fetch",
-    "TodoWrite": "todo",
+    "TodoWrite": "todo_write",
 }
 
 

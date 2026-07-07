@@ -24,7 +24,7 @@ DEFAULT_CONFIG = {
     },
     "permissions": {
         "mode": "ask",  # ask | auto | trust
-        "always_allow": ["read_file", "glob", "grep", "list_dir"],
+        "always_allow": ["read_file", "glob", "grep", "list_dir", "todo_write"],
     },
     "ui": {
         "theme": "dark",

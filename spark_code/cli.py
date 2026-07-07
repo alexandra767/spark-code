@@ -42,6 +42,7 @@ from .snippets import SnippetLibrary
 from .stats import SessionStats
 from .task_store import TaskStore
 from .team import TeamManager
+from .todos import TodoList, TodoWriteTool
 from .tool_cache import ToolCache
 from .tools.base import ToolRegistry
 from .tools.bash import BashTool
@@ -572,8 +573,15 @@ def _context_pct_style(pct: float) -> str:
     return "class:bottom-toolbar.context-red"
 
 
-def build_tools() -> ToolRegistry:
-    """Register all built-in tools."""
+def build_tools(todo_list: TodoList | None = None) -> ToolRegistry:
+    """Register all built-in tools.
+
+    ``todo_list`` is the session-scoped live checklist backing ``todo_write``.
+    Callers that want to inspect/share it (e.g. to create it once per session
+    alongside the Context) pass their own instance; otherwise a fresh, empty
+    one is created here — either way state is never persisted across
+    sessions.
+    """
     registry = ToolRegistry()
     registry.register(ReadFileTool())
     registry.register(WriteFileTool())
@@ -585,6 +593,7 @@ def build_tools() -> ToolRegistry:
     registry.register(WebSearchTool())
     registry.register(WebFetchTool())
     registry.register(RagSearchTool())
+    registry.register(TodoWriteTool(todo_list if todo_list is not None else TodoList()))
     return registry
 
 
@@ -2399,7 +2408,8 @@ async def run_interactive(config: dict, resume_session: str = "",
         platform_prompt=platform_prompt,
         provider_prompt=provider_prompt,
     )
-    tools = build_tools()
+    todo_list = TodoList()
+    tools = build_tools(todo_list=todo_list)
 
     # Register MCP tools
     for mcp_tool in mcp_tools:
@@ -3682,7 +3692,8 @@ async def _one_shot(config: dict, prompt: str):
     # hardcoding "auto", so `spark --trust "do X"` doesn't still prompt.
     agentic = config.get("_agentic", False)
     context = Context(system_prompt=AGENTIC_PROMPT if agentic else SYSTEM_PROMPT)
-    tools = build_tools()
+    todo_list = TodoList()
+    tools = build_tools(todo_list=todo_list)
     permissions = PermissionManager(
         mode=get(config, "permissions", "mode", default="auto"))
     agent = Agent(model, context, tools, permissions, console,

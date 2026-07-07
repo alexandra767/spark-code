@@ -176,6 +176,14 @@ def _format_tool_args(name: str, args: dict[str, Any]) -> Text:
             url = url[:_MAX_LINE_WIDTH - 3] + "..."
         text.append(url, style=_C_BLUE)
 
+    elif name == "todo_write":
+        # The full item list renders as a panel right after the call
+        # succeeds (render_tool_result -> render_todos) — the header line
+        # just needs a count, not a JSON dump of every item.
+        raw_items = args.get("items", [])
+        n = len(raw_items) if isinstance(raw_items, list) else 0
+        text.append(f"{n} item{'s' if n != 1 else ''}", style=_C_DIM)
+
     else:
         for k, v in args.items():
             v_str = str(v)
@@ -217,13 +225,26 @@ def render_tool_call(console: Console, name: str, args: dict[str, Any] | str = "
     console.print(header)
 
 
-def render_tool_result(console: Console, result: str, tool_name: str = ""):
+def render_tool_result(console: Console, result: str, tool_name: str = "",
+                       todo_items: list[dict[str, str]] | None = None):
     """Render tool output with ⎿ connector — colored result lines."""
     if not result:
         console.print(Text(f"  {_CONNECTOR} (no output)", style=_C_DIM))
         return
 
     lines = result.split("\n")
+
+    # Live todo checklist — a successful todo_write draws the CURRENT list as
+    # a panel instead of the generic confirmation line, so the checklist is
+    # always visible right after the model updates it.
+    if tool_name == "todo_write":
+        if result.startswith("Error"):
+            console.print(Text(f"  {_CONNECTOR} {lines[0]}", style=_C_RED))
+        elif todo_items is not None:
+            render_todos(console, todo_items)
+        else:
+            console.print(Text(f"  {_CONNECTOR} {lines[0]}", style=_C_GREEN))
+        return
 
     # File reads — summary only
     if tool_name in ("read_file",):
@@ -274,6 +295,49 @@ def render_tool_error(console: Console, name: str, message: str):
 
 def render_tool_denied(console: Console, name: str):
     console.print(Text(f"  {_CONNECTOR} Permission denied by user", style=_C_RED))
+
+
+# ---------------------------------------------------------------------------
+# Live todo checklist
+# ---------------------------------------------------------------------------
+
+_TODO_MARKERS = {
+    "completed": ("✓", _C_DIM),         # ✓ dim
+    "in_progress": ("▸", f"bold {_C_BRIGHT}"),  # ▸ bold
+    "pending": ("○", _C_TEXT),          # ○ normal
+}
+
+
+def render_todos(console: Console, items: list[dict[str, str]]):
+    """Render the live todo checklist as a panel.
+
+    ``✓`` completed (dim) / ``▸`` in_progress (bold) / ``○`` pending —
+    called after every successful ``todo_write`` call (see
+    ``render_tool_result``) so the checklist stays visible turn to turn.
+    """
+    if not items:
+        console.print(Panel(
+            Text("No todos.", style=_C_DIM),
+            title=f"[{_C_TOOL}]Todos[/{_C_TOOL}]",
+            border_style=_C_DIM,
+        ))
+        return
+
+    body = Text()
+    for i, item in enumerate(items):
+        status = item.get("status", "pending")
+        content = item.get("content", "")
+        marker, style = _TODO_MARKERS.get(status, _TODO_MARKERS["pending"])
+        body.append(f"{marker} ", style=style)
+        body.append(content, style=style)
+        if i < len(items) - 1:
+            body.append("\n")
+
+    console.print(Panel(
+        body,
+        title=f"[{_C_TOOL}]Todos[/{_C_TOOL}]",
+        border_style=_C_DIM,
+    ))
 
 
 # ---------------------------------------------------------------------------

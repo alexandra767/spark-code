@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 BUILTIN_TOOL_NAMES = frozenset({
     "read_file", "write_file", "edit_file", "bash", "glob", "grep",
     "list_dir", "web_search", "web_fetch", "rag_search", "spawn_worker",
-    "wait_for_workers", "send_message", "todo",
+    "wait_for_workers", "send_message", "todo_write",
 })
 
 
