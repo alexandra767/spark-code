@@ -9,12 +9,23 @@ class WriteFileTool(Tool):
     name = "write_file"
     description = "Create a new file or overwrite an existing file with the given content."
 
-    def __init__(self, write_roots: list[str] | None = None):
+    def __init__(self, write_roots: list[str] | None = None,
+                 cwd: str | None = None):
         # Phase 5 Task 1: extra allowlisted write roots beyond cwd + temp,
         # resolved once at build_tools() time from permissions.write_roots
         # (see config.resolve_write_roots). Empty by default — identical to
         # pre-Phase-5 sandboxing.
         self.write_roots = write_roots or []
+        # Phase 5 Task 8: an instance-level default root for write
+        # validation, used when no per-call ``cwd`` argument is given. This
+        # NARROWS the sandbox (unlike write_roots, which only widens it) —
+        # dispatch.py's isolated implementer dispatch sets this to a git
+        # worktree path so writes are validated against the worktree instead
+        # of the ambient process cwd, without ever touching os.getcwd()
+        # (which would race with other concurrently-running agents/workers
+        # sharing the same process). None (default) preserves the exact
+        # pre-Task-8 behavior: validation falls back to os.getcwd().
+        self.cwd = cwd
 
     @property
     def parameters(self) -> dict:
@@ -36,7 +47,7 @@ class WriteFileTool(Tool):
     async def execute(self, file_path: str, content: str,
                       cwd: str | None = None, **kw) -> str:
         try:
-            path = _validate_path(file_path, cwd=cwd, for_write=True,
+            path = _validate_path(file_path, cwd=cwd or self.cwd, for_write=True,
                                   extra_roots=self.write_roots)
         except ValueError as e:
             return f"Error: {e}"

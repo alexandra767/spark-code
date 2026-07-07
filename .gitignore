@@ -28,6 +28,9 @@ Thumbs.db
 .spark/config.yaml
 !.spark/config.yaml.example
 
+# Ephemeral git worktrees for isolated implementer dispatches (Phase 5 Task 8)
+.spark/worktrees/
+
 # Testing
 .pytest_cache/
 .coverage

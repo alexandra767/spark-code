@@ -11,12 +11,17 @@ class EditFileTool(Tool):
     name = "edit_file"
     description = "Edit a file by replacing an exact string match with new content. The old_string must match exactly (including whitespace/indentation)."
 
-    def __init__(self, write_roots: list[str] | None = None):
+    def __init__(self, write_roots: list[str] | None = None,
+                 cwd: str | None = None):
         # Phase 5 Task 1: extra allowlisted write roots beyond cwd + temp,
         # resolved once at build_tools() time from permissions.write_roots
         # (see config.resolve_write_roots). Empty by default — identical to
         # pre-Phase-5 sandboxing.
         self.write_roots = write_roots or []
+        # Phase 5 Task 8: instance-level default root for write validation
+        # (narrows the sandbox — see write_file.py's identical field for the
+        # full rationale). None (default) = unchanged pre-Task-8 behavior.
+        self.cwd = cwd
 
     @property
     def parameters(self) -> dict:
@@ -46,7 +51,7 @@ class EditFileTool(Tool):
     async def execute(self, file_path: str, old_string: str, new_string: str,
                       replace_all: bool = False, cwd: str | None = None, **kw) -> str:
         try:
-            path = _validate_path(file_path, cwd=cwd, for_write=True,
+            path = _validate_path(file_path, cwd=cwd or self.cwd, for_write=True,
                                   extra_roots=self.write_roots)
         except ValueError as e:
             return f"Error: {e}"
