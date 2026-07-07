@@ -23,6 +23,7 @@ from rich.text import Text
 from . import __version__
 from .agent import Agent
 from .branches import BranchManager
+from .codesearch import CodeSearchTool, index_project, resolve_service_url
 from .config import ensure_dirs, get, load_config, set_config
 from .context import AGENTIC_PROMPT, SYSTEM_PROMPT, Context, build_skill_prompt_section
 from .custom_tools import CustomToolRegistry
@@ -631,6 +632,11 @@ def build_tools(todo_list: TodoList | None = None, model=None,
     registry.register(WebSearchTool())
     registry.register(WebFetchTool())
     registry.register(RagSearchTool())
+    # Phase 4 Task 3: always registered (no startup network call — see
+    # codesearch.py) unless the user explicitly disabled it; away from the
+    # RAG host it just returns a friendly unavailable message per-query.
+    if config is None or get(config, "rag", "code_search_enabled", default=True):
+        registry.register(CodeSearchTool(config=config))
     registry.register(TodoWriteTool(todo_list if todo_list is not None else TodoList()))
     if model is not None and config is not None:
         from .dispatch import DispatchAgentTool
@@ -955,6 +961,7 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
 
 **Knowledge Base**
 - `/docs <query>` — Search indexed docs (Swift, SwiftUI, HIG, App Store Guidelines, CNN)
+- `/index` — Index this project into the RAG service for code_search (semantic "where/how is X handled" search)
 
 **Extensibility**
 - `/teach <name> <desc> -- <cmd>` — Create a custom tool
@@ -2295,6 +2302,12 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
             return None
         return f"Use rag_search to find information about: {args.strip()}. Show the most relevant results with source citations."
 
+    elif command == "/index":
+        # Builds/refreshes this project's code_search collection. Deferred via
+        # a sentinel — index_project is a coroutine and this handler is sync
+        # (see the __INDEX__ branch in the async REPL loop).
+        return "__INDEX__"
+
     elif command == "/clean":
         return "__CLEAN__"
 
@@ -3165,6 +3178,24 @@ async def run_interactive(config: dict, resume_session: str = "",
                         console.print(f"\n[#bf616a]Error: {e}[/#bf616a]")
                     finally:
                         team_monitor.stop()
+                elif result == "__INDEX__":
+                    index_service_url = resolve_service_url(config)
+                    console.print(
+                        f"[#88c0d0]▸ Indexing project for code_search "
+                        f"({index_service_url})...[/#88c0d0]")
+                    try:
+                        outcome = await index_project(
+                            os.getcwd(), service_url=index_service_url)
+                    except Exception as e:
+                        console.print(f"[#bf616a]Index error: {e}[/#bf616a]")
+                    else:
+                        if outcome.get("error"):
+                            console.print(f"[#ebcb8b]  ⚠ {outcome['error']}[/#ebcb8b]")
+                        else:
+                            console.print(
+                                f"[#a3be8c]  ✓ Indexed {outcome['indexed']} file(s), "
+                                f"skipped {outcome['skipped']} — "
+                                f"collection {outcome['collection']}[/#a3be8c]")
                 elif result.startswith("__TEAM_STOP__"):
                     stop_id = result[len("__TEAM_STOP__"):]
                     try:

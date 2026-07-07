@@ -56,6 +56,9 @@ TOOL_RESULT_BUDGETS = {
     "bash": 15000,
     "grep": 8000,
     "dispatch_agent": 8000,
+    # Phase 4 Task 3: multiple path:line — snippet blocks per call; capped
+    # well under the 15K default so a broad query can't dominate the window.
+    "code_search": 6000,
 }
 
 # Verification habit (Task 6): tool names whose successful execution "dirties"

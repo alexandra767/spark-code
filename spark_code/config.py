@@ -9,6 +9,7 @@ from typing import Any
 import yaml
 
 from .permissions import resolve_mode_name
+from .projectplan import DEFAULT_RAG_SERVICE_URL
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +72,17 @@ DEFAULT_CONFIG = {
         # Cap on the injected Claude Code MEMORY.md bridge content (chars).
         # 0 disables the bridge entirely. See spark_code/memory.py.
         "bridge_budget_chars": 4000,
+    },
+    # Phase 4 Task 3: semantic per-project code search against the RAG
+    # service (spark_code/codesearch.py). `code_search_enabled: false`
+    # removes the `code_search` tool from the registry entirely; left at the
+    # default `true` the tool always registers (no startup network call) and
+    # returns a friendly "unavailable" message per-query if the service at
+    # `service_url` can't be reached — an away-from-home session never fails
+    # to start because of this.
+    "rag": {
+        "service_url": DEFAULT_RAG_SERVICE_URL,
+        "code_search_enabled": True,
     },
 }
 
