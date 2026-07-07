@@ -30,6 +30,7 @@ _BUILTIN_COMMANDS: dict[str, str] = {
     "/model": "Show model info or switch provider (/model <provider>)",
     "/model list": "List available providers",
     "/providers": "Show API providers with signup URLs",
+    "/setkey": "Guided cloud API key setup (masked prompt) — /setkey <provider>",
     "/tokens": "Show token usage",
     "/stats": "Show session statistics",
     "/status": "Show session statistics (alias for /stats)",

@@ -272,6 +272,30 @@ def test_wider_secret_shapes_are_scrubbed(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Phase 5 Task 2 — cloud API key shapes (Anthropic/OpenAI/OpenRouter/Gemini)
+# ---------------------------------------------------------------------------
+
+
+def test_cloud_key_shapes_are_scrubbed(tmp_path):
+    secrets = [
+        "sk-ant-api03-" + ("a" * 40) + "-" + ("b" * 20),  # Anthropic
+        "sk-proj-" + ("c" * 40),                          # OpenAI
+        "sk-or-v1-" + ("d" * 40),                         # OpenRouter
+        "AIzaSyD" + ("e" * 32),                           # Google/Gemini API key
+    ]
+    for secret in secrets:
+        context = FakeContext(messages=[
+            {"role": "user", "content": f"here's my key: {secret} keep it safe"},
+        ])
+        path = export_session(context, str(tmp_path), _meta())
+        with open(path) as f:
+            lines = f.readlines()
+        blob = lines[-1]
+        assert secret not in blob, f"unscrubbed cloud key: {secret!r}"
+        assert "[REDACTED]" in blob
+
+
+# ---------------------------------------------------------------------------
 # Fix 1 — interrupted sessions must NOT export as "clean" (CLI wiring)
 # ---------------------------------------------------------------------------
 

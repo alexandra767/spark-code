@@ -76,6 +76,55 @@ class TestProviderFallbackModel:
         assert resolved["model"]["name"] == DEFAULT_CONFIG["model"]["name"]
 
 
+class TestResolveProviderConsultsKeysFile:
+    """Phase 5 Task 2: resolve_provider must fall back to the ~/.spark/keys
+    store (set via /setkey) when a provider block has no resolvable api_key
+    of its own. Always monkeypatches keys_path — never touches the real
+    ~/.spark/keys."""
+
+    def test_keys_file_backfills_missing_api_key(self, tmp_path, monkeypatch):
+        from spark_code.config import resolve_provider
+
+        monkeypatch.setattr("spark_code.keys.keys_path", lambda: str(tmp_path / "keys"))
+        from spark_code.keys import save_key
+        save_key("openrouter", "dummy-keys-file-value")
+
+        cfg = {
+            "active_provider": "openrouter",
+            "providers": {"openrouter": {"endpoint": "https://openrouter.ai/api/v1",
+                                          "model": "openrouter/auto"}},
+        }
+        resolved = resolve_provider(cfg)
+        assert resolved["model"]["api_key"] == "dummy-keys-file-value"
+
+    def test_explicit_config_api_key_wins_over_keys_file(self, tmp_path, monkeypatch):
+        from spark_code.config import resolve_provider
+
+        monkeypatch.setattr("spark_code.keys.keys_path", lambda: str(tmp_path / "keys"))
+        from spark_code.keys import save_key
+        save_key("openrouter", "dummy-keys-file-value")
+
+        cfg = {
+            "active_provider": "openrouter",
+            "providers": {"openrouter": {"endpoint": "https://openrouter.ai/api/v1",
+                                          "model": "openrouter/auto",
+                                          "api_key": "dummy-explicit-value"}},
+        }
+        resolved = resolve_provider(cfg)
+        assert resolved["model"]["api_key"] == "dummy-explicit-value"
+
+    def test_no_key_anywhere_resolves_to_empty_string(self, tmp_path, monkeypatch):
+        from spark_code.config import resolve_provider
+
+        monkeypatch.setattr("spark_code.keys.keys_path", lambda: str(tmp_path / "keys"))
+        cfg = {
+            "active_provider": "ollama",
+            "providers": {"ollama": {"endpoint": "http://localhost:11434"}},
+        }
+        resolved = resolve_provider(cfg)
+        assert resolved["model"]["api_key"] == ""
+
+
 class TestSetConfigScope:
     def test_set_writes_to_project_when_project_overrides(self, tmp_path):
         """Bug 14: if the project config defines the key, set writes THERE.

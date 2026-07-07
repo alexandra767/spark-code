@@ -32,6 +32,7 @@ from .custom_tools import CustomToolRegistry
 from .editor import detect_editor, open_in_editor
 from .hooks import HookManager
 from .instructions import load_instructions
+from .keys import PROVIDER_PRESETS, load_keys, mask, resolve_provider_key, save_key
 from .mcp.client import MCPClient
 from .mcp.registry import find_mcp_configs
 from .memory import Memory
@@ -996,6 +997,7 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
 - `/config` — Show current config / `/config set <key> <value>`
 - `/model` — Show model info / `/model list` / `/model <provider>`
 - `/providers` — Show API providers with signup URLs
+- `/setkey <provider>` — Guided cloud API key setup (masked prompt, e.g. `/setkey openrouter`)
 - `/profile` — Benchmark model (TTFT, tokens/sec)
 - `/benchmark` — Measure model speed (TTFT, tok/s)
 - `/mode [ask|auto|trust]` — Switch permission mode
@@ -1172,10 +1174,81 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
         console.print(table)
         console.print()
         console.print("[bold #eceff4]To set a key:[/bold #eceff4]")
-        console.print("  [#88c0d0]1.[/#88c0d0] Run [bold]spark --setup[/bold] (interactive wizard)")
-        console.print("  [#88c0d0]2.[/#88c0d0] Or add to your shell profile (~/.zshrc):")
+        console.print("  [#88c0d0]1.[/#88c0d0] Run [bold]/setkey <provider>[/bold] (guided, masked entry — this session)")
+        console.print("  [#88c0d0]2.[/#88c0d0] Run [bold]spark --setup[/bold] (interactive wizard)")
+        console.print("  [#88c0d0]3.[/#88c0d0] Or add to your shell profile (~/.zshrc):")
         console.print('     [#a3be8c]export GEMINI_API_KEY="your-key-here"[/#a3be8c]')
         console.print("     then restart your terminal or run [#a3be8c]source ~/.zshrc[/#a3be8c]")
+        return None
+
+    elif command == "/setkey":
+        provider_name = args.strip().lower()
+
+        if not provider_name:
+            keys_on_disk = load_keys()
+            console.print("[bold #eceff4]Cloud provider presets:[/bold #eceff4]")
+            for name, preset in PROVIDER_PRESETS.items():
+                have = "  [#a3be8c]key set[/#a3be8c]" if name in keys_on_disk else ""
+                console.print(
+                    f"  [#88c0d0]{name}[/#88c0d0]  {preset['model']}  "
+                    f"[#8899aa]({preset['key_env']})[/#8899aa]{have}"
+                )
+            console.print()
+            console.print("[#8899aa]Usage: /setkey <provider>   e.g. /setkey openrouter[/#8899aa]")
+            return None
+
+        if provider_name not in PROVIDER_PRESETS:
+            console.print(f"[#bf616a]Unknown provider: {provider_name}[/#bf616a]")
+            console.print(f"[#8899aa]Available: {', '.join(PROVIDER_PRESETS.keys())}[/#8899aa]")
+            return None
+
+        preset = PROVIDER_PRESETS[provider_name]
+        console.print(f"  Get a key at: [#5e81ac]{preset['doc_url']}[/#5e81ac]")
+
+        # Suspend any active Esc watcher for the duration of the prompt — same
+        # reason as permissions._prompt_user: without this, the watcher's
+        # background thread holds stdin in cbreak and drains the same fd the
+        # masked Prompt.ask needs to read from.
+        from spark_code.ui.esc_watcher import pause_all
+        with pause_all():
+            entered = Prompt.ask(f"  Paste your {preset['key_env']}", password=True)
+
+        value = (entered or "").strip()
+        if not value:
+            console.print("[#ebcb8b]  No key entered — nothing saved.[/#ebcb8b]")
+            return None
+
+        try:
+            path = save_key(provider_name, value)
+        except OSError as e:
+            console.print(f"[#bf616a]  Could not save key: {e}[/#bf616a]")
+            return None
+
+        console.print(f"[#a3be8c]  Saved {mask(value)} to {path} (chmod 600)[/#a3be8c]")
+
+        # New provider → seed a config block from the preset (endpoint + model
+        # only; the key itself lives in the keys file, never in config.yaml —
+        # resolve_provider_key picks it up from there at model-build time).
+        # An EXISTING provider block (hers, or a prior /setkey) is left alone.
+        providers = config.setdefault("providers", {})
+        if provider_name not in providers:
+            ok_endpoint, msg_endpoint = set_config(
+                config, f"providers.{provider_name}.endpoint", preset["endpoint"], scope="global")
+            ok_model, msg_model = set_config(
+                config, f"providers.{provider_name}.model", preset["model"], scope="global")
+            if ok_endpoint and ok_model:
+                console.print(
+                    f"[#a3be8c]  Added '{provider_name}' provider "
+                    f"({preset['model']} @ {preset['endpoint']}) to global config[/#a3be8c]"
+                )
+            else:
+                console.print(
+                    f"[#ebcb8b]  Key saved, but couldn't write the provider block "
+                    f"({msg_endpoint or msg_model}) — add it manually to "
+                    f"~/.spark/config.yaml under 'providers:'[/#ebcb8b]"
+                )
+
+        console.print(f"[#8899aa]  Use it: /model {provider_name}[/#8899aa]")
         return None
 
     elif command == "/tokens":
@@ -2605,12 +2678,16 @@ async def run_interactive(config: dict, resume_session: str = "",
         from .fallback import FallbackChain
 
         def _model_factory(name, pconf):
+            # Phase 5 Task 2: a failover provider set up via /setkey (key in
+            # ~/.spark/keys, no api_key in its config block) must still work
+            # when the chain switches to it — this is precisely the "DGX is
+            # down" path the feature exists for.
             return ModelClient(
                 endpoint=pconf.get("endpoint", "http://localhost:11434"),
                 model=pconf.get("model", "unknown"),
                 temperature=pconf.get("temperature", 0.7),
                 max_tokens=pconf.get("max_tokens", 8192),
-                api_key=pconf.get("api_key", ""),
+                api_key=resolve_provider_key(name, pconf, load_keys()),
                 provider=name,
                 timeout=float(pconf.get("timeout", 300)),
                 supports_vision=bool(pconf.get("vision", False)),
@@ -2950,6 +3027,7 @@ async def run_interactive(config: dict, resume_session: str = "",
     value_providers: dict[str, Callable[[], list[str]]] = {
         "/model": lambda: _model_arg_candidates(config),
         "/providers": lambda: list(config.get("providers", {}).keys()),
+        "/setkey": lambda: list(PROVIDER_PRESETS.keys()),
         "/mode": _mode_arg_candidates,
         "/resume": _resume_names_provider,
         "/rewind": lambda: ["undo", "checkpoint", "both"],
@@ -3658,10 +3736,16 @@ async def run_interactive(config: dict, resume_session: str = "",
                         continue
 
                     pconf = providers[provider_name]
+                    # Phase 5 Task 2: a provider added via /setkey has no
+                    # api_key in its config block at all (the key lives in
+                    # ~/.spark/keys) — resolve_provider_key applies the same
+                    # precedence config.resolve_provider does at startup
+                    # (explicit ${ENV}-resolved config key > keys file > "").
+                    resolved_key = resolve_provider_key(provider_name, pconf, load_keys())
                     # Resolve the underlying model name for the new endpoint.
                     new_real = await resolve_real_model_name(
                         endpoint=pconf.get("endpoint", ""),
-                        api_key=pconf.get("api_key", ""),
+                        api_key=resolved_key,
                         timeout=1.5,
                         configured_model=pconf.get("model", ""),
                     )
@@ -3673,7 +3757,7 @@ async def run_interactive(config: dict, resume_session: str = "",
                         model=pconf.get("model", "unknown"),
                         temperature=pconf.get("temperature", 0.7),
                         max_tokens=pconf.get("max_tokens", 8192),
-                        api_key=pconf.get("api_key", ""),
+                        api_key=resolved_key,
                         provider=provider_name,
                         timeout=float(pconf.get("timeout", 300)),
                         real_model_name=new_real or "",
@@ -3684,6 +3768,7 @@ async def run_interactive(config: dict, resume_session: str = "",
                     config["model"]["endpoint"] = pconf.get("endpoint", "http://localhost:11434")
                     config["model"]["provider"] = provider_name
                     config["model"]["vision"] = bool(pconf.get("vision", False))
+                    config["model"]["api_key"] = resolved_key
 
                     # Update every holder of the PRIMARY model client — the
                     # agent AND the team manager (which kept the now-closed

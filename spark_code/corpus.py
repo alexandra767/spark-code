@@ -49,13 +49,21 @@ DEFAULT_CORPUS_DIR = "~/training-corpus/spark-code"
 # and doesn't apply to free-text message content), so this is a small
 # purpose-built regex set.
 _SECRET_PATTERNS = [
-    re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"),  # OpenAI/Anthropic-style API keys
+    # OpenAI ("sk-proj-...")/Anthropic ("sk-ant-api03-...")/OpenRouter
+    # ("sk-or-v1-...") all share the "sk-" prefix, so this one generic
+    # pattern already catches all three cloud-key shapes Phase 5 Task 2
+    # (/setkey) adds — verified via test_cloud_key_shapes_are_scrubbed rather
+    # than duplicated as separate patterns.
+    re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"),  # OpenAI/Anthropic/OpenRouter-style API keys
     re.compile(r"\b[sr]k_live_[A-Za-z0-9]{16,}"),  # Stripe live secret/restricted keys
     re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"),  # GitHub tokens
     re.compile(r"\bnpm_[A-Za-z0-9]{20,}"),  # npm access tokens
     re.compile(r"\bxox[bpars]-[A-Za-z0-9-]{10,}"),  # Slack tokens
     re.compile(r"\bya29\.[A-Za-z0-9_-]{20,}"),  # Google OAuth access tokens
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),  # AWS access key id
+    # Phase 5 Task 2: Google/Gemini API keys ("AIzaSy..."), the one
+    # PROVIDER_PRESETS shape NOT already covered by the "sk-" pattern above.
+    re.compile(r"\bAIza[A-Za-z0-9_-]{35}\b"),
     re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),  # JWT
     # Generic "Bearer <opaque>" auth header — whole match redacted (drops the
     # token; the literal word "Bearer" going too is harmless).

@@ -8,6 +8,7 @@ from typing import Any
 
 import yaml
 
+from .keys import load_keys, resolve_provider_key
 from .permissions import resolve_mode_name
 from .projectplan import DEFAULT_RAG_SERVICE_URL
 
@@ -174,6 +175,12 @@ def resolve_provider(config: dict, provider_name: str | None = None) -> dict:
 
     provider_conf = providers[name]
 
+    # Phase 5 Task 2: fold in a ~/.spark/keys entry (set via /setkey) when the
+    # provider block has no resolvable api_key of its own — see
+    # keys.resolve_provider_key for the exact precedence (an explicit,
+    # already-${ENV}-resolved api_key in provider_conf still wins).
+    resolved_api_key = resolve_provider_key(name, provider_conf, load_keys())
+
     # Map provider config to model config
     config["model"] = {
         "endpoint": provider_conf.get("endpoint", "http://localhost:11434"),
@@ -182,7 +189,7 @@ def resolve_provider(config: dict, provider_name: str | None = None) -> dict:
         "temperature": provider_conf.get("temperature", 0.7),
         "max_tokens": provider_conf.get("max_tokens", 4096),
         "context_window": provider_conf.get("context_window", 32768),
-        "api_key": provider_conf.get("api_key", ""),
+        "api_key": resolved_api_key,
         "provider": name,
     }
     resolved = config["model"]
