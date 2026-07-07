@@ -9,7 +9,8 @@ MAX_READ_SIZE = 50 * 1024 * 1024
 
 
 def _validate_path(file_path: str, cwd: str | None = None,
-                   for_write: bool = False) -> str:
+                   for_write: bool = False,
+                   extra_roots: list[str] | None = None) -> str:
     """Validate and resolve a file path.
 
     Returns the resolved absolute path.
@@ -20,10 +21,13 @@ def _validate_path(file_path: str, cwd: str | None = None,
 
     Writes/edits (``for_write=True``) are sandboxed: the *resolved* path (after
     following symlinks — so a symlink inside the project can't be used to escape)
-    must live inside the project root (``cwd``, defaulting to ``os.getcwd()``) or
-    the system temp directory (scratch space / build artifacts / tests). Anything
-    else — path traversal (``../../etc/passwd``), an absolute path elsewhere, or a
-    symlink pointing outside — raises ``ValueError``.
+    must live inside the project root (``cwd``, defaulting to ``os.getcwd()``),
+    the system temp directory (scratch space / build artifacts / tests), or one
+    of ``extra_roots`` (Phase 5 Task 1: ``permissions.write_roots`` — additional
+    project trees, e.g. a sibling repo, the caller has explicitly allowlisted
+    for writes). Anything else — path traversal (``../../etc/passwd``), an
+    absolute path elsewhere, or a symlink pointing outside — raises
+    ``ValueError``.
     """
     path = os.path.expanduser(file_path)
     if not os.path.isabs(path):
@@ -43,6 +47,18 @@ def _validate_path(file_path: str, cwd: str | None = None,
                 real_tmp = os.path.realpath(tmp_candidate)
                 if real_tmp not in allowed_roots:
                     allowed_roots.append(real_tmp)
+            except Exception:
+                pass
+        # Phase 5 Task 1: additional configured write roots. Realpath'd like
+        # everything else in allowed_roots — a symlink can't be used to smuggle
+        # in a root the caller didn't actually intend to allowlist. A root that
+        # doesn't resolve (or was never valid) just fails the prefix check
+        # below rather than raising here.
+        for extra in (extra_roots or []):
+            try:
+                real_extra = os.path.realpath(extra)
+                if real_extra not in allowed_roots:
+                    allowed_roots.append(real_extra)
             except Exception:
                 pass
 

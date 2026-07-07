@@ -4,6 +4,8 @@ import os
 
 import pytest
 
+from spark_code.tools import base as base_module
+from spark_code.tools.base import _validate_path
 from spark_code.tools.write_file import WriteFileTool
 
 
@@ -110,3 +112,53 @@ async def test_write_within_explicit_cwd_allowed(tool, tmp_dir):
     result = await tool.execute(file_path=path, content="ok\n", cwd=project)
     assert "Error" not in result
     assert os.path.exists(path)
+
+
+def test_write_root_allows_sibling_dir(tmp_path, monkeypatch):
+    # pytest's tmp_path lives *inside* the system temp dir, which
+    # _validate_path already allows unconditionally as scratch space (see its
+    # docstring) — independent of extra_roots. Point the temp-dir check at a
+    # sentinel elsewhere so this test actually exercises the extra_roots gate
+    # instead of incidentally passing via the pre-existing temp allowlist.
+    monkeypatch.setattr(base_module.tempfile, "gettempdir", lambda: "/nonexistent-tempdir-for-test")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    sibling = tmp_path / "other"
+    sibling.mkdir()
+    target = str(sibling / "f.txt")
+    # without extra_roots → refused
+    try:
+        _validate_path(target, cwd=str(proj), for_write=True)
+        assert False, "should have refused"
+    except ValueError:
+        pass
+    # with the sibling as a write_root → allowed
+    resolved = _validate_path(target, cwd=str(proj), for_write=True,
+                              extra_roots=[str(sibling)])
+    assert resolved.endswith("f.txt")
+
+
+def test_write_root_still_refuses_outside_all_roots(tmp_path, monkeypatch):
+    # See test_write_root_allows_sibling_dir above for why this is needed.
+    monkeypatch.setattr(base_module.tempfile, "gettempdir", lambda: "/nonexistent-tempdir-for-test")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    try:
+        _validate_path(str(outside / "x"), cwd=str(proj), for_write=True,
+                       extra_roots=[str(allowed)])
+        assert False
+    except ValueError:
+        pass
+
+
+def test_write_root_nonexistent_skipped(tmp_path):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    # a non-existent root must not crash; write to cwd still works
+    resolved = _validate_path(str(proj / "a.txt"), cwd=str(proj), for_write=True,
+                              extra_roots=["/does/not/exist/anywhere"])
+    assert resolved.endswith("a.txt")

@@ -25,7 +25,7 @@ from . import __version__
 from .agent import Agent
 from .branches import BranchManager
 from .codesearch import CodeSearchTool, index_project, resolve_service_url
-from .config import ensure_dirs, get, load_config, set_config
+from .config import ensure_dirs, get, load_config, resolve_write_roots, set_config
 from .context import AGENTIC_PROMPT, SYSTEM_PROMPT, Context, build_skill_prompt_section
 from .corpus import export_session
 from .custom_tools import CustomToolRegistry
@@ -668,8 +668,14 @@ def build_tools(todo_list: TodoList | None = None, model=None,
     """
     registry = ToolRegistry()
     registry.register(ReadFileTool())
-    registry.register(WriteFileTool())
-    registry.register(EditFileTool())
+    # Phase 5 Task 1: permissions.write_roots — extra directory trees (e.g. a
+    # sibling repo) writes/edits may target on top of cwd + system temp.
+    # Resolved once here (expanded/realpath'd, non-existent roots skipped) and
+    # threaded into the tool instances, mirroring how CodeSearchTool/
+    # DispatchAgentTool receive `config` at construction time.
+    write_roots = resolve_write_roots(config) if config else []
+    registry.register(WriteFileTool(write_roots=write_roots))
+    registry.register(EditFileTool(write_roots=write_roots))
     registry.register(BashTool())
     registry.register(GlobTool())
     registry.register(GrepTool())

@@ -32,6 +32,13 @@ DEFAULT_CONFIG = {
     "permissions": {
         "mode": "ask",  # ask | auto | trust
         "always_allow": ["read_file", "glob", "grep", "list_dir", "todo_write"],
+        # Phase 5 Task 1: additional absolute (or ~-relative) directory trees
+        # write_file/edit_file may write into, on top of the project root
+        # (cwd) and system temp dir — e.g. a sibling repo so "also fix the
+        # other repo" doesn't need a restart in a different cwd. Empty by
+        # default = exactly today's sandboxing (cwd + temp only). See
+        # resolve_write_roots() below for how these get expanded/validated.
+        "write_roots": [],
     },
     "ui": {
         "theme": "dark",
@@ -239,6 +246,28 @@ def get(config: dict, *keys: str, default: Any = None) -> Any:
         else:
             return default
     return current
+
+
+def resolve_write_roots(config: dict) -> list[str]:
+    """Resolve ``permissions.write_roots`` into realpath'd, existing directories.
+
+    Each entry is ``~``-expanded and realpath'd; entries that don't resolve to
+    an existing directory are silently skipped (bad/stale config shouldn't
+    crash tool setup) — see spark_code/tools/base.py's ``_validate_path`` for
+    where these get passed as ``extra_roots`` on top of cwd + temp.
+    """
+    roots = get(config, "permissions", "write_roots", default=[]) or []
+    resolved = []
+    for root in roots:
+        if not isinstance(root, str) or not root:
+            continue
+        try:
+            real = os.path.realpath(os.path.expanduser(root))
+        except Exception:
+            continue
+        if os.path.isdir(real) and real not in resolved:
+            resolved.append(real)
+    return resolved
 
 
 def _project_config_file(project_dir: str | None) -> Path:
