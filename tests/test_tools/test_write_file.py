@@ -248,6 +248,75 @@ async def test_edit_file_wiring_allows_configured_root_refuses_outside(tmp_path,
     assert outside_file.read_text() == "hello\n"  # untouched
 
 
+# --- Finding 1 (Phase 5 whole-branch review, headline): sandbox escape via a
+# model-supplied ``cwd`` --------------------------------------------------
+# agent.py splats tc["arguments"] (the model's raw tool-call arguments)
+# unfiltered into tool.execute(**tc["arguments"]). ``cwd`` is NOT in
+# write_file's declared schema, but execute() accepts it as a kwarg anyway —
+# nothing strips it. An isolated dispatch (Task 8) scopes write_file to a git
+# worktree by setting self.cwd; that instance-level sandbox root must ALWAYS
+# win over a per-call cwd the model injects, or a sub-agent can escape the
+# worktree straight back into the real tree.
+
+
+async def test_worktree_scoped_tool_refuses_model_cwd_escape_to_real_repo(tmp_path, monkeypatch):
+    # pytest's tmp_path lives INSIDE the system temp dir, which _validate_path
+    # allows unconditionally as scratch space — neutralize it so this test
+    # exercises the cwd-precedence gate for real, not the temp allowance.
+    _neutralize_temp_allowance(monkeypatch)
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    real_repo = tmp_path / "real_repo"
+    real_repo.mkdir()
+    tool = WriteFileTool(cwd=str(worktree))
+
+    target = str(real_repo / "pwned.txt")
+    result = await tool.execute(file_path=target, content="pwned", cwd=str(real_repo))
+
+    assert "Error" in result
+    assert "outside the project" in result.lower()
+    assert not os.path.exists(target)  # never escaped into the real repo
+
+
+async def test_worktree_scoped_tool_still_writes_inside_worktree(tmp_path, monkeypatch):
+    # Sanity check: the instance cwd isn't just refusing everything — a
+    # legitimate write INSIDE the worktree still succeeds, model cwd or not.
+    _neutralize_temp_allowance(monkeypatch)
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    tool = WriteFileTool(cwd=str(worktree))
+
+    target = str(worktree / "ok.txt")
+    result = await tool.execute(file_path=target, content="fine", cwd=str(tmp_path / "elsewhere"))
+
+    assert "Successfully" in result
+    assert os.path.exists(target)
+
+
+async def test_write_file_wiring_model_cwd_cannot_escape_project_root(tmp_path, monkeypatch):
+    # Finding 1b: in trust mode (no worktree isolation), the MAIN agent's
+    # write_file (built by cli.build_tools()) must also be anchored to the
+    # real project root — a model-supplied cwd:"/" or cwd:<anywhere> must not
+    # be able to relocate the sandbox root itself.
+    _neutralize_temp_allowance(monkeypatch)
+    from spark_code.cli import build_tools
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    monkeypatch.chdir(proj)
+
+    registry = build_tools()
+    wt = registry.get("write_file")
+
+    target = str(outside / "pwned.txt")
+    result = await wt.execute(file_path=target, content="pwned", cwd=str(outside))
+
+    assert "Error" in result
+    assert "outside the project" in result.lower()
+    assert not os.path.exists(target)
+
+
 def test_resolve_write_roots_ignores_non_list_config():
     # A YAML authoring mistake `write_roots: /tmp` (a bare string) must not be
     # iterated char-by-char into ['/']; it's treated as "none configured".

@@ -170,8 +170,22 @@ def resolve_provider(config: dict, provider_name: str | None = None) -> dict:
     # Pick provider
     name = provider_name or config.get("active_provider", "ollama")
     if name not in providers:
-        available = ", ".join(providers.keys())
-        raise ValueError(f"Unknown provider '{name}'. Available: {available}")
+        if provider_name is not None:
+            # An EXPLICIT request (e.g. --provider foo) for a provider that
+            # doesn't exist is a clear user mistake — keep raising so it's
+            # surfaced immediately rather than silently running a different
+            # provider than the one asked for.
+            available = ", ".join(providers.keys())
+            raise ValueError(f"Unknown provider '{name}'. Available: {available}")
+        # Phase 5 whole-branch review, Finding 2: `name` came from the
+        # implicit "ollama" default (or a stale/renamed active_provider) and
+        # doesn't match any configured provider. This is exactly what a
+        # fresh /setkey run leaves behind — it seeds a providers.<name> block
+        # but never sets active_provider (see cli.py's /setkey handler) — so
+        # raising here would crash the NEXT startup's load_config() call in
+        # main(), uncaught. Providers exist; fall back to the first
+        # configured one instead of crashing.
+        name = next(iter(providers))
 
     provider_conf = providers[name]
 

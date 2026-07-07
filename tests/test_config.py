@@ -76,6 +76,86 @@ class TestProviderFallbackModel:
         assert resolved["model"]["name"] == DEFAULT_CONFIG["model"]["name"]
 
 
+class TestResolveProviderFreshConfigDoesNotCrash:
+    """Finding 2 (Phase 5 whole-branch review): /setkey on a fresh config (no
+    ``providers`` block yet) seeds the FIRST providers.<name> block but never
+    sets ``active_provider`` (cli.py's /setkey handler). On the NEXT startup,
+    resolve_provider's default ``name = provider_name or
+    config.get("active_provider", "ollama")`` resolves to the literal string
+    "ollama", which isn't a key in a one-entry {"openrouter": {...}} map —
+    raising ValueError, uncaught at load_config() in main(), crashing the
+    fresh-user "cloud key off the DGX" persona on startup."""
+
+    def test_single_non_ollama_provider_no_active_provider_does_not_raise(self):
+        from spark_code.config import resolve_provider
+        cfg = {
+            # No "active_provider" key at all — exactly what /setkey leaves
+            # behind on a fresh config.
+            "providers": {"openrouter": {"endpoint": "https://openrouter.ai/api/v1",
+                                          "model": "openrouter/auto"}},
+        }
+        resolved = resolve_provider(cfg)  # must NOT raise
+        assert resolved["model"]["provider"] == "openrouter"
+        assert resolved["model"]["endpoint"] == "https://openrouter.ai/api/v1"
+
+    def test_stale_active_provider_falls_back_instead_of_raising(self):
+        # active_provider survives a provider rename/removal in config.yaml —
+        # also must not crash startup.
+        from spark_code.config import resolve_provider
+        cfg = {
+            "active_provider": "some-removed-provider",
+            "providers": {"openrouter": {"endpoint": "https://openrouter.ai/api/v1",
+                                          "model": "openrouter/auto"}},
+        }
+        resolved = resolve_provider(cfg)
+        assert resolved["model"]["provider"] == "openrouter"
+
+    def test_explicit_unknown_provider_name_still_raises(self):
+        # An EXPLICIT --provider foo (provider_name argument) that doesn't
+        # exist is a clear user mistake — must still be surfaced, not
+        # silently swapped for a different provider.
+        from spark_code.config import resolve_provider
+        cfg = {"providers": {"openrouter": {"endpoint": "https://openrouter.ai/api/v1"}}}
+        try:
+            resolve_provider(cfg, provider_name="totally-not-configured")
+            assert False, "should have raised"
+        except ValueError as e:
+            assert "totally-not-configured" in str(e)
+
+    def test_existing_multiprovider_config_unaffected(self):
+        # A normal, correctly-configured multi-provider setup keeps resolving
+        # to the CONFIGURED active_provider, not silently falling back to
+        # "whichever is first".
+        from spark_code.config import resolve_provider
+        cfg = {
+            "active_provider": "openrouter",
+            "providers": {
+                "ollama": {"endpoint": "http://localhost:11434"},
+                "openrouter": {"endpoint": "https://openrouter.ai/api/v1"},
+            },
+        }
+        resolved = resolve_provider(cfg)
+        assert resolved["model"]["provider"] == "openrouter"
+
+    def test_load_config_after_fresh_setkey_does_not_crash(self, tmp_path, monkeypatch):
+        """End-to-end: load_config() (what main() calls at startup) must not
+        raise for a config file shaped exactly like /setkey leaves one."""
+        import yaml
+
+        from spark_code.config import load_config
+        global_dir = tmp_path / "global"
+        global_dir.mkdir()
+        global_config_file = global_dir / "config.yaml"
+        global_config_file.write_text(yaml.dump({
+            "providers": {"openrouter": {"endpoint": "https://openrouter.ai/api/v1",
+                                          "model": "openrouter/auto"}},
+        }))
+        monkeypatch.setattr("spark_code.config.GLOBAL_CONFIG_FILE", global_config_file)
+
+        config = load_config()  # must NOT raise
+        assert config["model"]["provider"] == "openrouter"
+
+
 class TestResolveProviderConsultsKeysFile:
     """Phase 5 Task 2: resolve_provider must fall back to the ~/.spark/keys
     store (set via /setkey) when a provider block has no resolvable api_key

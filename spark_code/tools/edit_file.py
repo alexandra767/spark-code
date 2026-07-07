@@ -51,7 +51,12 @@ class EditFileTool(Tool):
     async def execute(self, file_path: str, old_string: str, new_string: str,
                       replace_all: bool = False, cwd: str | None = None, **kw) -> str:
         try:
-            path = _validate_path(file_path, cwd=cwd or self.cwd, for_write=True,
+            # SECURITY: see write_file.py's identical `self.cwd or cwd` for
+            # the full rationale (Phase 5 whole-branch review, Finding 1) —
+            # the instance cwd (a trusted caller's sandbox root) must always
+            # win over a per-call cwd, which can arrive from an unfiltered
+            # model tool-call argument.
+            path = _validate_path(file_path, cwd=self.cwd or cwd, for_write=True,
                                   extra_roots=self.write_roots)
         except ValueError as e:
             return f"Error: {e}"

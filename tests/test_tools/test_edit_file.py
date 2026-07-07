@@ -4,12 +4,21 @@ import os
 
 import pytest
 
+from spark_code.tools import base as base_module
 from spark_code.tools.edit_file import EditFileTool
 
 
 @pytest.fixture
 def tool():
     return EditFileTool()
+
+
+def _neutralize_temp_allowance(monkeypatch):
+    """pytest's tmp_path lives INSIDE the system temp dir, which
+    _validate_path allows unconditionally as scratch space — neutralize it so
+    a test exercises the cwd/root gate for real, not the temp allowance.
+    See test_write_file.py's identical helper for the full rationale."""
+    monkeypatch.setattr(base_module, "_temp_dir_candidates", lambda: ())
 
 
 @pytest.fixture
@@ -124,3 +133,45 @@ async def test_edit_file_with_invalid_utf8_bytes(tool, tmp_dir):
         file_path=path, old_string="header", new_string="HEADER"
     )
     assert "Successfully replaced" in result
+
+
+# --- Finding 1 (Phase 5 whole-branch review, headline): sandbox escape via a
+# model-supplied ``cwd`` — see test_write_file.py for the full rationale;
+# edit_file has the identical ``cwd=cwd or self.cwd`` bug.
+
+
+async def test_worktree_scoped_tool_refuses_model_cwd_escape_to_real_repo(tmp_path, monkeypatch):
+    _neutralize_temp_allowance(monkeypatch)
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    real_repo = tmp_path / "real_repo"
+    real_repo.mkdir()
+    real_file = real_repo / "existing.txt"
+    real_file.write_text("secret\n")
+    tool = EditFileTool(cwd=str(worktree))
+
+    result = await tool.execute(
+        file_path=str(real_file), old_string="secret", new_string="pwned",
+        cwd=str(real_repo),
+    )
+
+    assert "Error" in result
+    assert "outside the project" in result.lower()
+    assert real_file.read_text() == "secret\n"  # untouched
+
+
+async def test_worktree_scoped_tool_still_edits_inside_worktree(tmp_path, monkeypatch):
+    _neutralize_temp_allowance(monkeypatch)
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    target = worktree / "f.txt"
+    target.write_text("hello\n")
+    tool = EditFileTool(cwd=str(worktree))
+
+    result = await tool.execute(
+        file_path=str(target), old_string="hello", new_string="bye",
+        cwd=str(tmp_path / "elsewhere"),
+    )
+
+    assert "Successfully replaced" in result
+    assert target.read_text() == "bye\n"

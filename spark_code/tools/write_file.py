@@ -47,7 +47,19 @@ class WriteFileTool(Tool):
     async def execute(self, file_path: str, content: str,
                       cwd: str | None = None, **kw) -> str:
         try:
-            path = _validate_path(file_path, cwd=cwd or self.cwd, for_write=True,
+            # SECURITY (Phase 5 whole-branch review, Finding 1 — headline):
+            # ``cwd`` here is NOT in this tool's declared schema, but
+            # agent.py's execution loop splats tc["arguments"] (the model's
+            # raw tool-call arguments) unfiltered into execute(**kwargs) —
+            # nothing strips an extra key the model adds. The INSTANCE cwd
+            # (self.cwd — set at construction time by a trusted caller: None
+            # for the default sandbox, a git worktree path for an isolated
+            # dispatch — see dispatch.py's _scope_registry_for_worktree)
+            # therefore must ALWAYS win over a per-call cwd argument, or a
+            # malicious/compromised model can widen or relocate the sandbox
+            # root itself just by naming a "cwd" key nothing ever asked it
+            # for. Deliberately `self.cwd or cwd`, not `cwd or self.cwd`.
+            path = _validate_path(file_path, cwd=self.cwd or cwd, for_write=True,
                                   extra_roots=self.write_roots)
         except ValueError as e:
             return f"Error: {e}"

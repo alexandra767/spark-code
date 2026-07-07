@@ -687,8 +687,21 @@ def build_tools(todo_list: TodoList | None = None, model=None,
     # threaded into the tool instances, mirroring how CodeSearchTool/
     # DispatchAgentTool receive `config` at construction time.
     write_roots = resolve_write_roots(config) if config else []
-    registry.register(WriteFileTool(write_roots=write_roots))
-    registry.register(EditFileTool(write_roots=write_roots))
+    # SECURITY (Phase 5 whole-branch review, Finding 1b): anchor the sandbox
+    # root at THIS process's real cwd, captured once, at construction time —
+    # not left as None (which would fall back to a live os.getcwd() call
+    # inside _validate_path, but ALSO let a model-supplied cwd argument
+    # freely override that fallback, since None never wins the `self.cwd or
+    # cwd` precedence in write_file.py/edit_file.py). Safe to freeze here:
+    # this codebase never calls os.chdir() at runtime (see dispatch.py's
+    # _scope_registry_for_worktree docstring), so a captured os.getcwd() and
+    # a live one are always the same value for this process's lifetime.
+    # Isolated dispatches still get their OWN narrower cwd (the worktree
+    # path) via fresh instances in dispatch.py's _scope_registry_for_worktree
+    # — this only closes the gap for the non-isolated (trust-mode/main-agent)
+    # registry built here.
+    registry.register(WriteFileTool(write_roots=write_roots, cwd=os.getcwd()))
+    registry.register(EditFileTool(write_roots=write_roots, cwd=os.getcwd()))
     registry.register(BashTool())
     registry.register(GlobTool())
     registry.register(GrepTool())

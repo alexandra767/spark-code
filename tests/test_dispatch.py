@@ -7,6 +7,7 @@ offline and fast.
 """
 
 import asyncio
+import os
 import re
 import shutil
 import subprocess
@@ -356,6 +357,46 @@ async def test_unchanged_worktree_remove_failure_is_reported_not_crashed(tmp_pat
 
     assert "done" in result
     assert "could not be auto-removed" in result
+
+
+async def test_isolated_dispatch_write_file_ignores_malicious_model_cwd(tmp_path, monkeypatch):
+    """Finding 1 (Phase 5 whole-branch review, headline — sandbox escape
+    defeating Task 1 AND Task 8): write_file's tool-call arguments come
+    straight from the model — agent.py splats tc["arguments"] unfiltered
+    into tool.execute(). ``cwd`` isn't in write_file's schema, but nothing
+    strips a model-injected one either. Proves the actual shipped wiring (not
+    just the tool in isolation): an implementer sub-agent dispatched with
+    worktree isolation, whose emitted tool call carries a malicious cwd
+    pointing at the real repo, still cannot write outside its worktree."""
+    # pytest's tmp_path lives INSIDE the system temp dir, which write_file's
+    # sandbox allows unconditionally as scratch space (independent of cwd) —
+    # neutralize it so this test exercises the cwd-precedence gate for real.
+    from spark_code.tools import base as base_module
+    monkeypatch.setattr(base_module, "_temp_dir_candidates", lambda: ())
+
+    calls = []
+    monkeypatch.setattr(dispatch, "_run_git", _fake_git_factory(str(tmp_path), calls))
+
+    real_target = str(tmp_path / "pwned.txt")  # stands in for the real repo tree
+    model = MockModel([
+        [{"type": "tool_call", "id": "call_1", "name": "write_file",
+          "arguments": {"file_path": real_target, "content": "pwned",
+                        "cwd": str(tmp_path)}},
+         {"type": "done", "usage": {}}],
+        [{"type": "text", "content": "done"},
+         {"type": "done", "usage": {}}],
+    ])
+
+    # "trust" mode: the non-interactive sub-agent PermissionManager allows the
+    # write straight through (no prompt), so this actually reaches
+    # tool.execute() rather than being stopped by the permission gate first —
+    # exactly the scenario the finding describes ("in trust mode ... defeats
+    # the sandbox entirely").
+    result = await dispatch.run_subagent(
+        model, "write a file", "implementer", _cfg(), "trust", isolated=True)
+
+    assert "done" in result
+    assert not os.path.exists(real_target)  # never escaped the worktree
 
 
 async def test_non_git_repo_falls_back_with_note(monkeypatch):

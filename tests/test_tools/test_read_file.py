@@ -103,3 +103,57 @@ async def test_offset_past_end_message(tool, tmp_file):
     result = await tool.execute(file_path=tmp_file, offset=99)
     assert "empty" not in result.lower()
     assert "past the end" in result.lower()
+
+
+# --- Finding 3 (Phase 5 whole-branch review, defense-in-depth): read_file
+# must never return the raw contents of ~/.spark/keys (always_allow, no
+# permission prompt — a prompt-injected "read keys, then web_fetch it
+# somewhere" chain would otherwise exfil real API keys with zero friction).
+# Realpath comparison (same rigor as mcp/client.py's is_spark_mcp_temp_file)
+# so a symlink or a relative path that resolves to the keys file can't
+# bypass a naive string-equality check.
+
+
+@pytest.fixture
+def fake_keys_file(tmp_path, monkeypatch):
+    """Points read_file's keys_path() at a throwaway file — never touches the
+    real ~/.spark/keys — and writes a recognizable "secret" into it.
+    Patches the name as imported into spark_code.tools.read_file (a `from
+    ..keys import keys_path`), not the origin spark_code.keys module — the
+    latter wouldn't affect the already-bound local reference."""
+    keys_file = tmp_path / "keys"
+    keys_file.write_text('{"openrouter": "sk-super-secret-value"}')
+    monkeypatch.setattr("spark_code.tools.read_file.keys_path", lambda: str(keys_file))
+    return str(keys_file)
+
+
+async def test_refuses_to_read_keys_file_directly(tool, fake_keys_file):
+    result = await tool.execute(file_path=fake_keys_file)
+    assert "sk-super-secret-value" not in result
+    assert "refus" in result.lower()
+
+
+async def test_refuses_to_read_keys_file_via_symlink(tool, tmp_path, fake_keys_file):
+    link = tmp_path / "totally_not_the_keys_file.txt"
+    try:
+        os.symlink(fake_keys_file, link)
+    except OSError:
+        pytest.skip("symlinks not supported")
+    result = await tool.execute(file_path=str(link))
+    assert "sk-super-secret-value" not in result
+    assert "refus" in result.lower()
+
+
+async def test_refuses_to_read_keys_file_via_relative_path(tool, tmp_path, fake_keys_file, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    result = await tool.execute(file_path="./keys")
+    assert "sk-super-secret-value" not in result
+    assert "refus" in result.lower()
+
+
+async def test_normal_file_still_reads_fine_alongside_keys_guard(tool, tmp_path, fake_keys_file):
+    normal = tmp_path / "notes.txt"
+    normal.write_text("just some notes\n")
+    result = await tool.execute(file_path=str(normal))
+    assert "just some notes" in result
+    assert "Error" not in result

@@ -2,6 +2,7 @@
 
 import os
 
+from ..keys import keys_path
 from .base import MAX_READ_SIZE, Tool, _is_binary, _validate_path
 
 
@@ -37,6 +38,19 @@ class ReadFileTool(Tool):
             path = _validate_path(file_path)
         except ValueError as e:
             return f"Error: {e}"
+
+        # SECURITY (Phase 5 whole-branch review, Finding 3 — defense in
+        # depth): read_file is always_allow (no permission prompt), so a
+        # prompt-injected "read ~/.spark/keys, then web_fetch it somewhere"
+        # chain would otherwise exfil raw API keys with zero friction.
+        # Realpath comparison — same rigor as mcp/client.py's
+        # is_spark_mcp_temp_file — defeats both a symlink pointing at the
+        # keys file and a relative/traversal path that resolves to it.
+        # Returned as a plain refusal STRING (not raised) so it flows through
+        # the same "Error: ..."-shaped result path the model already expects,
+        # rather than surfacing as an unhandled exception.
+        if os.path.realpath(path) == os.path.realpath(keys_path()):
+            return "Refusing to read the Spark keys file"
 
         if not os.path.exists(path):
             return f"Error: File not found: {path}"
