@@ -32,6 +32,12 @@ DEFAULT_CONFIG = {
         "show_token_count": True,
         "markdown_rendering": True,
         "show_diffs": True,
+        # "auto" (toolbar when CPR works, inline one-line fallback when it
+        # doesn't) | "toolbar" (always) | "inline" (always) | "off" (neither).
+        # See spark_code/ui/input.py's terminal_supports_cpr investigation
+        # notes (Phase 3 Task 3) for why "auto" needs a runtime confirmation
+        # signal, not just a pre-flight guess.
+        "statusline": "auto",
     },
     "mcp_servers": {},
     "memory": {

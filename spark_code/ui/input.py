@@ -7,6 +7,7 @@ always-visible footer below the input, matching Claude Code's layout.
 from __future__ import annotations
 
 import os
+import sys
 from typing import Callable
 
 from prompt_toolkit import PromptSession
@@ -342,6 +343,154 @@ def _create_bindings(
 
 
 # ---------------------------------------------------------------------------
+# Non-CPR terminal fallback (Phase 3 Task 3)
+# ---------------------------------------------------------------------------
+#
+# Investigation findings (spike scripts against the installed prompt_toolkit
+# 3.0.52, see the task report for the full pexpect transcripts):
+#
+# 1. The warning ("WARNING: your terminal doesn't support cursor position
+#    requests (CPR).") is printed by `Application.cpr_not_supported_callback`
+#    (prompt_toolkit/application/application.py), invoked by the `Renderer`
+#    (renderer.py) exactly once: when a CPR request was sent, `Output.
+#    responds_to_cpr` was True at the time, and no CPR response arrived
+#    within `Renderer.CPR_TIMEOUT` (2 seconds). `Renderer` captures this
+#    callback (a bound method of `Application`) as a plain, mutable instance
+#    attribute (`self.cpr_not_supported_callback = ...`) at construction time
+#    — there is no `Application`/`PromptSession` constructor kwarg to inject
+#    a replacement, but the attribute on the already-built `Renderer` (reachable
+#    as ``session.app.renderer`` immediately after `PromptSession.__init__`,
+#    confirmed empirically) can be overwritten post-construction. Doing so
+#    neuters *only* the terminal print — the underlying `renderer.cpr_support`
+#    state machine (UNKNOWN → SUPPORTED/NOT_SUPPORTED) is untouched, so this
+#    is safe for CPR-capable terminals: there, CPR resolves to SUPPORTED well
+#    within the 2s window and the callback is never invoked at all.
+#
+# 2. The bottom toolbar's invisibility in a non-CPR pty is a SEPARATE,
+#    deeper prompt_toolkit behavior, not just the warning: prompt_toolkit's
+#    `bottom_toolbar` container is wrapped in
+#    ``Condition(lambda: ...) & renderer_height_is_known`` (shortcuts/prompt.py),
+#    and `Renderer.height_is_known()` on a vt100 `Output` (i.e. every real
+#    Unix pty, not just pexpect's) has **no path to True except a successful
+#    CPR response** (`get_rows_below_cursor_position()` is unimplemented for
+#    vt100 and always raises `NotImplementedError`). This was confirmed with
+#    a bare `PromptSession(bottom_toolbar=...)` driven by pexpect: the toolbar
+#    text never appears in the raw pty byte stream, with or without the
+#    warning-callback neutered above. In other words: on any vt100 terminal,
+#    prompt_toolkit's bottom toolbar is *itself* gated on CPR actually being
+#    answered — real terminals answer it in well under 2s (so the toolbar
+#    appears almost immediately), a pty like pexpect's never does (so it
+#    never appears), and this is not something Spark can force from the
+#    outside without reimplementing prompt_toolkit's renderer.
+#
+# 3. Consequence for `terminal_supports_cpr()`: there is no pre-prompt query
+#    that can distinguish "a real terminal that will answer CPR" from "a pty
+#    that merely *presents* as a tty (`isatty()` True, a normal $TERM) but
+#    will never answer" — both look identical to every signal prompt_toolkit
+#    itself exposes (`Output.responds_to_cpr` is fooled the same way; this is
+#    exactly the documented Phase 2 acceptance gap). The heuristic below can
+#    only catch the DEFINITE non-CPR cases cheaply (no tty at all, `TERM=dumb`,
+#    the escape hatches). The AMBIGUOUS case (pexpect and similar) is instead
+#    resolved at *runtime*: `create_session()` wires the neutered callback in
+#    (1) above to also flip a caller-supplied `cpr_state` dict, so callers can
+#    react to "CPR turned out not to work" a couple of seconds into the first
+#    prompt — long before a real engine turn (seconds of generation) finishes
+#    — and print the inline status fallback from then on, self-healing
+#    "auto" mode without a false a-priori guess.
+def terminal_supports_cpr(
+    env: "dict[str, str] | None" = None,
+    isatty: Callable[[], bool] | None = None,
+) -> bool:
+    """Best-effort PRE-FLIGHT heuristic for whether this terminal is likely
+    to answer prompt_toolkit's CPR probe. Mirrors prompt_toolkit's own
+    ``Output.responds_to_cpr`` checks (same env vars, same dumb-terminal and
+    tty gates) plus Spark's own ``SPARK_NO_CPR=1`` escape hatch.
+
+    Deliberately optimistic on ambiguous input (returns True) — see the
+    module-level notes above for why a tty-presenting-but-non-answering pty
+    (pexpect) cannot be caught here and is instead handled via runtime
+    confirmation in ``create_session``.
+    """
+    env = os.environ if env is None else env
+    if env.get("SPARK_NO_CPR") == "1":
+        return False
+    if env.get("PROMPT_TOOLKIT_NO_CPR") == "1":
+        return False
+    if env.get("TERM", "") == "dumb":
+        return False
+    _isatty = isatty if isatty is not None else (lambda: sys.stdout.isatty())
+    try:
+        return bool(_isatty())
+    except Exception:
+        return False
+
+
+def resolve_statusline_mode(configured: str, cpr_supported: bool) -> tuple[bool, bool]:
+    """Route the ``ui.statusline`` config value (+ a CPR-support signal) to
+    ``(use_toolbar, use_inline)``. Pure — no session/renderer access — so it's
+    the single tested source of truth for both call sites that need it:
+    ``create_session`` (deciding whether to attach the toolbar widget at all,
+    fed the pre-flight heuristic) and the CLI's per-turn loop (deciding
+    whether to print the inline fallback, fed the live, possibly-since-updated
+    ``cpr_state``).
+
+    - "off": neither surface.
+    - "toolbar": always the toolbar, never inline (explicit user override —
+      if CPR genuinely doesn't work the status surface is lost, same as
+      before this task; that's the user's own explicit choice).
+    - "inline": always the one-line fallback, never the toolbar.
+    - "auto" (default, and the fallback for any unrecognized value): toolbar
+      when CPR is expected to work, inline otherwise.
+    """
+    if configured == "off":
+        return False, False
+    if configured == "toolbar":
+        return True, False
+    if configured == "inline":
+        return False, True
+    return cpr_supported, not cpr_supported
+
+
+def build_status_segments(
+    mode: str,
+    *,
+    model_name: str = "",
+    provider_name: str = "",
+    turns: int = 0,
+    context_pct: float | None = None,
+    context_style: str = "class:bottom-toolbar.context",
+) -> list[tuple[str, str]]:
+    """Pure function: the shared "mode + ctx%" status content — the single
+    source both the inline fallback (this task) renders as plain text and
+    that a future toolbar refactor could source from. Every input is a plain
+    value the caller already computed (``context.estimate_tokens()``,
+    ``permissions.mode``, the pct-to-style mapping) — no Context/session
+    objects, no I/O — so this is directly unit-testable without constructing
+    any prompt_toolkit or Spark session state.
+    """
+    parts: list[tuple[str, str]] = []
+    if model_name:
+        label = model_name if not provider_name else f"{model_name} ({provider_name})"
+        parts.append(("class:bottom-toolbar.team", label))
+        parts.append(("class:bottom-toolbar.info", "  "))
+    parts.append(("class:bottom-toolbar.mode", "⏵⏵ "))
+    parts.append(("class:bottom-toolbar.mode-text", f"{mode} mode"))
+    if turns > 0:
+        parts.append(("class:bottom-toolbar.info", f"  ·  {turns} turns"))
+    if context_pct is not None:
+        parts.append((context_style, f"  ·  ctx {int(context_pct)}%"))
+    return parts
+
+
+def format_status_line(segments: list[tuple[str, str]]) -> str:
+    """Flatten styled ``(style_class, text)`` segments into the plain-text
+    line printed above the prompt in inline-fallback mode. Style classes only
+    matter for prompt_toolkit's toolbar rendering; the inline fallback is a
+    normal terminal line with no styling machinery of its own."""
+    return "".join(text for _, text in segments).strip()
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -355,6 +504,8 @@ def create_session(
     mode_switch_callback: Callable | None = None,
     command_descriptions: dict[str, str] | None = None,
     value_providers: dict[str, Callable[[], list[str]]] | None = None,
+    statusline: str = "auto",
+    cpr_state: dict | None = None,
 ) -> PromptSession:
     """Create a prompt session with slash-command autocomplete and
     a persistent bottom toolbar.
@@ -363,6 +514,25 @@ def create_session(
       Line 1: turns + context %
       Line 2: ⏵⏵ mode on · ctrl+t team
       Line 3: team workers (if any active)
+
+    ``statusline`` (Phase 3 Task 3 — see the module notes above
+    ``terminal_supports_cpr`` for the full investigation) routes via
+    ``resolve_statusline_mode``: "auto" (default) attaches the toolbar only
+    when CPR looks likely to work (``terminal_supports_cpr()``); "toolbar"
+    always attaches it; "inline"/"off" never do (the caller is expected to
+    print the one-line fallback itself — this function only owns the
+    toolbar widget, not the inline print, since the latter happens between
+    prompts, outside this session object).
+
+    Regardless of ``statusline``, prompt_toolkit's own "doesn't support
+    cursor position requests (CPR)" warning print is always neutered here
+    (see the investigation notes above ``terminal_supports_cpr``): it is a
+    strict improvement with no effect on CPR-capable terminals (there, CPR
+    resolves before prompt_toolkit's internal 2s timeout ever fires the
+    callback). When ``cpr_state`` is provided, the neutered callback also
+    flips ``cpr_state["supported"] = False`` — the runtime confirmation
+    signal a caller needs to react to the non-CPR case (e.g. pexpect) that
+    the pre-flight heuristic cannot detect in advance.
     """
     history_path = os.path.expanduser(history_file)
     os.makedirs(os.path.dirname(history_path), exist_ok=True)
@@ -445,6 +615,16 @@ def create_session(
 
         return parts
 
+    # SPARK_NO_CPR=1 is Spark's own escape hatch; also set prompt_toolkit's
+    # native equivalent (if not already set) so the underlying library never
+    # even attempts the CPR round-trip — belt (this) and suspenders (the
+    # cpr_not_supported_callback neutering below, which covers the case this
+    # can't: a pty that presents as CPR-capable but never answers).
+    if os.environ.get("SPARK_NO_CPR") == "1":
+        os.environ.setdefault("PROMPT_TOOLKIT_NO_CPR", "1")
+
+    use_toolbar, _ = resolve_statusline_mode(statusline, terminal_supports_cpr())
+
     session = PromptSession(
         message=[("class:prompt", "> ")],
         history=FileHistory(history_path),
@@ -453,7 +633,17 @@ def create_session(
         multiline=False,
         complete_while_typing=True,
         style=INPUT_STYLE,
-        bottom_toolbar=bottom_toolbar,
+        bottom_toolbar=bottom_toolbar if use_toolbar else None,
     )
+
+    # Neuter prompt_toolkit's own CPR-not-supported warning print (see the
+    # module docstring above terminal_supports_cpr for the full mechanism).
+    # `session.app` (and its `.renderer`) already exist at this point —
+    # `PromptSession.__init__` builds the `Application` synchronously.
+    def _on_cpr_not_supported() -> None:
+        if cpr_state is not None:
+            cpr_state["supported"] = False
+
+    session.app.renderer.cpr_not_supported_callback = _on_cpr_not_supported
 
     return session

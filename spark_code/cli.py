@@ -66,7 +66,14 @@ from .tools.web_fetch import WebFetchTool
 from .tools.web_search import WebSearchTool
 from .tools.write_file import WriteFileTool
 from .ui.hotkeys import TeamStatusMonitor
-from .ui.input import RESERVED_COMMAND_NAMES, create_session
+from .ui.input import (
+    RESERVED_COMMAND_NAMES,
+    build_status_segments,
+    create_session,
+    format_status_line,
+    resolve_statusline_mode,
+    terminal_supports_cpr,
+)
 from .ui.theme import get_theme
 from .watcher import FileWatcher
 
@@ -2815,6 +2822,16 @@ async def run_interactive(config: dict, resume_session: str = "",
         "/rewind": lambda: ["undo", "checkpoint", "both"],
     }
 
+    # Non-CPR terminal fallback (Phase 3 Task 3): `cpr_state["supported"]`
+    # starts at the pre-flight heuristic's guess and is flipped to False by
+    # create_session's neutered CPR-warning callback the moment prompt_toolkit
+    # itself confirms CPR isn't answered (its own ~2s timeout) — see
+    # ui/input.py's terminal_supports_cpr investigation notes for why the
+    # pre-flight guess alone can't catch a pty like pexpect's that presents
+    # as CPR-capable but never answers.
+    statusline_mode = get(config, "ui", "statusline", default="auto")
+    cpr_state = {"supported": terminal_supports_cpr()}
+
     # Input session with history, autocomplete, and status footer
     session = create_session(
         skill_names=skills.names(),
@@ -2824,7 +2841,42 @@ async def run_interactive(config: dict, resume_session: str = "",
         team_display_callback=team_display,
         mode_switch_callback=mode_switch,
         value_providers=value_providers,
+        statusline=statusline_mode,
+        cpr_state=cpr_state,
     )
+
+    def _inline_status_text() -> str:
+        """The one-line "mode + ctx%" fallback shown above the prompt when
+        the toolbar isn't rendering (ui.statusline: inline, or auto once CPR
+        is confirmed unsupported) — built from build_status_segments, the
+        same pure segment source the toolbar's own callbacks conceptually
+        mirror, per this task's "one source" requirement."""
+        tokens = context.estimate_tokens()
+        max_tok = context.max_tokens
+        turns = context.turn_count
+        model_name = get(config, "model", "name", default="")
+        provider_name = get(config, "model", "provider", default="")
+        mode = "plan" if plan_state.active else permissions.mode
+
+        context_pct = None
+        context_style = "class:bottom-toolbar.context"
+        if max_tok > 0 and tokens > 0:
+            context_pct = context.context_left(max_tok) * 100
+            context_style = _context_pct_style(context_pct)
+
+        segments = build_status_segments(
+            mode,
+            model_name=model_name,
+            provider_name=provider_name,
+            turns=turns,
+            context_pct=context_pct,
+            context_style=context_style,
+        )
+        return format_status_line(segments)
+
+    def _should_show_inline_status() -> bool:
+        _, use_inline = resolve_statusline_mode(statusline_mode, cpr_state["supported"])
+        return use_inline
 
     # Notification sound config
     notify_enabled = get(config, "ui", "notification_sound", default=True)
@@ -2919,6 +2971,17 @@ async def run_interactive(config: dict, resume_session: str = "",
 
     try:
         while True:
+            # Non-CPR fallback (Phase 3 Task 3): printed BEFORE the prompt is
+            # drawn (not concurrently with it), so this is a plain, permanent
+            # console line landing in scrollback ahead of the next prompt —
+            # not the patch_stdout "draw above an active prompt" mechanism
+            # (Task 2), which is unrelated here since nothing is mid-render
+            # yet. Runs once per loop iteration, i.e. once per completed turn
+            # (plus once before the very first prompt) — matching "after each
+            # turn" without needing to touch every agent.run() call site.
+            if _should_show_inline_status():
+                console.print(f"[dim]{_esc(_inline_status_text())}[/dim]")
+
             try:
                 user_input = await asyncio.get_event_loop().run_in_executor(
                     None,
