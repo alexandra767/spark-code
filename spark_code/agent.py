@@ -1068,6 +1068,26 @@ class Agent:
             self.context.add_user_with_image(text, image_b64, mime)
         self._pending_image_injections = []
 
+    async def _run_hooks_safe(self, event: str, context: dict) -> None:
+        """Run hooks for an event without ever letting a hook — a failing
+        exit code, a timeout, or an outright bug in the hook plumbing —
+        block or crash the tool call / agent loop (Task 6 hardening).
+
+        HookManager.run_hooks already reports a nonzero exit or a timeout as
+        a normal (False, message) result rather than raising, but this is
+        defense in depth for anything unexpected (e.g. a hostile/odd context
+        value tripping something in hook matching or console rendering):
+        any exception is swallowed and surfaced only as a dim console note,
+        never propagated.
+        """
+        try:
+            await self.hooks.run_hooks(event, context, self.console)
+        except Exception as e:
+            try:
+                self.console.print(Text(f"  hook error: {e}", style="dim"))
+            except Exception:
+                pass
+
     async def _execute_single_tool(self, tc: dict):
         """Execute a single tool call with all the checks and display."""
         tool = self.tools.get(tc["name"])
@@ -1145,8 +1165,7 @@ class Agent:
         # Run pre-hooks
         if self.hooks and self.hooks.has_hooks(f"before_{tc['name']}"):
             hook_ctx = {"tool": tc["name"], **tc["arguments"]}
-            await self.hooks.run_hooks(
-                f"before_{tc['name']}", hook_ctx, self.console)
+            await self._run_hooks_safe(f"before_{tc['name']}", hook_ctx)
 
         # Display tool call
         render_tool_call(self.console, tc["name"], tc["arguments"], editor=self.editor)
@@ -1248,8 +1267,7 @@ class Agent:
                 "path": tc["arguments"].get("file_path", ""),
                 **tc["arguments"],
             }
-            await self.hooks.run_hooks(
-                f"after_{tc['name']}", hook_ctx, self.console)
+            await self._run_hooks_safe(f"after_{tc['name']}", hook_ctx)
 
     async def _execute_parallel(self, tool_calls: list[dict]) -> list[str]:
         """Execute multiple independent, read-only, already-authorized tool
@@ -1284,9 +1302,8 @@ class Agent:
 
             # Pre-hooks
             if self.hooks and self.hooks.has_hooks(f"before_{tc['name']}"):
-                await self.hooks.run_hooks(
-                    f"before_{tc['name']}", {"tool": tc["name"], **tc["arguments"]},
-                    self.console)
+                await self._run_hooks_safe(
+                    f"before_{tc['name']}", {"tool": tc["name"], **tc["arguments"]})
 
             render_tool_call(self.console, tc["name"], tc["arguments"], editor=self.editor)
 
@@ -1307,11 +1324,10 @@ class Agent:
 
             # Post-hooks
             if self.hooks and self.hooks.has_hooks(f"after_{tc['name']}"):
-                await self.hooks.run_hooks(
+                await self._run_hooks_safe(
                     f"after_{tc['name']}",
                     {"tool": tc["name"], "path": tc["arguments"].get("file_path", ""),
-                     **tc["arguments"]},
-                    self.console)
+                     **tc["arguments"]})
 
             return result
 

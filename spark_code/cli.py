@@ -1012,6 +1012,7 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
 - `/providers` — Show API providers with signup URLs
 - `/setkey <provider>` — Guided cloud API key setup (masked prompt, e.g. `/setkey openrouter`)
 - `/doctor` — Health check: engine, RAG, MCP, editor, keys (read-only, safe anytime)
+- `/hooks` — List configured hooks (event, pattern, command, timeout) — read-only, see docs/hooks.md
 - `/profile` — Benchmark model (TTFT, tokens/sec)
 - `/benchmark` — Measure model speed (TTFT, tok/s)
 - `/mode [ask|auto|trust]` — Switch permission mode
@@ -1345,6 +1346,33 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
         # __DOCTOR__ branch in the async REPL loop) — deferred via a
         # sentinel, same pattern as /index and /compact.
         return "__DOCTOR__"
+
+    elif command == "/hooks":
+        # Read-only listing (Task 6) — reconstructs a HookManager straight
+        # from config so this always reflects what's actually configured,
+        # never a live agent's possibly-stale instance. No hook runs.
+        hm = HookManager(config)
+        if hm.count == 0:
+            console.print(
+                "[#8899aa]No hooks configured. See docs/hooks.md for "
+                "recipes and the `hooks:` config shape.[/#8899aa]"
+            )
+            return None
+        table = Table(
+            title="Configured Hooks",
+            border_style="#4c566a",
+            show_header=True,
+            header_style="bold #88c0d0",
+        )
+        table.add_column("Event", style="#88c0d0")
+        table.add_column("Pattern", style="#d8dee9")
+        table.add_column("Command", style="#d8dee9")
+        table.add_column("Timeout", style="#8899aa", justify="right")
+        for event in hm.get_events():
+            for hook in hm.get_hooks(event):
+                table.add_row(event, hook.pattern, hook.command, f"{hook.timeout}s")
+        console.print(table)
+        return None
 
     elif command == "/diff":
         # Run git diff and show with syntax highlighting

@@ -95,6 +95,7 @@ _BUILTIN_COMMANDS: dict[str, str] = {
     "/docs": "Search indexed docs (Swift, SwiftUI, HIG, App Store Guidelines, CNN)",
     "/index": "Index this project into the RAG service for code_search",
     "/doctor": "Health check: engine, RAG, MCP, editor, keys (read-only)",
+    "/hooks": "List configured hooks: event, pattern, command, timeout (read-only)",
 }
 
 # Bare command names (first token, no "/") reserved by the real commands

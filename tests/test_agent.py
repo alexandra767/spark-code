@@ -67,7 +67,7 @@ def _make_console() -> Console:
     return Console(file=io.StringIO(), force_terminal=True)
 
 
-def _make_agent(model, tools=None, permissions=None, test_command=None):
+def _make_agent(model, tools=None, permissions=None, test_command=None, hooks=None):
     """Build an Agent wired to the given mock model."""
     registry = ToolRegistry()
     if tools:
@@ -81,6 +81,7 @@ def _make_agent(model, tools=None, permissions=None, test_command=None):
         permissions=permissions or PermissionManager(mode="trust"),
         console=_make_console(),
         test_command=test_command,
+        hooks=hooks,
     )
 
 
@@ -1019,3 +1020,106 @@ async def test_verify_flags_reset_across_user_turns():
     assert agent._verify_dirty is False
     assert agent._verify_tests_run is False
     assert agent._verify_nudged is False
+
+
+# ---------------------------------------------------------------------------
+# Hooks hardening (Phase 5 Task 6) — a hook must never block or crash the
+# tool call / agent loop, whether it fails normally (nonzero exit) or the
+# hook plumbing itself misbehaves.
+# ---------------------------------------------------------------------------
+
+from spark_code.hooks import HookManager  # noqa: E402
+
+
+async def test_failing_pre_hook_does_not_block_the_tool():
+    """A before_<tool> hook that always exits nonzero must not stop the
+    tool from executing — hooks observe, they don't gate."""
+    tool = MockTool()
+    hooks = HookManager({
+        "hooks": {"before_mock_tool": [{"command": "false"}]},
+    })
+    model = MockModel([
+        [{"type": "tool_call", "id": "call_1", "name": "mock_tool",
+          "arguments": {"arg": "hello"}},
+         {"type": "done", "usage": {}}],
+        [{"type": "text", "content": "Tool said: mock result"},
+         {"type": "done", "usage": {}}],
+    ])
+    agent = _make_agent(model, tools=[tool], hooks=hooks)
+
+    result = await agent.run("Use the tool")
+
+    assert "mock result" in result
+
+
+async def test_failing_post_hook_does_not_block_the_tool():
+    """Same guarantee for after_<tool> hooks."""
+    tool = MockTool()
+    hooks = HookManager({
+        "hooks": {"after_mock_tool": [{"command": "false"}]},
+    })
+    model = MockModel([
+        [{"type": "tool_call", "id": "call_1", "name": "mock_tool",
+          "arguments": {"arg": "hello"}},
+         {"type": "done", "usage": {}}],
+        [{"type": "text", "content": "Tool said: mock result"},
+         {"type": "done", "usage": {}}],
+    ])
+    agent = _make_agent(model, tools=[tool], hooks=hooks)
+
+    result = await agent.run("Use the tool")
+
+    assert "mock result" in result
+
+
+async def test_hook_timeout_does_not_block_the_tool():
+    """A hook that hangs past its timeout must be caught, not left to hang
+    the tool call — a slow hook still lets the tool finish."""
+    tool = MockTool()
+    hooks = HookManager({
+        "hooks": {
+            "before_mock_tool": [{"command": "sleep 5", "timeout": 1}],
+        },
+    })
+    model = MockModel([
+        [{"type": "tool_call", "id": "call_1", "name": "mock_tool",
+          "arguments": {"arg": "hello"}},
+         {"type": "done", "usage": {}}],
+        [{"type": "text", "content": "Tool said: mock result"},
+         {"type": "done", "usage": {}}],
+    ])
+    agent = _make_agent(model, tools=[tool], hooks=hooks)
+
+    result = await asyncio.wait_for(agent.run("Use the tool"), timeout=5)
+
+    assert "mock result" in result
+
+
+async def test_hook_manager_exception_is_swallowed_to_dim_note():
+    """Defense in depth: even if HookManager.run_hooks itself raises (not
+    just an individual hook failing), the tool call must still complete and
+    the exception must never propagate out of the agent loop."""
+
+    class _ExplodingHooks:
+        def has_hooks(self, event):
+            return True
+
+        async def run_hooks(self, event, context, console=None):
+            raise RuntimeError("hook plumbing exploded")
+
+    tool = MockTool()
+    model = MockModel([
+        [{"type": "tool_call", "id": "call_1", "name": "mock_tool",
+          "arguments": {"arg": "hello"}},
+         {"type": "done", "usage": {}}],
+        [{"type": "text", "content": "Tool said: mock result"},
+         {"type": "done", "usage": {}}],
+    ])
+    agent = _make_agent(model, tools=[tool], hooks=_ExplodingHooks())
+
+    result = await agent.run("Use the tool")
+
+    assert "mock result" in result
+    # The exception surfaced only as a dim console note, not a crash.
+    console_output = agent.console.file.getvalue()
+    assert "hook error" in console_output
