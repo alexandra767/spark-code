@@ -249,7 +249,7 @@ def _fake_git_factory(repo_root, calls, *, worktree_ok=True, diffstat="",
     return _fake
 
 
-def test_scope_registry_for_worktree_narrows_write_tools():
+def test_scope_registry_for_worktree_narrows_write_and_bash_tools():
     from spark_code.cli import build_tools
     base = dispatch._build_subagent_registry(
         "implementer", base_registry=build_tools())
@@ -257,9 +257,36 @@ def test_scope_registry_for_worktree_narrows_write_tools():
 
     assert scoped.get("write_file").cwd == "/some/worktree/path"
     assert scoped.get("edit_file").cwd == "/some/worktree/path"
-    # Every other tool is REUSED, not rebuilt — same instance as the base.
-    assert scoped.get("bash") is base.get("bash")
+    # bash MUST be scoped too — otherwise `bash: rm -rf *` in an isolated
+    # dispatch would hit the user's REAL tree (the headline guarantee).
+    assert scoped.get("bash").cwd == "/some/worktree/path"
+    assert scoped.get("bash") is not base.get("bash")  # fresh, scoped instance
+    # Read-only tools are still REUSED, not rebuilt — same instance as base.
     assert scoped.get("read_file") is base.get("read_file")
+
+
+async def test_setup_isolation_removes_worktree_if_scoping_raises(tmp_path, monkeypatch):
+    """Leak-window guard: if _scope_registry_for_worktree raises AFTER the
+    worktree is created (e.g. a bad config trips resolve_write_roots),
+    _setup_worktree_isolation must remove the just-created worktree rather
+    than leak it — then re-raise so the outer handler reports the error."""
+    calls = []
+    monkeypatch.setattr(dispatch, "_run_git", _fake_git_factory(str(tmp_path), calls))
+
+    def boom(base_registry, worktree_path, config):
+        raise RuntimeError("scoping blew up")
+    monkeypatch.setattr(dispatch, "_scope_registry_for_worktree", boom)
+
+    from spark_code.cli import build_tools
+    base = dispatch._build_subagent_registry("implementer", base_registry=build_tools())
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(RuntimeError, match="scoping blew up"):
+        await dispatch._setup_worktree_isolation(base, _cfg())
+
+    remove_calls = [c for c, _cwd in calls if c[:2] == ["worktree", "remove"]]
+    assert len(remove_calls) == 1  # the created worktree was cleaned up, not leaked
+    assert "--force" in remove_calls[0]
 
 
 async def test_isolated_implementer_creates_worktree_under_dot_spark(tmp_path, monkeypatch):
@@ -561,6 +588,57 @@ async def test_live_isolated_dispatch_real_git_repo(tmp_path, monkeypatch):
     assert not os.path.isfile(repo / "new_file.txt")
     # The real repo's tracked working tree is untouched (only the untracked
     # .spark/worktrees/ scaffolding is new — the worktree lifecycle itself).
+    status = subprocess.run(["git", "status", "--porcelain", "--", "README.md"],
+                            cwd=repo, capture_output=True, text=True, check=True)
+    assert status.stdout.strip() == ""
+
+
+class _BashRelativeWriteModel:
+    """Issues a bash command that writes to a RELATIVE path with NO `cd` and
+    NO absolute path — the exact data-loss scenario. If bash isn't scoped to
+    the worktree, this lands in the user's REAL tree."""
+
+    def __init__(self):
+        self._call = 0
+
+    async def chat(self, messages=None, **kwargs):
+        self._call += 1
+        if self._call == 1:
+            yield {"type": "tool_call", "id": "call_1", "name": "bash",
+                  "arguments": {"command": "echo danger > bash_relative.txt"}}
+            yield {"type": "done", "usage": {}}
+        else:
+            yield {"type": "text", "content": "ran the bash write"}
+            yield {"type": "done", "usage": {}}
+
+    async def close(self):
+        pass
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
+async def test_live_isolated_bash_write_stays_in_worktree(tmp_path, monkeypatch):
+    """CRITICAL regression guard: an isolated implementer's bash write to a
+    RELATIVE path must land in the worktree, NEVER the user's real tree."""
+    import os
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_temp_repo(repo)
+    monkeypatch.chdir(repo)
+
+    model = _BashRelativeWriteModel()
+    result = await dispatch.run_subagent(
+        model, "run a bash write", "implementer", _cfg(), "trust", isolated=True)
+
+    assert "ran the bash write" in result
+    # The file must NOT be in the real repo root — that would be data loss.
+    assert not os.path.isfile(repo / "bash_relative.txt"), \
+        "DATA LOSS: isolated bash wrote to the user's real tree!"
+    # It landed in the worktree instead.
+    m = re.search(r"(\S+/\.spark/worktrees/[0-9a-f]{8})", result)
+    assert m, f"worktree path not in report: {result!r}"
+    worktree = m.group(1)
+    assert os.path.isfile(os.path.join(worktree, "bash_relative.txt"))
+    # Real tree's tracked files untouched.
     status = subprocess.run(["git", "status", "--porcelain", "--", "README.md"],
                             cwd=repo, capture_output=True, text=True, check=True)
     assert status.stdout.strip() == ""

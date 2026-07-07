@@ -198,24 +198,38 @@ async def _remove_worktree(repo_root: str, worktree_path: str,
 
 def _scope_registry_for_worktree(base_registry: ToolRegistry, worktree_path: str,
                                  config: dict) -> ToolRegistry:
-    """A COPY of *base_registry* with write_file/edit_file replaced by fresh
-    instances whose write validation is rooted at *worktree_path* instead of
-    the ambient process cwd — the actual isolation boundary. Task 1's
-    `permissions.write_roots` composes in as an ADDITIONAL allowance on top
-    of the worktree root (e.g. a configured sibling repo), exactly as it
-    would for a non-isolated dispatch.
+    """A COPY of *base_registry* with the three MUTATING tools —
+    write_file, edit_file, and bash — replaced by fresh instances rooted at
+    *worktree_path* instead of the ambient process cwd. This is the actual
+    isolation boundary:
+
+      * write_file/edit_file get their write validation scoped to the
+        worktree (a write outside it is refused). Task 1's
+        `permissions.write_roots` composes in as an ADDITIONAL allowance on
+        top of the worktree root (e.g. a configured sibling repo), exactly as
+        it would for a non-isolated dispatch.
+      * bash gets its child-process cwd scoped to the worktree, so a
+        relative-path command (`echo > f`, `rm -rf *`, `sed -i`, a build/
+        test that writes files) executes IN the worktree — NOT the user's
+        real tracked tree. Without this, the feature's headline guarantee
+        ("runs in a worktree, won't touch your files") is a lie for bash:
+        one un-cd'd command is one `rm` away from real data loss.
 
     Deliberately NOT a global `os.chdir()`: this process can be running other
     concurrent agents/workers (team.py spawns worker Agents via
     `asyncio.create_task`, sharing this same process) that must keep seeing
-    the real cwd throughout. An instance-level override on just these two
-    tool objects has no such cross-task blast radius.
+    the real cwd throughout. An instance-level override on just these tool
+    objects — bash uses the per-child subprocess `cwd=` kwarg, write/edit use
+    an instance field — has no such cross-task blast radius.
 
-    Every other tool (bash, read_file, list_dir, glob, grep, ...) is reused
+    Read-only tools (read_file, list_dir, glob, grep, ...) are reused
     UNCHANGED from base_registry — they still resolve relative paths against
     the real process cwd, which is why the sub-agent is told (see
-    `_WORKTREE_PROMPT`) to use ABSOLUTE worktree paths for everything.
+    `_WORKTREE_PROMPT`) to use ABSOLUTE worktree paths for reads. Scoping
+    their relative-path resolution to the worktree too is a documented
+    read-only follow-up (no data-loss risk, so out of scope for this fix).
     """
+    from .tools.bash import BashTool
     from .tools.edit_file import EditFileTool
     from .tools.write_file import WriteFileTool
 
@@ -226,6 +240,8 @@ def _scope_registry_for_worktree(base_registry: ToolRegistry, worktree_path: str
             scoped.register(WriteFileTool(write_roots=write_roots, cwd=worktree_path))
         elif tool.name == "edit_file":
             scoped.register(EditFileTool(write_roots=write_roots, cwd=worktree_path))
+        elif tool.name == "bash":
+            scoped.register(BashTool(cwd=worktree_path))
         else:
             scoped.register(tool)
     return scoped
@@ -251,7 +267,16 @@ async def _setup_worktree_isolation(
     worktree_path, err = await _create_worktree(repo_root)
     if worktree_path is None:
         return base_registry, None, None, f"{err} — ran without worktree isolation"
-    scoped = _scope_registry_for_worktree(base_registry, worktree_path, config)
+    # Close the leak window: scoping runs AFTER the worktree exists on disk,
+    # so if it raises (e.g. a malformed config trips resolve_write_roots) the
+    # just-created worktree would otherwise leak — the caller's worktree_path
+    # is still None at this point, so its own cleanup wouldn't catch it.
+    # Remove it here, then re-raise for the outer handler to report.
+    try:
+        scoped = _scope_registry_for_worktree(base_registry, worktree_path, config)
+    except Exception:
+        await _remove_worktree(repo_root, worktree_path, force=True)
+        raise
     return scoped, repo_root, worktree_path, ""
 
 

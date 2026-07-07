@@ -55,9 +55,29 @@ class BashTool(Tool):
     name = "bash"
     description = "Execute a shell command and return its output (stdout + stderr). Use for git, npm, pip, tests, and other system commands."
 
+    def __init__(self, cwd: str | None = None):
+        # Phase 5 Task 8: instance-level working directory for the child
+        # process. When set (dispatch.py scopes an isolated implementer
+        # sub-agent to its git worktree), EVERY spawn below runs the child in
+        # this directory via the subprocess ``cwd=`` kwarg — a PER-CHILD
+        # setting that never touches the parent process's cwd, so it's
+        # completely race-free w.r.t. other concurrently-running agents/
+        # workers sharing this process (unlike os.chdir()). None (the default)
+        # preserves the exact pre-Task-8 behavior: children run in
+        # os.getcwd(). This is the data-loss fix — without it an isolated
+        # dispatch's ``bash: rm -rf *`` / ``echo > f`` / ``sed -i`` would land
+        # on the user's REAL tracked files.
+        self.cwd = cwd
+
     @property
     def supports_streaming(self) -> bool:
         return True
+
+    def _spawn_cwd(self) -> str:
+        """The directory the child process runs in: the instance override if
+        set (worktree isolation), else the live process cwd (unchanged
+        default)."""
+        return self.cwd or os.getcwd()
 
     @property
     def parameters(self) -> dict:
@@ -91,7 +111,7 @@ class BashTool(Tool):
                 command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=os.getcwd(),
+                cwd=self._spawn_cwd(),
                 # Own process group so a timeout can kill the whole tree, not
                 # just /bin/sh (which would orphan children).
                 start_new_session=True,
@@ -207,7 +227,10 @@ class BashTool(Tool):
             parts = command.strip().split()
             if len(parts) >= 2 and parts[1].endswith(".py"):
                 try:
-                    with open(os.path.join(os.getcwd(), parts[1])) as f:
+                    # Resolve the script against the same cwd the child will
+                    # run in (worktree when scoped), so GUI detection is
+                    # consistent with where the command actually executes.
+                    with open(os.path.join(self._spawn_cwd(), parts[1])) as f:
                         head = f.read(2000)
                     if any(kw in head for kw in gui_keywords):
                         return True
@@ -236,7 +259,7 @@ class BashTool(Tool):
                 command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
-                cwd=os.getcwd(),
+                cwd=self._spawn_cwd(),
                 # Own process group so a timeout kills the whole tree.
                 start_new_session=True,
                 # Raise the readline() buffer limit so long lines don't blow up.
@@ -295,7 +318,7 @@ class BashTool(Tool):
             process = subprocess.Popen(
                 command,
                 shell=True,
-                cwd=os.getcwd(),
+                cwd=self._spawn_cwd(),
                 stdin=None,
                 stdout=None,
                 stderr=None,

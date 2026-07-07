@@ -108,3 +108,50 @@ async def test_timeout_kills_child_process_tree(tool):
     elapsed = time.monotonic() - start
     assert "timed out" in result.lower()
     assert elapsed < 10  # would be ~30s if the tree weren't killed
+
+
+# --- cwd scoping (Phase 5 Task 8) -------------------------------------------
+# BashTool(cwd=...) runs its child process in that directory via the
+# subprocess cwd= kwarg — per-child, never os.chdir()'ing the parent — so an
+# isolated implementer sub-agent's bash lands in its worktree, not the user's
+# real tree.
+
+
+async def test_cwd_override_runs_child_in_that_dir(tmp_dir):
+    scoped = BashTool(cwd=tmp_dir)
+    result = await scoped.execute(command="pwd")
+    assert os.path.realpath(result.strip()) == os.path.realpath(tmp_dir)
+
+
+async def test_cwd_override_writes_land_in_that_dir(tmp_dir):
+    scoped = BashTool(cwd=tmp_dir)
+    await scoped.execute(command="echo hi > scoped_file.txt")
+    # The file lands in the override dir, NOT in the process cwd.
+    assert os.path.isfile(os.path.join(tmp_dir, "scoped_file.txt"))
+    assert not os.path.isfile(os.path.join(os.getcwd(), "scoped_file.txt"))
+
+
+async def test_cwd_override_streaming_runs_child_in_that_dir(tmp_dir):
+    scoped = BashTool(cwd=tmp_dir)
+    result = await scoped.execute_streaming(command="pwd")
+    assert os.path.realpath(result.strip()) == os.path.realpath(tmp_dir)
+
+
+async def test_cwd_override_background_runs_child_in_that_dir(tmp_dir):
+    scoped = BashTool(cwd=tmp_dir)
+    # Background write, then briefly wait and confirm it landed in the override.
+    await scoped.execute(command="echo bg > bg_file.txt; sleep 0", background=True)
+    import asyncio
+    for _ in range(50):
+        if os.path.isfile(os.path.join(tmp_dir, "bg_file.txt")):
+            break
+        await asyncio.sleep(0.02)
+    assert os.path.isfile(os.path.join(tmp_dir, "bg_file.txt"))
+    assert not os.path.isfile(os.path.join(os.getcwd(), "bg_file.txt"))
+
+
+async def test_default_bash_uses_process_cwd(tmp_dir):
+    # BashTool() with no override is unchanged: runs in the process cwd.
+    default = BashTool()
+    result = await default.execute(command="pwd")
+    assert os.path.realpath(result.strip()) == os.path.realpath(os.getcwd())
