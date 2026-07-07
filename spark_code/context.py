@@ -42,6 +42,7 @@ Guidelines:
 - Use markdown formatting in responses
 - For any task with 3 or more steps, maintain a todo list with the todo_write tool: set statuses as you start and finish each step. Keep exactly one item in_progress.
 - Use dispatch_agent for open-ended codebase searches, reviews, or research — it runs in a fresh context and returns a summary, keeping your own context small.
+- Before declaring code work done, run the project's tests/build and report the result.
 
 Important: When the user types what looks like a shell command (e.g. "python snake.py", "npm start",
 "ls -la", "pip install X", "make build"), just run it immediately with the bash tool.
@@ -112,6 +113,7 @@ Use dispatch_agent for open-ended codebase searches, reviews, or research — it
 - If no tests exist, write basic tests first, then implement
 - If tests fail, read the failure, fix it, re-run — loop until green
 - Common test commands: `pytest`, `npm test`, `cargo test`, `go test ./...`
+- Before declaring code work done, run the project's tests/build and report the result.
 
 ## Git Strategy
 

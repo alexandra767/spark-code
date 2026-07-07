@@ -67,7 +67,7 @@ def _make_console() -> Console:
     return Console(file=io.StringIO(), force_terminal=True)
 
 
-def _make_agent(model, tools=None, permissions=None):
+def _make_agent(model, tools=None, permissions=None, test_command=None):
     """Build an Agent wired to the given mock model."""
     registry = ToolRegistry()
     if tools:
@@ -80,7 +80,69 @@ def _make_agent(model, tools=None, permissions=None):
         tools=registry,
         permissions=permissions or PermissionManager(mode="trust"),
         console=_make_console(),
+        test_command=test_command,
     )
+
+
+class CapturingModel(MockModel):
+    """A MockModel that also records the ``messages`` sent on every call, so
+    tests can assert what a TRANSIENT nudge injected (never persisted to
+    context history) actually looked like on the wire for a given round."""
+
+    def __init__(self, responses):
+        super().__init__(responses)
+        self.captured_messages: list = []
+
+    async def chat(self, **kwargs):
+        self.captured_messages.append(kwargs.get("messages"))
+        async for chunk in super().chat(**kwargs):
+            yield chunk
+
+
+class _WriteFileTool(Tool):
+    """A write_file stand-in that always succeeds — for verification-habit
+    tests, the exact write behavior doesn't matter, only the tool NAME (the
+    agent tracks write_file/edit_file by name) and that the result has no
+    "Error" in it (so it counts as a successful write)."""
+
+    name = "write_file"
+    description = "write a file"
+    is_read_only = False
+    requires_permission = False
+
+    @property
+    def parameters(self):
+        return {
+            "type": "object",
+            "properties": {"file_path": {"type": "string"},
+                          "content": {"type": "string"}},
+            "required": ["file_path", "content"],
+        }
+
+    async def execute(self, **kwargs):
+        return "Wrote 10 bytes to a.py"
+
+
+class _BashTool(Tool):
+    """A bash stand-in for verification-habit tests — real command execution
+    is irrelevant; only the ``command`` argument (checked for the detected
+    test command) and a successful (non-error) result matter."""
+
+    name = "bash"
+    description = "run a shell command"
+    is_read_only = False
+    requires_permission = False
+
+    @property
+    def parameters(self):
+        return {
+            "type": "object",
+            "properties": {"command": {"type": "string"}},
+            "required": ["command"],
+        }
+
+    async def execute(self, **kwargs):
+        return "exit 0"
 
 
 # ---------------------------------------------------------------------------
@@ -642,3 +704,182 @@ def test_budget_for_tool_config_override():
     assert agent._budget_for("web_search") == 15000
 
     assert agent.context.last_prompt_tokens is None
+
+
+# ---------------------------------------------------------------------------
+# Task 6: verification habit — run tests before claiming done
+# ---------------------------------------------------------------------------
+
+
+async def test_verify_nudge_fires_once_then_second_final_answer_ends_turn():
+    """write_file round -> final answer (no tool calls) -> the nudge fires and
+    the loop continues ONCE -> a second final answer ends the turn normally.
+    The nudge text must appear in round 3's outgoing request but NEVER in
+    persisted context history (transient, like the round-limit notes)."""
+    model = CapturingModel([
+        [{"type": "tool_call", "id": "call_1", "name": "write_file",
+          "arguments": {"file_path": "a.py", "content": "x"}},
+         {"type": "done", "usage": {}}],
+        [{"type": "text", "content": "First answer."},
+         {"type": "done", "usage": {}}],
+        [{"type": "text", "content": "Second answer."},
+         {"type": "done", "usage": {}}],
+    ])
+    agent = _make_agent(model, tools=[_WriteFileTool()], test_command="pytest")
+
+    result = await agent.run("change a file")
+
+    assert result == "First answer.Second answer."
+    assert model._call == 3, "exactly one extra round after the nudge"
+    assert agent._verify_nudged is True
+    assert agent._verify_dirty is True
+    assert agent._verify_tests_run is False
+
+    # The nudge was injected into round 3's request only.
+    round3_request = model.captured_messages[2]
+    assert any(
+        m.get("role") == "system"
+        and "have not run the project's tests" in m.get("content", "")
+        and "`pytest`" in m.get("content", "")
+        for m in round3_request
+    )
+    # Round 1 and round 2 requests must NOT have carried it.
+    for earlier in model.captured_messages[:2]:
+        assert not any(
+            "have not run the project's tests" in (m.get("content") or "")
+            for m in earlier
+        )
+    # Never persisted into actual conversation history.
+    assert not any(
+        "have not run the project's tests" in (m.get("content") or "")
+        for m in agent.context.messages
+    )
+    # Both of the model's real answers ARE persisted.
+    assistant_texts = [m["content"] for m in agent.context.messages
+                       if m.get("role") == "assistant" and m.get("content")]
+    assert "First answer." in assistant_texts
+    assert "Second answer." in assistant_texts
+
+
+async def test_verify_no_nudge_when_tests_ran_this_turn():
+    """A bash call containing the detected test command marks tests as run —
+    the subsequent final answer must NOT be interrupted by a nudge."""
+    model = CapturingModel([
+        [{"type": "tool_call", "id": "call_1", "name": "write_file",
+          "arguments": {"file_path": "a.py", "content": "x"}},
+         {"type": "done", "usage": {}}],
+        [{"type": "tool_call", "id": "call_2", "name": "bash",
+          "arguments": {"command": "pytest -q"}},
+         {"type": "done", "usage": {}}],
+        [{"type": "text", "content": "All tests pass."},
+         {"type": "done", "usage": {}}],
+    ])
+    agent = _make_agent(model, tools=[_WriteFileTool(), _BashTool()],
+                        test_command="pytest")
+
+    result = await agent.run("change a file and verify")
+
+    assert result == "All tests pass."
+    assert model._call == 3, "no extra round — nudge must not fire"
+    assert agent._verify_dirty is True
+    assert agent._verify_tests_run is True
+    assert agent._verify_nudged is False
+
+
+async def test_verify_bash_match_not_fooled_by_substring():
+    """A bash command that merely CONTAINS the test-command word as a
+    substring of something else (e.g. "mypytest_dir") must NOT count as having
+    run the tests — matched at word boundaries, like detect_test_command's
+    instructions-text check."""
+    model = CapturingModel([
+        [{"type": "tool_call", "id": "call_1", "name": "write_file",
+          "arguments": {"file_path": "a.py", "content": "x"}},
+         {"type": "done", "usage": {}}],
+        [{"type": "tool_call", "id": "call_2", "name": "bash",
+          "arguments": {"command": "ls mypytest_dir/"}},
+         {"type": "done", "usage": {}}],
+        [{"type": "text", "content": "Here's the directory listing."},
+         {"type": "done", "usage": {}}],
+        [{"type": "text", "content": "Ran pytest, all green."},
+         {"type": "done", "usage": {}}],
+    ])
+    agent = _make_agent(model, tools=[_WriteFileTool(), _BashTool()],
+                        test_command="pytest")
+
+    result = await agent.run("change a file and list a dir")
+
+    # The "mypytest_dir" ls must NOT satisfy tests-run — nudge fires once.
+    assert agent._verify_tests_run is False
+    assert agent._verify_nudged is True
+    assert model._call == 4
+    assert result == "Here's the directory listing.Ran pytest, all green."
+
+
+async def test_verify_no_nudge_on_read_only_turn():
+    """No write/edit tool ever succeeded this turn — a plain Q&A turn must
+    never be interrupted by the verification nudge."""
+    model = CapturingModel([
+        [{"type": "text", "content": "The answer is 42."},
+         {"type": "done", "usage": {}}],
+    ])
+    agent = _make_agent(model, test_command="pytest")
+
+    result = await agent.run("what is the answer")
+
+    assert result == "The answer is 42."
+    assert model._call == 1
+    assert agent._verify_dirty is False
+    assert agent._verify_nudged is False
+
+
+async def test_verify_no_nudge_when_test_command_undetectable():
+    """detect_test_command returning None (no project markers, no instructions
+    override) must turn the feature silently off — even after a write and a
+    final answer, no nudge fires."""
+    model = CapturingModel([
+        [{"type": "tool_call", "id": "call_1", "name": "write_file",
+          "arguments": {"file_path": "a.py", "content": "x"}},
+         {"type": "done", "usage": {}}],
+        [{"type": "text", "content": "Done."},
+         {"type": "done", "usage": {}}],
+    ])
+    agent = _make_agent(model, tools=[_WriteFileTool()], test_command=None)
+
+    result = await agent.run("change a file")
+
+    assert result == "Done."
+    assert model._call == 2, "no extra round — test_command is None"
+    assert agent._verify_dirty is True
+    assert agent._verify_nudged is False
+
+
+async def test_verify_flags_reset_across_user_turns():
+    """The dirty/tests-run/nudged flags are per-TURN state: a second call to
+    run() (a new user message) must start clean even though the previous turn
+    left them set."""
+    model = CapturingModel([
+        # Turn 1: write, final answer -> nudge fires -> second final ends turn.
+        [{"type": "tool_call", "id": "call_1", "name": "write_file",
+          "arguments": {"file_path": "a.py", "content": "x"}},
+         {"type": "done", "usage": {}}],
+        [{"type": "text", "content": "First answer."},
+         {"type": "done", "usage": {}}],
+        [{"type": "text", "content": "Second answer."},
+         {"type": "done", "usage": {}}],
+        # Turn 2: pure read-only Q&A — must NOT inherit turn 1's dirty state.
+        [{"type": "text", "content": "Just answering, no changes."},
+         {"type": "done", "usage": {}}],
+    ])
+    agent = _make_agent(model, tools=[_WriteFileTool()], test_command="pytest")
+
+    await agent.run("change a file")
+    assert agent._verify_nudged is True
+    assert agent._verify_dirty is True
+
+    result2 = await agent.run("what does this do")
+
+    assert result2 == "Just answering, no changes."
+    assert model._call == 4, "turn 2 must not trigger another nudge round"
+    assert agent._verify_dirty is False
+    assert agent._verify_tests_run is False
+    assert agent._verify_nudged is False

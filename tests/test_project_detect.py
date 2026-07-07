@@ -7,7 +7,7 @@ import tempfile
 
 import pytest
 
-from spark_code.project_detect import detect_project_type
+from spark_code.project_detect import detect_project_type, detect_test_command
 
 
 @pytest.fixture
@@ -150,3 +150,72 @@ def test_multiple_markers(project_dir):
     result = detect_project_type(project_dir)
     assert "Python" in result
     assert "React" in result
+
+
+# ---------------------------------------------------------------------------
+# detect_test_command (Task 6: verification habit)
+# ---------------------------------------------------------------------------
+
+
+def test_detect_test_command_empty_directory(project_dir):
+    assert detect_test_command(project_dir, "") is None
+
+
+def test_detect_test_command_pyproject(project_dir):
+    with open(os.path.join(project_dir, "pyproject.toml"), "w") as f:
+        f.write('[project]\nname = "myapp"\n')
+    assert detect_test_command(project_dir, "") == "pytest"
+
+
+def test_detect_test_command_package_json(project_dir):
+    with open(os.path.join(project_dir, "package.json"), "w") as f:
+        f.write('{"name": "myapp"}')
+    assert detect_test_command(project_dir, "") == "npm test"
+
+
+def test_detect_test_command_cargo(project_dir):
+    with open(os.path.join(project_dir, "Cargo.toml"), "w") as f:
+        f.write('[package]\nname = "myapp"\n')
+    assert detect_test_command(project_dir, "") == "cargo test"
+
+
+def test_detect_test_command_go(project_dir):
+    with open(os.path.join(project_dir, "go.mod"), "w") as f:
+        f.write("module example.com/myapp\n")
+    assert detect_test_command(project_dir, "") == "go test"
+
+
+def test_detect_test_command_swift_package(project_dir):
+    with open(os.path.join(project_dir, "Package.swift"), "w") as f:
+        f.write("// swift-tools-version:5.9\n")
+    assert detect_test_command(project_dir, "") == "xcodebuild"
+
+
+def test_detect_test_command_xcodeproj(project_dir):
+    os.mkdir(os.path.join(project_dir, "MyApp.xcodeproj"))
+    assert detect_test_command(project_dir, "") == "xcodebuild"
+
+
+def test_detect_test_command_instructions_override_wins(project_dir):
+    """A pyproject.toml (→ pytest by inference) is overridden by an explicit
+    'npm test' instruction in CLAUDE.md/SPARK.md content — instructions win."""
+    with open(os.path.join(project_dir, "pyproject.toml"), "w") as f:
+        f.write('[project]\nname = "myapp"\n')
+    instructions = "## Testing\n\nRun `npm test` before committing.\n"
+    assert detect_test_command(project_dir, instructions) == "npm test"
+
+
+def test_detect_test_command_instructions_used_without_project_markers(project_dir):
+    """Instructions alone (no project markers on disk) still resolve a command."""
+    assert detect_test_command(project_dir, "test: cargo test") == "cargo test"
+
+
+def test_detect_test_command_word_boundary_not_fooled_by_substring(project_dir):
+    """'pytest' must not match inside an unrelated filename/identifier in the
+    instructions text (e.g. mentioning 'test_pytest_helpers.py')."""
+    with open(os.path.join(project_dir, "package.json"), "w") as f:
+        f.write('{"name": "myapp"}')
+    instructions = "See test_pytest_helpers.py and mypytest_util for helpers."
+    # No word-boundary "pytest" match in the instructions -> falls back to the
+    # project-type marker (package.json -> npm test), NOT a false "pytest" hit.
+    assert detect_test_command(project_dir, instructions) == "npm test"

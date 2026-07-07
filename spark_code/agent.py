@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -53,6 +54,28 @@ TOOL_RESULT_BUDGETS = {
     "grep": 8000,
     "dispatch_agent": 8000,
 }
+
+# Verification habit (Task 6): tool names whose successful execution "dirties"
+# the turn (per the plan's wording — bash-invoked writes/formatters don't
+# count, only the two dedicated file-mutation tools).
+_WRITE_TOOL_NAMES = ("write_file", "edit_file")
+
+# Transient nudge injected (like the round-limit notes above) when the model
+# produced a final answer after changing files this turn without running the
+# project's tests. Never persisted to context history — see _agent_loop.
+VERIFY_NUDGE_TEMPLATE = (
+    "You changed files but have not run the project's tests (`{cmd}`). "
+    "Run them before concluding, or state explicitly why not."
+)
+
+
+def _bash_ran_test_command(command: str, test_command: str) -> bool:
+    """True iff ``command`` invokes ``test_command``, matched at word
+    boundaries — a plain substring check would let e.g. test_command
+    "pytest" false-positive on an unrelated command like "ls mypytest_dir/".
+    """
+    return re.search(r"\b" + re.escape(test_command) + r"\b", command) is not None
+
 
 # How many recent messages compaction keeps verbatim (the auto-trigger and
 # Context.compact's default must agree).
@@ -227,7 +250,8 @@ class Agent:
                  hooks: HookManager | None = None,
                  on_iteration: object | None = None,
                  result_budgets: dict[str, int] | None = None,
-                 plan_state: PlanState | None = None):
+                 plan_state: PlanState | None = None,
+                 test_command: str | None = None):
         self.model = model
         self.context = context
         self.tools = tools
@@ -235,6 +259,16 @@ class Agent:
         # Shared plan-mode flag (same object the CLI holds). None in contexts
         # that never use plan mode (one-shot, sub-agents) → enforcement off.
         self.plan_state = plan_state
+        # Verification habit (Task 6): the project's test command, detected
+        # once at construction (detect_test_command — instructions override,
+        # else project-type markers). None → feature silently off (nothing
+        # detectable to nudge about). Per-turn tracking flags are reset at the
+        # top of _agent_loop (see there for why that's the right boundary).
+        self._test_command = test_command
+        self._verify_dirty = False
+        self._verify_tests_run = False
+        self._verify_nudged = False
+        self._verify_nudge_pending = False
         self.console = console or Console()
         self.output_prefix = output_prefix
         self.stats = stats
@@ -309,6 +343,33 @@ class Agent:
             if (isinstance(args, dict)
                     and args.get("agent_type") in ("explore", "reviewer")):
                 return False
+        return True
+
+    def _should_nudge_verification(self) -> bool:
+        """True iff the model just gave a final answer this round having
+        changed files this turn without running the project's tests.
+
+        Guards (all must hold):
+          * a test command was detectable at all (``None`` → feature off);
+          * a write/edit tool succeeded THIS TURN (``_verify_dirty``);
+          * no bash command containing that test command ran THIS TURN
+            (``_verify_tests_run``);
+          * the nudge hasn't already fired this turn (``_verify_nudged`` —
+            once means once);
+          * plan mode isn't active. Redundant in practice — writes are denied
+            before they can succeed while plan mode is on, so ``_verify_dirty``
+            can't become True there — but kept explicit (defense in depth,
+            same reasoning as ``_plan_denies`` being checked on both tool
+            paths) in case that invariant ever changes.
+        """
+        if self._verify_nudged:
+            return False
+        if not self._test_command:
+            return False
+        if not self._verify_dirty or self._verify_tests_run:
+            return False
+        if self.plan_state is not None and self.plan_state.active:
+            return False
         return True
 
     async def _maybe_compact(self) -> str | None:
@@ -386,6 +447,13 @@ class Agent:
         full_response = ""
         rounds = 0
         self._cancelled = False
+        # Verification-habit flags reset PER USER TURN — _agent_loop runs once
+        # per run()/run_without_user_add() call, i.e. once per turn, so this is
+        # the natural reset boundary (mirrors self._cancelled just above).
+        self._verify_dirty = False
+        self._verify_tests_run = False
+        self._verify_nudged = False
+        self._verify_nudge_pending = False
 
         while rounds < self.MAX_TOOL_ROUNDS:
             rounds += 1
@@ -422,6 +490,14 @@ class Agent:
             # moment the plan is approved / mode changes, same as round notes).
             if self.plan_state is not None and self.plan_state.active:
                 request_messages.append({"role": "system", "content": PLAN_NUDGE})
+            # Verification nudge is TRANSIENT too — injected into exactly ONE
+            # request (the round right after it fires, set by the "no tool
+            # calls" branch below) and consumed immediately so it can never
+            # persist into history or repeat beyond that single extra chance.
+            if self._verify_nudge_pending:
+                request_messages.append({"role": "system", "content":
+                    VERIFY_NUDGE_TEMPLATE.format(cmd=self._test_command)})
+                self._verify_nudge_pending = False
 
             # Collect response from model
             text_parts = []
@@ -535,6 +611,13 @@ class Agent:
             # No tool calls — model is done
             if not tool_calls:
                 self.context.add_assistant(text)
+                if self._should_nudge_verification():
+                    # Give the model ONE more round to run tests (or explain
+                    # why not) before letting the turn end. _verify_nudged
+                    # guards against firing more than once per turn.
+                    self._verify_nudged = True
+                    self._verify_nudge_pending = True
+                    continue
                 break
 
             # Process tool calls — keep any narration the model produced
@@ -744,6 +827,19 @@ class Agent:
             file_path = tc["arguments"].get("file_path", "")
             if file_path:
                 self.stats.record_file_created(file_path)
+
+        # Verification habit (Task 6): a successful write/edit "dirties" the
+        # turn; a bash command that contains the detected test command marks
+        # tests as run — checked AFTER execute() so a permission denial or a
+        # missing-arguments guard (both `return` earlier) never counts as
+        # either. A failing test run still counts as "run" — the nudge is
+        # about running tests, not passing them.
+        if tc["name"] in _WRITE_TOOL_NAMES and "Error" not in result:
+            self._verify_dirty = True
+        elif tc["name"] == "bash" and self._test_command:
+            command = tc["arguments"].get("command", "")
+            if _bash_ran_test_command(command, self._test_command):
+                self._verify_tests_run = True
 
         # Cache read-only results
         if (self.tool_cache

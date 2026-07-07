@@ -36,7 +36,7 @@ from .plan_executor import execute_plan
 from .plan_mode import PlanState, cycle_mode
 from .platform_info import format_platform_prompt
 from .preflight import _extract_max_context, context_window_warning, fetch_server_models
-from .project_detect import detect_project_type
+from .project_detect import detect_project_type, detect_test_command
 from .projectplan import extract_keywords, fetch_rag_context
 from .skills.base import SkillRegistry, check_skill_compatibility
 from .snippets import SnippetLibrary
@@ -2336,6 +2336,12 @@ async def run_interactive(config: dict, resume_session: str = "",
     if project_type:
         system_prompt += f"\n\nThis is a {project_type}."
 
+    # Verification habit (Task 6): detect the project's test command once —
+    # instructions text checked first (an explicit CLAUDE.md/SPARK.md
+    # instruction wins), falling back to project-type markers. None → the
+    # Agent's nudge is silently off (nothing detectable to verify with).
+    test_command = detect_test_command(os.getcwd(), instructions.text)
+
     # Single /v1/models fetch feeds both the real-model-name banner display
     # right below and the context-window preflight check further down —
     # startup used to hit /v1/models twice (once per consumer); now once.
@@ -2499,7 +2505,7 @@ async def run_interactive(config: dict, resume_session: str = "",
                   stats=session_stats, on_tool_start=_on_tool_start,
                   tool_cache=tool_cache, hooks=hook_manager,
                   result_budgets=get(config, "tools", "result_budgets", default=None),
-                  plan_state=plan_state)
+                  plan_state=plan_state, test_command=test_command)
 
     # Initialize team system — optionally use a faster model for workers
     task_store = TaskStore()
@@ -3711,8 +3717,11 @@ async def _one_shot(config: dict, prompt: str):
     todo_list = TodoList()
     tools = build_tools(todo_list=todo_list, model=model, config=config,
                         permissions=permissions)
+    # Verification habit (Task 6) — see run_interactive for the full rationale.
+    test_command = detect_test_command(os.getcwd(), load_instructions(os.getcwd()).text)
     agent = Agent(model, context, tools, permissions, console,
-                  result_budgets=get(config, "tools", "result_budgets", default=None))
+                  result_budgets=get(config, "tools", "result_budgets", default=None),
+                  test_command=test_command)
 
     try:
         await agent.run(prompt)

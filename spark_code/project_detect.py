@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 
 
 def detect_project_type(directory: str = ".") -> str:
@@ -146,3 +147,66 @@ def detect_project_type(directory: str = ".") -> str:
     if frameworks:
         parts.extend(frameworks)
     return " + ".join(parts) + " project"
+
+
+# Known test-command literal patterns (Task 6: verification habit). Checked
+# against CLAUDE.md/SPARK.md instructions text FIRST — an explicit
+# human-authored testing instruction always wins over inference from project
+# markers. Order is the priority when more than one pattern appears in the
+# instructions text.
+_KNOWN_TEST_PATTERNS = ("pytest", "npm test", "xcodebuild", "cargo test", "go test")
+
+
+def _contains_word(text: str, phrase: str) -> bool:
+    """True iff ``phrase`` appears in ``text`` at word boundaries.
+
+    A plain substring check would let "pytest" match inside an unrelated
+    filename like "mypytest.py" or "test_pytest_helpers.py" — this anchors the
+    match so it only fires on the literal command/word, not a substring of a
+    longer identifier.
+    """
+    return re.search(r"\b" + re.escape(phrase) + r"\b", text) is not None
+
+
+def detect_test_command(cwd: str = ".", instructions_text: str = "") -> str | None:
+    """Detect the project's test command, or ``None`` if nothing is detectable.
+
+    Checked in order:
+      1. ``instructions_text`` (already-loaded CLAUDE.md/SPARK.md content, see
+         ``spark_code/instructions.py``) for a literal known pattern
+         (``pytest``, ``npm test``, ``xcodebuild``, ``cargo test``, ``go
+         test``) — an explicit project instruction overrides inference.
+      2. Project-type markers in ``cwd`` (pyproject.toml/setup.py/setup.cfg/
+         pytest.ini/conftest.py -> pytest; package.json -> npm test;
+         Cargo.toml -> cargo test; go.mod -> go test; Package.swift or an
+         .xcodeproj/.xcworkspace -> xcodebuild).
+
+    ``None`` means the caller should treat the verification-nudge feature as
+    silently off (no test command to nudge about) rather than guessing.
+    """
+    if instructions_text:
+        for pattern in _KNOWN_TEST_PATTERNS:
+            if _contains_word(instructions_text, pattern):
+                return pattern
+
+    def exists(name: str) -> bool:
+        return os.path.exists(os.path.join(cwd, name))
+
+    if (exists("pyproject.toml") or exists("setup.py") or exists("setup.cfg")
+            or exists("pytest.ini") or exists("conftest.py")):
+        return "pytest"
+    if exists("package.json"):
+        return "npm test"
+    if exists("Cargo.toml"):
+        return "cargo test"
+    if exists("go.mod"):
+        return "go test"
+    if exists("Package.swift"):
+        return "xcodebuild"
+    try:
+        if any(f.endswith(".xcodeproj") or f.endswith(".xcworkspace")
+               for f in os.listdir(cwd) if not f.startswith(".")):
+            return "xcodebuild"
+    except OSError:
+        pass
+    return None
