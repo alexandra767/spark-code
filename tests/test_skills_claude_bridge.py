@@ -420,6 +420,45 @@ class TestSkillIndex:
         assert len(names) == 10
         assert names == sorted(names)  # name-sorted (all same source here)
 
+    def test_whitespace_only_description_does_not_crash_index(self):
+        # Review fix 1: a whitespace-only description ("   ") is truthy, but
+        # strip().splitlines() on it is [] — indexing [0] raised IndexError,
+        # and build_skill_prompt_section is unguarded at cli.py startup, so
+        # ONE bad bridged SKILL.md killed run_interactive.
+        reg = SkillRegistry()
+        reg.register(Skill(name="blank-desc", description="   ", prompt="p"))
+        reg.register(Skill(name="newline-desc", description=" \n ", prompt="p"))
+
+        index = reg.build_index()  # must not raise
+
+        assert "/blank-desc" in index
+        assert "/newline-desc" in index
+        # Empty one-liner → bare name, no dangling " — " separator.
+        assert "/blank-desc —" not in index
+
+    def test_index_excludes_command_colliding_names(self):
+        # Review fix 2: the builtin `review` SKILL must not be advertised to
+        # the model — the /review COMMAND (multi-agent swarm) supersedes it at
+        # the CLI, so an index entry would teach the model a name that
+        # resolves to the lesser skill through auto-expand.
+        from spark_code.ui.input import RESERVED_COMMAND_NAMES
+        reg = SkillRegistry()
+        reg.load_builtin()
+
+        index = reg.build_index(exclude=RESERVED_COMMAND_NAMES)
+
+        assert "/review" not in index
+        assert "/commit" in index  # non-colliding builtins still listed
+
+    def test_reserved_command_names_derived_from_builtin_commands(self):
+        from spark_code.ui.input import _BUILTIN_COMMANDS, RESERVED_COMMAND_NAMES
+        assert "review" in RESERVED_COMMAND_NAMES
+        assert "plan" in RESERVED_COMMAND_NAMES
+        # Bare first tokens only — subcommand entries ("/plan show") collapse
+        # into their command, they don't reserve their argument words.
+        assert "show" not in RESERVED_COMMAND_NAMES
+        assert len(RESERVED_COMMAND_NAMES) <= len(_BUILTIN_COMMANDS)
+
 
 # ---------------------------------------------------------------------------
 # Trigger hint + model-reply auto-expand (agent.py) — a FINAL answer that is
@@ -506,6 +545,25 @@ class TestSkillAutoExpand:
         result = await agent.run("hello")
 
         assert result == "/nope-not-a-skill do something"
+        assert model.calls == 1
+        assert agent._skill_auto_expanded is False
+
+    async def test_command_colliding_name_not_auto_expanded(self):
+        # Review fix 2 (model surface): a bare "/review" reply must NOT expand
+        # into the builtin `review` SKILL — at the CLI that name is the
+        # multi-agent swarm COMMAND, and the model surface must not resolve
+        # the same name to something lesser. Treated as normal text.
+        reg = SkillRegistry()
+        reg.load_builtin()
+        assert reg.get("review") is not None  # the colliding skill DOES exist
+        model = _ScriptedModel([
+            [{"type": "text", "content": "/review"}, {"type": "done", "usage": {}}],
+        ])
+        agent = _make_agent(model, skills=reg)
+
+        result = await agent.run("review my changes")
+
+        assert result == "/review"
         assert model.calls == 1
         assert agent._skill_auto_expanded is False
 

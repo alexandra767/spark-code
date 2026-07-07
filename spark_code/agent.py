@@ -23,6 +23,7 @@ from .permissions import PermissionManager
 from .plan_mode import PLAN_DENIAL, PLAN_NUDGE, PlanState
 from .skills.base import SkillRegistry
 from .tools.base import ToolRegistry
+from .ui.input import RESERVED_COMMAND_NAMES
 from .ui.output import (
     StreamingRenderer,
     render_error,
@@ -408,6 +409,11 @@ class Agent:
             whitespace is stripped — a reply that merely CONTAINS a slash
             line among other prose must not trigger this;
           * the single line isn't shaped like a slash command at all;
+          * the name collides with a real CLI command
+            (``RESERVED_COMMAND_NAMES``) — at the CLI that name resolves to
+            the COMMAND, not the skill (e.g. /review is the multi-agent
+            swarm, not the lesser builtin `review` skill), and the model
+            surface must not resolve the same name to something else;
           * the name doesn't match a registered skill — treated as normal
             text, same as an unknown command at the CLI.
         """
@@ -420,6 +426,8 @@ class Agent:
         if not match:
             return None
         name = match.group(1).lower()
+        if name in RESERVED_COMMAND_NAMES:
+            return None
         args = (match.group(2) or "").strip()
         skill = self.skills.get(name)
         if skill is None:

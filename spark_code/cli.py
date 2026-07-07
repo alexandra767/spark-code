@@ -59,7 +59,7 @@ from .tools.web_fetch import WebFetchTool
 from .tools.web_search import WebSearchTool
 from .tools.write_file import WriteFileTool
 from .ui.hotkeys import TeamStatusMonitor
-from .ui.input import create_session
+from .ui.input import RESERVED_COMMAND_NAMES, create_session
 from .ui.theme import get_theme
 from .watcher import FileWatcher
 
@@ -2347,8 +2347,13 @@ async def run_interactive(config: dict, resume_session: str = "",
     # 80B-friendly skills (Task 8): ONLY a compact index (name + one-line
     # description, capped) ever enters the system prompt — never full skill
     # bodies. A skill's full prompt enters context only on invocation, via
-    # the slash-command fallback below or agent.py's auto-expand.
-    system_prompt += build_skill_prompt_section(skills.build_index())
+    # the slash-command fallback below or agent.py's auto-expand. Skills
+    # whose names collide with real commands (e.g. the builtin `review`
+    # skill vs. the /review swarm command) are excluded — at the CLI those
+    # names resolve to the command, so advertising the skill would teach the
+    # model a name that expands to something else.
+    system_prompt += build_skill_prompt_section(
+        skills.build_index(exclude=RESERVED_COMMAND_NAMES))
 
     # Verification habit (Task 6): detect the project's test command once —
     # instructions text checked first (an explicit CLAUDE.md/SPARK.md

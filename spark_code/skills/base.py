@@ -98,7 +98,8 @@ class SkillRegistry:
         """
         return [f"/{s.name}" for s in self._ordered()[:limit]]
 
-    def build_index(self, cap: int = 1500) -> str:
+    def build_index(self, cap: int = 1500,
+                    exclude: frozenset[str] | set[str] | None = None) -> str:
         """Compact skill index for the system prompt: one line per skill,
         ``/<name> — <one-line description>``, builtins first then the rest,
         both sorted by name (see ``_ordered``) for a stable, cache-friendly
@@ -111,11 +112,26 @@ class SkillRegistry:
         ONLY names + one-liners; full skill bodies (``Skill.prompt``) never
         appear here — they enter context only when a skill is actually
         invoked, via ``Skill.get_prompt()``.
+
+        ``exclude``: skill names to omit entirely — cli.py passes the real
+        commands' RESERVED_COMMAND_NAMES (ui/input.py) so a skill sharing a
+        name with a command (the builtin `review` skill vs. the /review
+        swarm command) is never advertised to the model: at the CLI that
+        name resolves to the COMMAND, so an index entry would teach the
+        model a name that expands to something else.
         """
         lines: list[str] = []
         truncated = False
         for skill in self._ordered():
-            desc = (skill.description or "").strip().splitlines()[0] if skill.description else ""
+            if exclude and skill.name in exclude:
+                continue
+            # Test the STRIPPED text, not raw description truthiness — a
+            # whitespace-only description ("   ") is truthy but its
+            # strip().splitlines() is [], so [0] raised IndexError (and one
+            # bad bridged SKILL.md killed startup via the unguarded
+            # build_skill_prompt_section call in run_interactive).
+            stripped_desc = (skill.description or "").strip()
+            desc = stripped_desc.splitlines()[0] if stripped_desc else ""
             line = f"/{skill.name} — {desc}" if desc else f"/{skill.name}"
             candidate = lines + [line]
             if len("\n".join(candidate)) > cap:

@@ -90,6 +90,20 @@ _BUILTIN_COMMANDS: dict[str, str] = {
     "/exit": "Exit Spark Code",
 }
 
+# Bare command names (first token, no "/") reserved by the real commands
+# above — subcommand entries ("/plan show", "/config set") collapse into
+# their command. Skills whose names collide with these are excluded from the
+# model-facing surfaces (the system-prompt skill index built in cli.py and
+# agent.py's auto-expand) and from clobbering command descriptions in the
+# autocomplete merge below: handle_slash_command resolves these names to the
+# COMMAND (checked first), so advertising a same-named skill to the model
+# would teach it a name that expands to something other than what the user
+# gets at the CLI (e.g. the /review swarm vs. the lesser builtin `review`
+# skill).
+RESERVED_COMMAND_NAMES = frozenset(
+    cmd.split()[0].lstrip("/") for cmd in _BUILTIN_COMMANDS
+)
+
 
 # ---------------------------------------------------------------------------
 # Slash-command completer
