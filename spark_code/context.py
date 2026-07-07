@@ -149,6 +149,34 @@ Use dispatch_agent for open-ended codebase searches, reviews, or research — it
 """
 
 
+# 80B-friendly skills (Phase 2 Task 8): the system prompt carries only a
+# compact skill INDEX (name + one-line description each, capped — see
+# SkillRegistry.build_index) plus this STATIC hint teaching the model how to
+# invoke one. Full skill bodies never live in the system prompt — they enter
+# context only on invocation (slash command fallback in cli.py, or the
+# auto-expand below handled in agent.py). Verbatim per the plan.
+SKILL_TRIGGER_HINT = (
+    "Available skills are listed above. When a user request matches a "
+    "skill's description, invoke it by replying with exactly "
+    "`/<skill-name> <args>` on its own line — it will be expanded for you."
+)
+
+
+def build_skill_prompt_section(skill_index: str) -> str:
+    """Wrap a pre-built skill index (``SkillRegistry.build_index()``) with a
+    header and the trigger hint, ready to append to a system prompt.
+
+    Takes the already-built index STRING rather than a ``SkillRegistry`` so
+    this module doesn't need to depend on the skills package — callers build
+    the index once (cli.py, at startup) and pass the result in. Returns ""
+    when there's no index to show (empty registry) so callers never inject an
+    empty/useless section into the prompt.
+    """
+    if not skill_index:
+        return ""
+    return "\n\n## Available skills\n" + skill_index + "\n\n" + SKILL_TRIGGER_HINT
+
+
 class Context:
     """Manages conversation history and context window."""
 

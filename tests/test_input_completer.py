@@ -7,7 +7,12 @@ Guards the start_position bug where completing a subcommand ("/plan sh" →
 from prompt_toolkit.document import Document
 
 from spark_code.plan_mode import MODE_CYCLE
-from spark_code.ui.input import FilePathCompleter, SlashCommandCompleter
+from spark_code.ui.input import (
+    _BUILTIN_COMMANDS,
+    FilePathCompleter,
+    SlashCommandCompleter,
+    create_session,
+)
 
 
 def _apply(text: str):
@@ -72,6 +77,25 @@ def test_shift_tab_mode_cycle_matches_claude_code_order():
 
 def test_file_completer_handles_path_argument():
     assert _count_file("cat /tmp/") > 0
+
+
+def test_skill_name_colliding_with_real_command_does_not_clobber_it(tmp_path):
+    # Phase 2 Task 8: the builtin `review` SKILL shares its name with the real
+    # `/review` COMMAND. A naive merge of skill names into the completer's
+    # command map would overwrite /review's real description with "" (skill
+    # descriptions are looked up separately, not fed into this completer) —
+    # "real commands win" must hold in autocomplete, not just dispatch.
+    session = create_session(
+        history_file=str(tmp_path / "hist"),
+        skill_names=["/review", "/commit"],
+    )
+    slash_completer = next(
+        c for c in session.completer.completers if hasattr(c, "_commands")
+    )
+    assert slash_completer._commands["/review"] == _BUILTIN_COMMANDS["/review"]
+    # A skill with no name collision still gets added (empty description —
+    # its real description lives on the Skill object, shown via /help).
+    assert "/commit" in slash_completer._commands
 
 
 def test_at_mention_completes_directory(tmp_path, monkeypatch):

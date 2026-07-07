@@ -21,6 +21,7 @@ from .context import Context
 from .model import ModelClient
 from .permissions import PermissionManager
 from .plan_mode import PLAN_DENIAL, PLAN_NUDGE, PlanState
+from .skills.base import SkillRegistry
 from .tools.base import ToolRegistry
 from .ui.output import (
     StreamingRenderer,
@@ -67,6 +68,14 @@ VERIFY_NUDGE_TEMPLATE = (
     "You changed files but have not run the project's tests (`{cmd}`). "
     "Run them before concluding, or state explicitly why not."
 )
+
+# 80B-friendly skills (Task 8): matches a FINAL answer that consists SOLELY
+# of a slash-skill invocation — "/<skill-name> [args]" — once surrounding
+# whitespace is stripped. Deliberately requires the caller to first confirm
+# there's no internal newline (i.e. no other content lines) before matching;
+# see Agent._maybe_expand_skill_reply. Skill names may contain the
+# plugin-namespacing ":" (e.g. "superpowers:test-driven-development").
+_SLASH_LINE_RE = re.compile(r"^/([A-Za-z0-9_:.\-]+)(?:[ \t]+(.*))?$")
 
 
 def _bash_ran_test_command(command: str, test_command: str) -> bool:
@@ -251,7 +260,8 @@ class Agent:
                  on_iteration: object | None = None,
                  result_budgets: dict[str, int] | None = None,
                  plan_state: PlanState | None = None,
-                 test_command: str | None = None):
+                 test_command: str | None = None,
+                 skills: SkillRegistry | None = None):
         self.model = model
         self.context = context
         self.tools = tools
@@ -272,6 +282,12 @@ class Agent:
         # Paths successfully written/edited THIS TURN (auto-review scoping,
         # Task 7) — reset per turn alongside the flags above.
         self._verify_written_paths: list[str] = []
+        # 80B-friendly skills (Task 8): the registry used to expand a model
+        # FINAL answer that is solely a "/<skill-name> [args]" line. None
+        # (one-shot mode, sub-agents) → feature silently off, same pattern as
+        # test_command above. Guard resets per turn in _agent_loop.
+        self.skills = skills
+        self._skill_auto_expanded = False
         self.console = console or Console()
         self.output_prefix = output_prefix
         self.stats = stats
@@ -375,6 +391,41 @@ class Agent:
             return False
         return True
 
+    def _maybe_expand_skill_reply(self, text: str) -> str | None:
+        """If the model's FINAL answer (no tool calls) consists SOLELY of a
+        ``/<skill-name> [args]`` line, return that skill's expanded prompt —
+        the caller feeds it back in as the next user message and continues
+        the turn, exactly like the CLI's handle_slash_command fallback but
+        triggered by the model instead of the user typing it.
+
+        Returns None (leaving ``text`` to stand as the real final answer) for
+        every case that ISN'T that exact shape:
+          * no skill registry configured (one-shot mode, sub-agents);
+          * already expanded once this turn (``_skill_auto_expanded`` —
+            one hop max, so a model that keeps re-emitting a slash line can't
+            loop forever);
+          * the answer has more than one line of content once surrounding
+            whitespace is stripped — a reply that merely CONTAINS a slash
+            line among other prose must not trigger this;
+          * the single line isn't shaped like a slash command at all;
+          * the name doesn't match a registered skill — treated as normal
+            text, same as an unknown command at the CLI.
+        """
+        if self.skills is None or self._skill_auto_expanded:
+            return None
+        stripped = text.strip()
+        if not stripped or "\n" in stripped:
+            return None
+        match = _SLASH_LINE_RE.match(stripped)
+        if not match:
+            return None
+        name = match.group(1).lower()
+        args = (match.group(2) or "").strip()
+        skill = self.skills.get(name)
+        if skill is None:
+            return None
+        return skill.get_prompt(args)
+
     async def _maybe_compact(self) -> str | None:
         """Auto-compact when the real-usage meter says we're low on room AND
         compaction can plausibly help.
@@ -458,6 +509,9 @@ class Agent:
         self._verify_nudged = False
         self._verify_nudge_pending = False
         self._verify_written_paths = []
+        # Skill auto-expand guard (Task 8) — one hop max per turn, same reset
+        # boundary as the verification flags above.
+        self._skill_auto_expanded = False
 
         while rounds < self.MAX_TOOL_ROUNDS:
             rounds += 1
@@ -615,6 +669,18 @@ class Agent:
             # No tool calls — model is done
             if not tool_calls:
                 self.context.add_assistant(text)
+                skill_prompt = self._maybe_expand_skill_reply(text)
+                if skill_prompt is not None:
+                    # The model asked for a skill by name instead of doing the
+                    # work directly — expand it into the skill's real prompt
+                    # and feed that back in as the next user message, exactly
+                    # like a user typing the slash command themselves.
+                    # _skill_auto_expanded guards against firing more than
+                    # once per turn (a model that keeps re-emitting a slash
+                    # line can't loop forever on this).
+                    self._skill_auto_expanded = True
+                    self.context.add_user(skill_prompt)
+                    continue
                 if self._should_nudge_verification():
                     # Give the model ONE more round to run tests (or explain
                     # why not) before letting the turn end. _verify_nudged

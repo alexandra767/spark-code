@@ -62,8 +62,73 @@ class SkillRegistry:
     def all(self) -> list[Skill]:
         return list(self._skills.values())
 
-    def names(self) -> list[str]:
-        return [f"/{name}" for name in self._skills.keys()]
+    def _ordered(self) -> list[Skill]:
+        """Skills in a STABLE, deterministic order: builtins first (most
+        reliable / always available), then everything else — both groups
+        sorted by name.
+
+        This does NOT preserve registration order. Registration order for
+        bridged skills comes from ``Path.glob()`` (load_from_dir /
+        load_claude_skills_from_dir / load_claude_plugin_skills_from_dir),
+        which is filesystem-iteration order, not sorted — using it directly
+        would make the skill index (and therefore the STATIC system prompt
+        prefix a server prefix-caches across turns) vary run to run even when
+        the skill set on disk hasn't changed. Sorting here is cheap and makes
+        the index cache-friendly and reproducible.
+        """
+        builtins = sorted(
+            (s for s in self._skills.values() if s.source == "builtin"),
+            key=lambda s: s.name,
+        )
+        others = sorted(
+            (s for s in self._skills.values() if s.source != "builtin"),
+            key=lambda s: s.name,
+        )
+        return builtins + others
+
+    def names(self, limit: int = 50) -> list[str]:
+        """Skill names for the input-autocomplete completer.
+
+        Capped to a reasonable count — a large bridge from
+        ``~/.claude/skills`` + installed plugins could otherwise dump dozens
+        of entries into the completion menu. Uses the same builtins-first,
+        name-sorted ordering as ``build_index()`` so the subset that survives
+        the cap is deterministic rather than whatever order the filesystem
+        happened to glob() them in.
+        """
+        return [f"/{s.name}" for s in self._ordered()[:limit]]
+
+    def build_index(self, cap: int = 1500) -> str:
+        """Compact skill index for the system prompt: one line per skill,
+        ``/<name> — <one-line description>``, builtins first then the rest,
+        both sorted by name (see ``_ordered``) for a stable, cache-friendly
+        result.
+
+        Capped to ``cap`` total characters — lines are added in order only
+        while they still fit; once the next line would overflow, the list is
+        truncated (with a trailing "more skills" marker, itself subject to
+        the same cap) rather than exceeding the budget. This index carries
+        ONLY names + one-liners; full skill bodies (``Skill.prompt``) never
+        appear here — they enter context only when a skill is actually
+        invoked, via ``Skill.get_prompt()``.
+        """
+        lines: list[str] = []
+        truncated = False
+        for skill in self._ordered():
+            desc = (skill.description or "").strip().splitlines()[0] if skill.description else ""
+            line = f"/{skill.name} — {desc}" if desc else f"/{skill.name}"
+            candidate = lines + [line]
+            if len("\n".join(candidate)) > cap:
+                truncated = True
+                break
+            lines = candidate
+
+        if truncated:
+            candidate = lines + ["… more skills available (see /help)"]
+            if len("\n".join(candidate)) <= cap:
+                lines = candidate
+
+        return "\n".join(lines)
 
     def load_builtin(self):
         """Load built-in skills."""

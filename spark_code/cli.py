@@ -22,7 +22,7 @@ from . import __version__
 from .agent import Agent
 from .branches import BranchManager
 from .config import ensure_dirs, get, load_config, set_config
-from .context import AGENTIC_PROMPT, SYSTEM_PROMPT, Context
+from .context import AGENTIC_PROMPT, SYSTEM_PROMPT, Context, build_skill_prompt_section
 from .custom_tools import CustomToolRegistry
 from .hooks import HookManager
 from .instructions import load_instructions
@@ -2344,6 +2344,12 @@ async def run_interactive(config: dict, resume_session: str = "",
     if project_type:
         system_prompt += f"\n\nThis is a {project_type}."
 
+    # 80B-friendly skills (Task 8): ONLY a compact index (name + one-line
+    # description, capped) ever enters the system prompt — never full skill
+    # bodies. A skill's full prompt enters context only on invocation, via
+    # the slash-command fallback below or agent.py's auto-expand.
+    system_prompt += build_skill_prompt_section(skills.build_index())
+
     # Verification habit (Task 6): detect the project's test command once —
     # instructions text checked first (an explicit CLAUDE.md/SPARK.md
     # instruction wins), falling back to project-type markers. None → the
@@ -2513,7 +2519,8 @@ async def run_interactive(config: dict, resume_session: str = "",
                   stats=session_stats, on_tool_start=_on_tool_start,
                   tool_cache=tool_cache, hooks=hook_manager,
                   result_budgets=get(config, "tools", "result_budgets", default=None),
-                  plan_state=plan_state, test_command=test_command)
+                  plan_state=plan_state, test_command=test_command,
+                  skills=skills)
 
     # Initialize team system — optionally use a faster model for workers
     task_store = TaskStore()

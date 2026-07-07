@@ -327,7 +327,14 @@ def create_session(
     if command_descriptions:
         extra_commands.update(command_descriptions)
     for name in (skill_names or []):
-        if name not in extra_commands:
+        # A skill can share its name with a real command (e.g. the builtin
+        # `review` SKILL vs. the `/review` COMMAND — handle_slash_command
+        # always resolves that in the command's favor). Adding it here with
+        # an empty description would let SlashCommandCompleter.__init__'s
+        # ``self._commands.update(commands)`` clobber the real command's rich
+        # description from _BUILTIN_COMMANDS with "" — same "real commands
+        # win" precedence, just for autocomplete instead of dispatch.
+        if name not in extra_commands and name not in _BUILTIN_COMMANDS:
             extra_commands[name] = ""
     slash_completer = SlashCommandCompleter(commands=extra_commands)
     file_completer = FilePathCompleter()

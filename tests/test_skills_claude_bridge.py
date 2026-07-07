@@ -1,8 +1,22 @@
-"""Tests for the Claude Code skill loader bridge in skills/base.py."""
+"""Tests for the Claude Code skill loader bridge in skills/base.py.
 
+Also covers Phase 2 Task 8 (80B-friendly skills): slash-command fallback to
+skills in cli.py's handle_slash_command, the lean skill INDEX that's all the
+system prompt ever sees (never full bodies), and agent.py's model-reply
+auto-expand for a bare "/<skill-name> [args]" final answer.
+"""
+
+import io
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+from rich.console import Console
+
+from spark_code.agent import Agent
+from spark_code.cli import handle_slash_command
+from spark_code.context import Context, build_skill_prompt_section
+from spark_code.model import ModelClient
+from spark_code.permissions import PermissionManager
 from spark_code.skills.base import (
     CLAUDE_TOOL_ALIASES,
     Skill,
@@ -10,6 +24,7 @@ from spark_code.skills.base import (
     _parse_claude_skill,
     check_skill_compatibility,
 )
+from spark_code.tools.base import ToolRegistry
 
 
 def _write_claude_skill(root: Path, name: str, frontmatter: str, body: str) -> Path:
@@ -252,3 +267,270 @@ def test_check_compatibility_url_unreachable():
 
     assert ok is False
     assert "127.0.0.1:9" in reason
+
+
+# ---------------------------------------------------------------------------
+# Slash-command fallback: unknown /name → skills.get(name).get_prompt(args)
+# (cli.py's handle_slash_command). Real commands always win.
+# ---------------------------------------------------------------------------
+
+def _slash_deps():
+    config = {
+        "model": {
+            "endpoint": "http://localhost:11434", "name": "test-model",
+            "temperature": 0.7, "max_tokens": 4096, "api_key": "", "provider": "ollama",
+        },
+        "permissions": {"mode": "auto", "always_allow": []},
+    }
+    reg = SkillRegistry()
+    reg.load_builtin()
+    return {
+        "context": Context(),
+        "console": Console(record=True, width=120),
+        "config": config,
+        "skills": reg,
+        "model": MagicMock(spec=ModelClient),
+        "permissions": PermissionManager(mode="auto"),
+    }
+
+
+class TestSlashFallbackToSkills:
+    def test_commit_skill_expands_to_its_prompt(self):
+        deps = _slash_deps()
+
+        result = handle_slash_command(
+            "/commit", deps["context"], deps["console"], deps["config"],
+            deps["skills"], deps["model"], permissions=deps["permissions"],
+        )
+
+        assert result is not None
+        assert result == deps["skills"].get("commit").get_prompt("")
+        assert "create a commit" in result
+
+    def test_unknown_skill_name_still_errors(self):
+        deps = _slash_deps()
+
+        result = handle_slash_command(
+            "/nope", deps["context"], deps["console"], deps["config"],
+            deps["skills"], deps["model"], permissions=deps["permissions"],
+        )
+
+        assert result is None
+        assert "Unknown command: /nope" in deps["console"].export_text()
+
+    def test_review_command_precedence_over_review_skill(self):
+        # The /review COMMAND (multi-agent swarm, cli.py) must win over the
+        # builtin `review` SKILL of the same name — real commands are checked
+        # first in handle_slash_command, the skill fallback only runs for
+        # names that matched none of them.
+        deps = _slash_deps()
+        assert deps["skills"].get("review") is not None  # the skill DOES exist
+
+        result = handle_slash_command(
+            "/review", deps["context"], deps["console"], deps["config"],
+            deps["skills"], deps["model"], permissions=deps["permissions"],
+        )
+
+        assert result == "__REVIEW__"  # the command's sentinel, not the skill prompt
+        assert "Rate severity" not in (result or "")
+
+
+# ---------------------------------------------------------------------------
+# Lean index: the system prompt carries ONLY name + one-line description per
+# skill (capped total), never full skill bodies.
+# ---------------------------------------------------------------------------
+
+class TestSkillIndex:
+    def test_bridged_skill_body_absent_index_present(self, tmp_path):
+        distinctive = "ZZZ_TOTALLY_DISTINCTIVE_BODY_PHRASE_1234"
+        long_body = "\n".join([f"Step {i}: do a thing." for i in range(200)])
+        long_body += f"\n{distinctive}\n"
+        _write_claude_skill(
+            tmp_path, "big-bodied-skill",
+            "name: big-bodied-skill\ndescription: A skill with a huge body",
+            long_body,
+        )
+        reg = SkillRegistry()
+        reg.load_claude_skills_from_dir(str(tmp_path))
+
+        section = build_skill_prompt_section(reg.build_index())
+
+        assert "big-bodied-skill" in section
+        assert distinctive not in section
+        assert "Step 199: do a thing." not in section
+
+    def test_no_skills_yields_empty_section(self):
+        assert build_skill_prompt_section(SkillRegistry().build_index()) == ""
+
+    def test_index_cap_enforced(self):
+        reg = SkillRegistry()
+        for i in range(200):
+            reg.register(Skill(
+                name=f"skill-{i:03d}",
+                description="A moderately long one-line description " * 3,
+                prompt="body " * 500,
+            ))
+
+        index = reg.build_index(cap=200)
+
+        assert len(index) <= 200
+
+    def test_default_cap_is_1500(self):
+        reg = SkillRegistry()
+        for i in range(200):
+            reg.register(Skill(
+                name=f"skill-{i:03d}",
+                description="A moderately long one-line description " * 3,
+                prompt="body " * 500,
+            ))
+
+        index = reg.build_index()
+
+        assert len(index) <= 1500
+
+    def test_builtins_listed_before_bridged_skills(self):
+        reg = SkillRegistry()
+        # Alphabetically this would sort BEFORE any builtin ("aaa" < "commit"),
+        # but builtins must still come first.
+        reg.register(Skill(name="aaa-bridged", description="d", prompt="p", source="claude"))
+        reg.register(Skill(name="zzz-builtin", description="d", prompt="p", source="builtin"))
+
+        index = reg.build_index()
+
+        assert index.index("zzz-builtin") < index.index("aaa-bridged")
+
+    def test_index_order_independent_of_registration_order(self):
+        reg1 = SkillRegistry()
+        reg1.register(Skill(name="beta", description="B thing", prompt="body"))
+        reg1.register(Skill(name="alpha", description="A thing", prompt="body"))
+
+        reg2 = SkillRegistry()
+        reg2.register(Skill(name="alpha", description="A thing", prompt="body"))
+        reg2.register(Skill(name="beta", description="B thing", prompt="body"))
+
+        assert reg1.build_index() == reg2.build_index()
+
+    def test_names_capped_and_deterministic(self):
+        reg = SkillRegistry()
+        for i in range(80):
+            reg.register(Skill(name=f"s{i:03d}", description="d", prompt="p"))
+
+        names = reg.names(limit=10)
+
+        assert len(names) == 10
+        assert names == sorted(names)  # name-sorted (all same source here)
+
+
+# ---------------------------------------------------------------------------
+# Trigger hint + model-reply auto-expand (agent.py) — a FINAL answer that is
+# SOLELY a "/<skill-name> [args]" line expands into the skill prompt and
+# continues the turn ONCE; unknown skill or non-solo slash line → left as
+# normal text; a guard flag prevents a second expansion in the same turn.
+# ---------------------------------------------------------------------------
+
+class _ScriptedModel:
+    """Yields one pre-scripted list of chunks per call to .chat()."""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = 0
+
+    async def chat(self, **kwargs):
+        chunks = self.responses[self.calls]
+        self.calls += 1
+        for chunk in chunks:
+            yield chunk
+
+    async def close(self):
+        pass
+
+
+def _make_agent(model, skills=None):
+    return Agent(
+        model=model,
+        context=Context(),
+        tools=ToolRegistry(),
+        permissions=PermissionManager(mode="trust"),
+        console=Console(file=io.StringIO(), force_terminal=True),
+        skills=skills,
+    )
+
+
+class TestSkillAutoExpand:
+    async def test_solo_slash_line_expands_once(self):
+        reg = SkillRegistry()
+        reg.load_builtin()
+        model = _ScriptedModel([
+            [{"type": "text", "content": "/codesearch foo"}, {"type": "done", "usage": {}}],
+            [{"type": "text", "content": "Found it in bar.py"}, {"type": "done", "usage": {}}],
+        ])
+        agent = _make_agent(model, skills=reg)
+
+        result = await agent.run("please look for foo")
+
+        assert "Found it in bar.py" in result
+        assert model.calls == 2
+        assert agent._skill_auto_expanded is True
+        user_msgs = [m["content"] for m in agent.context.messages if m["role"] == "user"]
+        assert any("Search the codebase thoroughly" in c for c in user_msgs)
+        assert any("foo" in c for c in user_msgs)  # args carried through
+
+    async def test_guard_prevents_second_expansion_same_turn(self):
+        reg = SkillRegistry()
+        reg.load_builtin()
+        # Both rounds reply with a bare slash line — only the FIRST may expand.
+        model = _ScriptedModel([
+            [{"type": "text", "content": "/codesearch foo"}, {"type": "done", "usage": {}}],
+            [{"type": "text", "content": "/codesearch bar"}, {"type": "done", "usage": {}}],
+        ])
+        agent = _make_agent(model, skills=reg)
+
+        result = await agent.run("please look for foo")
+
+        assert result.endswith("/codesearch bar")
+        assert model.calls == 2  # not a third round — the guard stopped it
+        user_msgs = [m for m in agent.context.messages if m["role"] == "user"]
+        # Original prompt + exactly ONE expansion — the second slash line did
+        # NOT synthesize another user message.
+        assert len(user_msgs) == 2
+
+    async def test_unknown_skill_name_treated_as_normal_text(self):
+        reg = SkillRegistry()
+        reg.load_builtin()
+        model = _ScriptedModel([
+            [{"type": "text", "content": "/nope-not-a-skill do something"},
+             {"type": "done", "usage": {}}],
+        ])
+        agent = _make_agent(model, skills=reg)
+
+        result = await agent.run("hello")
+
+        assert result == "/nope-not-a-skill do something"
+        assert model.calls == 1
+        assert agent._skill_auto_expanded is False
+
+    async def test_slash_line_among_other_text_does_not_expand(self):
+        reg = SkillRegistry()
+        reg.load_builtin()
+        model = _ScriptedModel([
+            [{"type": "text", "content": "Sure, I'll do that.\n/commit"},
+             {"type": "done", "usage": {}}],
+        ])
+        agent = _make_agent(model, skills=reg)
+
+        result = await agent.run("commit please")
+
+        assert result == "Sure, I'll do that.\n/commit"
+        assert model.calls == 1
+        assert agent._skill_auto_expanded is False
+
+    async def test_no_skills_configured_leaves_slash_reply_as_text(self):
+        model = _ScriptedModel([
+            [{"type": "text", "content": "/commit"}, {"type": "done", "usage": {}}],
+        ])
+        agent = _make_agent(model, skills=None)
+
+        result = await agent.run("commit please")
+
+        assert result == "/commit"
+        assert model.calls == 1
