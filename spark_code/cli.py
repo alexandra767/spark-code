@@ -29,6 +29,7 @@ from .config import ensure_dirs, get, load_config, resolve_write_roots, set_conf
 from .context import AGENTIC_PROMPT, SYSTEM_PROMPT, Context, build_skill_prompt_section
 from .corpus import export_session
 from .custom_tools import CustomToolRegistry
+from .doctor import render_doctor, run_doctor
 from .editor import detect_editor, open_in_editor
 from .hooks import HookManager
 from .instructions import load_instructions
@@ -998,6 +999,7 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
 - `/model` — Show model info / `/model list` / `/model <provider>`
 - `/providers` — Show API providers with signup URLs
 - `/setkey <provider>` — Guided cloud API key setup (masked prompt, e.g. `/setkey openrouter`)
+- `/doctor` — Health check: engine, RAG, MCP, editor, keys (read-only, safe anytime)
 - `/profile` — Benchmark model (TTFT, tokens/sec)
 - `/benchmark` — Measure model speed (TTFT, tok/s)
 - `/mode [ask|auto|trust]` — Switch permission mode
@@ -1325,6 +1327,12 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
             table.add_row("Pinned files", str(pinned.count))
         console.print(table)
         return None
+
+    elif command == "/doctor":
+        # run_doctor is a coroutine and this handler is sync (see the
+        # __DOCTOR__ branch in the async REPL loop) — deferred via a
+        # sentinel, same pattern as /index and /compact.
+        return "__DOCTOR__"
 
     elif command == "/diff":
         # Run git diff and show with syntax highlighting
@@ -3338,6 +3346,18 @@ async def run_interactive(config: dict, resume_session: str = "",
                                 f"[#a3be8c]  ✓ Indexed {outcome['indexed']} file(s), "
                                 f"skipped {outcome['skipped']} — "
                                 f"collection {outcome['collection']}[/#a3be8c]")
+                elif result == "__DOCTOR__":
+                    # Read-only: run_doctor never raises per-check (every
+                    # check is individually try/excepted — see doctor.py),
+                    # but this outer try/except is defense-in-depth so a
+                    # genuine bug still can't crash the REPL.
+                    console.print("[#88c0d0]▸ Running health checks...[/#88c0d0]")
+                    try:
+                        checks = await run_doctor(config)
+                    except Exception as e:
+                        console.print(f"[#bf616a]Doctor error: {e}[/#bf616a]")
+                    else:
+                        render_doctor(console, checks)
                 elif result.startswith("__TEAM_STOP__"):
                     stop_id = result[len("__TEAM_STOP__"):]
                     try:

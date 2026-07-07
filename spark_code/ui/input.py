@@ -94,6 +94,7 @@ _BUILTIN_COMMANDS: dict[str, str] = {
     "/q": "Exit Spark Code (alias for /quit)",
     "/docs": "Search indexed docs (Swift, SwiftUI, HIG, App Store Guidelines, CNN)",
     "/index": "Index this project into the RAG service for code_search",
+    "/doctor": "Health check: engine, RAG, MCP, editor, keys (read-only)",
 }
 
 # Bare command names (first token, no "/") reserved by the real commands
