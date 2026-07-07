@@ -779,6 +779,42 @@ def test_budget_for_tool_config_override():
     assert agent.context.last_prompt_tokens is None
 
 
+# Phase 4 Task 5: browser-automation MCP tools return huge a11y/DOM dumps
+# (a real browser_snapshot measured ~300 KB) and must be capped regardless of
+# the user-chosen MCP server name (`server__tool`).
+def test_budget_for_browser_mcp_tools():
+    from spark_code.agent import BROWSER_MCP_RESULT_BUDGET, MAX_TOOL_RESULT_CHARS
+    agent = _make_agent(MockModel([]))
+    # The `browser_*` cap applies no matter what the server is named.
+    assert agent._budget_for("playwright__browser_snapshot") == BROWSER_MCP_RESULT_BUDGET
+    assert agent._budget_for("pw__browser_navigate") == BROWSER_MCP_RESULT_BUDGET
+    assert agent._budget_for("anything__browser_click") == BROWSER_MCP_RESULT_BUDGET
+    # A non-browser MCP tool is unaffected — falls back to the default cap.
+    assert agent._budget_for("github__create_issue") == MAX_TOOL_RESULT_CHARS
+    # A bare (non-MCP) tool name with no `__` is unaffected too.
+    assert agent._budget_for("web_search") == MAX_TOOL_RESULT_CHARS
+
+
+def test_budget_for_browser_mcp_config_override_wins():
+    from spark_code.agent import BROWSER_MCP_RESULT_BUDGET
+    from spark_code.context import Context
+    from spark_code.permissions import PermissionManager
+    from spark_code.tools.base import ToolRegistry
+    agent = Agent(
+        model=MockModel([]),
+        context=Context(),
+        tools=ToolRegistry(),
+        permissions=PermissionManager(mode="trust"),
+        console=_make_console(),
+        # Exact `server__tool` override for one browser tool.
+        result_budgets={"playwright__browser_snapshot": 20000},
+    )
+    # Exact override beats the browser_ prefix rule...
+    assert agent._budget_for("playwright__browser_snapshot") == 20000
+    # ...but siblings still get the shared browser cap.
+    assert agent._budget_for("playwright__browser_navigate") == BROWSER_MCP_RESULT_BUDGET
+
+
 # ---------------------------------------------------------------------------
 # Task 6: verification habit — run tests before claiming done
 # ---------------------------------------------------------------------------

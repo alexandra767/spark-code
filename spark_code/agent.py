@@ -63,6 +63,17 @@ TOOL_RESULT_BUDGETS = {
     "code_search": 6000,
 }
 
+# Phase 4 Task 5: browser-automation MCP tools (Playwright MCP names them all
+# `browser_*`) return very large accessibility-tree / DOM dumps — a single
+# `browser_snapshot` of a content page measured ~300 KB in the first real-server
+# trial. Cap them together, well under the 15K default, so one snapshot can't
+# swamp the context window. Applied by `_budget_for` to any MCP tool whose bare
+# name (after the `server__` prefix) starts with `browser_`, regardless of the
+# server name the user picks in `mcp_servers`. A user can still raise/lower a
+# specific tool via `tools.result_budgets` (an exact `server__tool` key wins).
+# See docs/browser-mcp.md.
+BROWSER_MCP_RESULT_BUDGET = 8000
+
 # Verification habit (Task 6): tool names whose successful execution "dirties"
 # the turn (per the plan's wording — bash-invoked writes/formatters don't
 # count, only the two dedicated file-mutation tools).
@@ -372,8 +383,25 @@ class Agent:
         self._cancelled = True
 
     def _budget_for(self, tool_name: str) -> int:
-        """Char budget for a tool's result, from the merged per-tool map."""
-        return self._result_budgets.get(tool_name, MAX_TOOL_RESULT_CHARS)
+        """Char budget for a tool's result, from the merged per-tool map.
+
+        Exact tool name wins (this is what a `tools.result_budgets` config
+        override targets). MCP tools are named ``server__tool`` where the
+        ``server`` prefix is user-chosen, so an exact code default isn't
+        practical; for those, fall back to the bare tool name after the ``__``
+        separator, then to a shared cap for browser-automation tools (Playwright
+        MCP's ``browser_*`` a11y/DOM dumps run into the hundreds of KB — see
+        docs/browser-mcp.md).
+        """
+        if tool_name in self._result_budgets:
+            return self._result_budgets[tool_name]
+        if "__" in tool_name:
+            bare = tool_name.split("__", 1)[1]
+            if bare in self._result_budgets:
+                return self._result_budgets[bare]
+            if bare.startswith("browser_"):
+                return BROWSER_MCP_RESULT_BUDGET
+        return MAX_TOOL_RESULT_CHARS
 
     def _plan_denies(self, tc: dict, tool) -> bool:
         """True iff plan mode is active AND this tool call is a write action.
