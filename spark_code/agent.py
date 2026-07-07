@@ -19,6 +19,7 @@ from rich.console import Console
 from rich.text import Text
 
 from .context import Context
+from .mcp.client import MCP_IMAGE_SENTINEL_PREFIX
 from .model import ModelClient
 from .permissions import PermissionManager
 from .plan_mode import PLAN_DENIAL, PLAN_NUDGE, PlanState
@@ -937,6 +938,12 @@ class Agent:
         ``_flush_pending_images`` only after every tool result for the round
         is recorded, so a screenshot called alongside other tools can't
         splice a user message into the middle of the tool-result run.
+
+        Also handles MCP image content (Phase 5 Task 5, see mcp/client.py's
+        ``MCP_IMAGE_SENTINEL_PREFIX`` docstring) via ``_resolve_mcp_images``
+        — same buffer-now/flush-after-round mechanism, generalized to
+        possibly-multiple images embedded anywhere in an MCP tool's result
+        text (unlike simulator_screenshot's single whole-string sentinel).
         """
         if tc["name"] == "simulator_screenshot" and result.startswith(
                 SCREENSHOT_SENTINEL_PREFIX):
@@ -954,8 +961,54 @@ class Agent:
             self._pending_image_injections.append(
                 ("Simulator screenshot:", image_b64, "image/png"))
             return text
+        if MCP_IMAGE_SENTINEL_PREFIX in result:
+            result = self._resolve_mcp_images(tc["name"], result)
         self.context.add_tool_result(tc["id"], tc["name"], result)
         return result
+
+    def _resolve_mcp_images(self, tool_name: str, result: str) -> str:
+        """Resolve MCP image sentinels (Phase 5 Task 5) into either buffered
+        image turns or the original inert placeholder text, gated on
+        ``model.supports_vision`` exactly like the simulator_screenshot path
+        above — the only difference is WHERE the gate is checked: MCPTool
+        has no model reference of its own (unlike SimulatorScreenshotTool,
+        which is constructed with one), so it always emits a sentinel for
+        every image and this method — which has ``self.model`` for free —
+        makes the vision/no-vision call instead.
+
+        An MCP tool result can mix plain text with one sentinel line per
+        image (e.g. a multi-screenshot call): only sentinel-prefixed lines
+        are rewritten here, everything else passes through unchanged. A
+        vision-capable model gets each image read back + base64-encoded and
+        appended to ``_pending_image_injections`` (flushed by
+        ``_flush_pending_images`` after the round, same as
+        simulator_screenshot); a non-vision model gets back the original
+        ``[Image: <mime>]`` placeholder — byte-identical to this tool's
+        result before this task existed.
+        """
+        vision = bool(getattr(self.model, "supports_vision", False))
+        out_lines = []
+        for line in result.split("\n"):
+            if not line.startswith(MCP_IMAGE_SENTINEL_PREFIX):
+                out_lines.append(line)
+                continue
+            mime, _, path = line[len(MCP_IMAGE_SENTINEL_PREFIX):].partition(":")
+            if not vision:
+                out_lines.append(f"[Image: {mime}]")
+                continue
+            try:
+                with open(path, "rb") as f:
+                    image_b64 = base64.b64encode(f.read()).decode("utf-8")
+            except OSError as e:
+                out_lines.append(
+                    f"Error: image saved to {path} but could not be read "
+                    f"back for the model ({e})")
+                continue
+            out_lines.append(
+                f"Image captured — see image below. (saved to {path})")
+            self._pending_image_injections.append(
+                (f"Image from {tool_name}:", image_b64, mime))
+        return "\n".join(out_lines)
 
     def _flush_pending_images(self):
         """Emit any buffered screenshot image turns, AFTER the round's full

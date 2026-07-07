@@ -79,13 +79,18 @@ advertises 23 tools; the useful text-first core:
 | `browser_press_key` / `browser_hover` / `browser_select_option` | Interact |
 | `browser_navigate_back` / `browser_wait_for` / `browser_tabs` | Navigation |
 | `browser_console_messages` / `browser_network_requests` | Diagnostics |
-| `browser_take_screenshot` | PNG (image content currently dropped to a text placeholder — see note below) |
+| `browser_take_screenshot` | PNG — routed to a vision-capable model (see note below) |
 | `browser_evaluate` / `browser_run_code_unsafe` | Run JS in the page |
 
-Image content from MCP tools (e.g. `browser_take_screenshot`) is currently
-dropped to a text placeholder — prefer **`browser_snapshot`** for page content
-(the accessibility tree is text the primary text model reasons over directly);
-full MCP image routing is a future enhancement.
+Image content from MCP tools (e.g. `browser_take_screenshot`) is routed
+through the same vision path `simulator_screenshot` uses (Phase 5 Task 5):
+with a vision-capable model configured (`model.vision` / the active
+provider's `vision` key in config — same setting the iOS Simulator
+screenshot tool checks), the PNG reaches the model as an image turn. Without
+a vision-capable model, you get back the original `[Image: <mime>]` text
+placeholder — for page *content* prefer **`browser_snapshot`** regardless
+(the accessibility tree is text the primary text model reasons over
+directly, and is far cheaper).
 
 ## Result budgets (important)
 
