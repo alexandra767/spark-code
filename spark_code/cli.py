@@ -3480,17 +3480,22 @@ async def run_interactive(config: dict, resume_session: str = "",
             # Auto-review (Task 7, OFF by default): when review.auto is enabled
             # AND the turn just landed a successful write/edit (agent._verify_dirty
             # — the same signal the verification nudge uses), run the review swarm
-            # on the working-tree diff. Consume the flag so a later non-agent
-            # iteration (e.g. /help) can't re-trigger it on the same diff.
+            # scoped to the TURN's written files (agent._verify_written_paths) so
+            # pre-existing dirty files aren't swept in. Both are consumed so a
+            # later non-agent iteration (e.g. /help) can't re-trigger on the
+            # same diff.
             if (getattr(agent, "_verify_dirty", False)
                     and get(config, "review", "auto", default=False)):
                 from .review import maybe_auto_review
                 lead_mode = getattr(permissions, "mode", "ask") or "ask"
                 wrote = agent._verify_dirty
+                changed = list(getattr(agent, "_verify_written_paths", []) or [])
                 agent._verify_dirty = False  # consume
+                agent._verify_written_paths = []
                 try:
                     await maybe_auto_review(model, config, console, lead_mode,
-                                            wrote_this_turn=wrote)
+                                            wrote_this_turn=wrote,
+                                            changed_files=changed)
                 except KeyboardInterrupt:
                     console.print("\n[#ebcb8b]Auto-review cancelled.[/#ebcb8b]")
                 except Exception as e:

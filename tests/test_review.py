@@ -210,6 +210,84 @@ async def test_lens_crash_does_not_sink_review(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Degraded-review honesty: a review that couldn't run must not report Clean
+# ---------------------------------------------------------------------------
+
+
+def _render_text(outcome):
+    from rich.console import Console
+    console = Console(record=True, width=100)
+    review.render_review(console, outcome)
+    return console.export_text()
+
+
+async def test_all_lenses_failed_reports_failure_not_clean(monkeypatch):
+    rec = RecordingSubagent(lens_reply="[dispatch_agent error] engine down")
+    monkeypatch.setattr(review, "run_subagent", rec)
+    out = await review.review_diff(
+        None, _cfg(), "auto", "diff --git a/x b/x\n+x")
+    assert out.lens_errors == 3
+    assert rec.skeptic_calls == []
+    text = _render_text(out)
+    assert "Clean" not in text
+    assert "fail" in text.lower() or "error" in text.lower()
+
+
+async def test_partial_lens_failure_with_findings_flags_coverage(monkeypatch):
+    def lens(prompt):
+        if "correctness" in prompt.lower():
+            return "[dispatch_agent error] boom"
+        return "WARNING|z.py:1|real issue"
+
+    rec = RecordingSubagent(lens_reply=lens, skeptic_reply="CONFIRMED: yes")
+    monkeypatch.setattr(review, "run_subagent", rec)
+    out = await review.review_diff(
+        None, _cfg(), "auto", "diff --git a/z.py b/z.py\n+z")
+    assert out.lens_errors == 1
+    text = _render_text(out)
+    assert "z.py:1" in text                    # surviving findings still shown
+    assert "1 of 3" in text                    # degraded coverage is flagged
+    assert "incomplete" in text.lower()
+    assert "Clean" not in text                 # never claim clean on partial run
+
+
+async def test_partial_lens_failure_zero_findings_not_clean(monkeypatch):
+    def lens(prompt):
+        if "correctness" in prompt.lower():
+            return "[dispatch_agent error] boom"
+        return "NONE"
+
+    rec = RecordingSubagent(lens_reply=lens)
+    monkeypatch.setattr(review, "run_subagent", rec)
+    out = await review.review_diff(
+        None, _cfg(), "auto", "diff --git a/x b/x\n+x")
+    assert out.lens_errors == 1
+    assert out.confirmed == []
+    text = _render_text(out)
+    assert "Clean" not in text
+    assert "1 of 3" in text
+    assert "incomplete" in text.lower()
+
+
+def test_render_zero_findings_wording():
+    # No lens errors, zero findings at all → say so plainly; "survived the
+    # skeptic pass" would be misleading (no skeptic ever ran).
+    out = review.ReviewOutcome(dispatched=True)
+    text = _render_text(out)
+    assert "No findings from any reviewer" in text
+    assert "survived the skeptic pass" not in text
+
+
+def test_render_all_refuted_keeps_skeptic_wording():
+    out = review.ReviewOutcome(
+        dispatched=True,
+        refuted=[review.Finding("WARNING", "a.py:1", "nope", "edge",
+                                verdict="REFUTED")])
+    text = _render_text(out)
+    assert "survived the skeptic pass" in text
+
+
+# ---------------------------------------------------------------------------
 # Skeptic cap (a lens dumping 100 findings must not spawn 100 skeptics)
 # ---------------------------------------------------------------------------
 
@@ -253,6 +331,52 @@ async def test_maybe_auto_review_short_circuits_when_disabled(monkeypatch):
         wrote_this_turn=False)
     assert out is None
     assert rec.lens_calls == []
+
+
+async def test_maybe_auto_review_dispatches_when_enabled(monkeypatch, tmp_path):
+    """Positive path: auto on + a write this turn → the swarm actually runs."""
+    repo = str(tmp_path)
+    _init_repo(repo)
+    (tmp_path / "a.py").write_text("a = 1\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "init")
+    (tmp_path / "a.py").write_text("a = 99\n")
+
+    rec = RecordingSubagent(lens_reply="NONE")
+    monkeypatch.setattr(review, "run_subagent", rec)
+    from rich.console import Console
+    out = await review.maybe_auto_review(
+        None, {"review": {"auto": True}}, Console(quiet=True), "auto",
+        wrote_this_turn=True, cwd=repo, instructions_text="")
+    assert out is not None
+    assert out.dispatched is True
+    assert len(rec.lens_calls) == 3
+
+
+async def test_auto_review_scopes_to_turn_changed_files(monkeypatch, tmp_path):
+    """Two files dirty in the tree, but the turn only wrote one → the review
+    diff must contain only that one (plan: 'the turn's changed files')."""
+    repo = str(tmp_path)
+    _init_repo(repo)
+    (tmp_path / "a.py").write_text("a = 1\n")
+    (tmp_path / "b.py").write_text("b = 1\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "init")
+    (tmp_path / "a.py").write_text("a = 99\n")   # written by THIS turn
+    (tmp_path / "b.py").write_text("b = 99\n")   # dirty from something else
+
+    rec = RecordingSubagent(lens_reply="NONE")
+    monkeypatch.setattr(review, "run_subagent", rec)
+    from rich.console import Console
+    out = await review.maybe_auto_review(
+        None, {"review": {"auto": True}}, Console(quiet=True), "auto",
+        wrote_this_turn=True, cwd=repo, instructions_text="",
+        changed_files=["a.py"])
+    assert out is not None and out.dispatched is True
+    assert len(rec.lens_calls) == 3
+    for p in rec.lens_calls:
+        assert "a.py" in p
+        assert "b.py" not in p
 
 
 # ---------------------------------------------------------------------------
@@ -353,6 +477,24 @@ def test_collect_diff_explicit_path_target(tmp_path):
     assert res.error is None
     assert "a.py" in res.text
     assert "b.py" not in res.text  # target scoping worked
+
+
+def test_collect_diff_scoped_to_paths_list(tmp_path):
+    repo = str(tmp_path)
+    _init_repo(repo)
+    (tmp_path / "a.py").write_text("a = 1\n")
+    (tmp_path / "b.py").write_text("b = 1\n")
+    (tmp_path / "c.py").write_text("c = 1\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "init")
+    (tmp_path / "a.py").write_text("a = 99\n")
+    (tmp_path / "b.py").write_text("b = 99\n")
+    (tmp_path / "c.py").write_text("c = 99\n")
+    res = review.collect_diff(cwd=repo, paths=["a.py", "c.py"])
+    assert res.error is None
+    assert "a.py" in res.text
+    assert "c.py" in res.text
+    assert "b.py" not in res.text
 
 
 # ---------------------------------------------------------------------------

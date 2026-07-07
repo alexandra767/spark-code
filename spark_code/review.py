@@ -89,6 +89,7 @@ class ReviewOutcome:
     overflow: list[Finding] = field(default_factory=list)  # not verified (cap)
     label: str = ""
     error: str | None = None
+    lens_errors: int = 0  # reviewer lenses that errored — degrades honesty
 
 
 # ---------------------------------------------------------------------------
@@ -364,12 +365,15 @@ async def review_diff(model, config: dict, lead_mode: str, diff_text: str,
     lens_results = await asyncio.gather(*lens_coros, return_exceptions=True)
 
     findings: list[Finding] = []
+    lens_errors = 0
     for lens, res in zip(LENSES, lens_results):
         # run_subagent already catches its own errors and returns a string;
         # the guard here is belt-and-suspenders so one bad lens can't sink it.
-        if isinstance(res, BaseException):
-            continue
-        if not isinstance(res, str) or res.startswith("[dispatch_agent error]"):
+        # Errored lenses are COUNTED, not silently skipped — a review that
+        # couldn't fully run must never render as "Clean".
+        if (isinstance(res, BaseException) or not isinstance(res, str)
+                or res.startswith("[dispatch_agent error]")):
+            lens_errors += 1
             continue
         findings.extend(parse_findings(res, lens["key"]))
 
@@ -377,7 +381,7 @@ async def review_diff(model, config: dict, lead_mode: str, diff_text: str,
     findings.sort(key=lambda f: SEVERITY_ORDER.get(f.severity, 9))
 
     if not findings:
-        return ReviewOutcome(dispatched=True)
+        return ReviewOutcome(dispatched=True, lens_errors=lens_errors)
 
     # --- 2. skeptic pass (concurrent, capped) ------------------------------
     to_verify = findings[:SKEPTIC_CAP]
@@ -403,6 +407,7 @@ async def review_diff(model, config: dict, lead_mode: str, diff_text: str,
         confirmed=confirmed,
         refuted=refuted,
         overflow=overflow,
+        lens_errors=lens_errors,
     )
 
 
@@ -413,8 +418,11 @@ async def review_diff(model, config: dict, lead_mode: str, diff_text: str,
 
 def _git(cwd: str, *args: str) -> tuple[int, str, str]:
     try:
+        # errors="replace": a diff with non-UTF-8 bytes (binary hunks, legacy
+        # encodings) must degrade to replacement chars, not UnicodeDecodeError.
         proc = subprocess.run(
-            ["git", *args], cwd=cwd, capture_output=True, text=True, timeout=20)
+            ["git", *args], cwd=cwd, capture_output=True, text=True,
+            errors="replace", timeout=20)
         return proc.returncode, proc.stdout, proc.stderr
     except FileNotFoundError:
         return 127, "", "git executable not found"
@@ -424,17 +432,21 @@ def _git(cwd: str, *args: str) -> tuple[int, str, str]:
         return 1, "", str(e)
 
 
-def collect_diff(cwd: str | None = None, target: str = "") -> DiffResult:
+def collect_diff(cwd: str | None = None, target: str = "",
+                 paths: list[str] | None = None) -> DiffResult:
     """Collect the diff to review.
 
     Default: working-tree changes (``git diff HEAD``); if the tree is clean,
     the last commit (``git diff HEAD~1..HEAD``). An explicit ``target`` path
-    scopes the diff to that path. Non-git directory → a friendly error, never
-    a crash. The result is capped head+tail to ``MAX_DIFF_CHARS``.
+    (or a ``paths`` list — auto-review's turn-changed files) scopes the diff.
+    Non-git directory → a friendly error, never a crash. The result is capped
+    head+tail to ``MAX_DIFF_CHARS``.
     """
     cwd = cwd or os.getcwd()
-    path_args = ["--", target] if target and target.strip() else []
-    scope = f" for {target}" if path_args else ""
+    scope_paths = [p.strip() for p in ([target] + list(paths or []))
+                   if p and p.strip()]
+    path_args = ["--", *scope_paths] if scope_paths else []
+    scope = f" for {', '.join(scope_paths)}" if scope_paths else ""
 
     rc, _, _ = _git(cwd, "rev-parse", "--is-inside-work-tree")
     if rc != 0:
@@ -475,13 +487,31 @@ def render_review(console: Console, outcome: ReviewOutcome) -> None:
         console.print("[#8899aa]Nothing to review — no changes vs HEAD.[/#8899aa]")
         return
 
+    n_lenses = len(LENSES)
+    if outcome.lens_errors >= n_lenses:
+        # Every reviewer errored: there is NO coverage. Never render a panel
+        # (let alone "Clean") for a review that could not run.
+        console.print(
+            f"[#bf616a]Review failed — all {n_lenses} reviewer lenses "
+            f"errored; no coverage. Check the engine and retry.[/#bf616a]")
+        return
+
     title = "Code Review"
     if outcome.label:
         title += f" — {outcome.label}"
 
     if not outcome.confirmed:
-        body = Text("No issues survived the skeptic pass. Clean.",
-                    style="#a3be8c")
+        # "Clean" is a claim of full coverage — only make it when every lens
+        # actually ran. Degraded runs say so instead.
+        if outcome.lens_errors:
+            body = Text("No findings from the reviewers that completed.",
+                        style="#8899aa")
+        elif outcome.refuted:
+            body = Text("No issues survived the skeptic pass. Clean.",
+                        style="#a3be8c")
+        else:
+            body = Text("No findings from any reviewer. Clean.",
+                        style="#a3be8c")
     else:
         body = Text()
         by_sev: dict[str, list[Finding]] = {}
@@ -517,6 +547,10 @@ def render_review(console: Console, outcome: ReviewOutcome) -> None:
         console.print(
             f"[#4c566a]{n} additional finding{'s' if n != 1 else ''} not "
             f"verified (skeptic cap {SKEPTIC_CAP}).[/#4c566a]")
+    if outcome.lens_errors:
+        console.print(
+            f"[#ebcb8b]⚠ {outcome.lens_errors} of {n_lenses} reviewers "
+            f"failed — coverage incomplete.[/#ebcb8b]")
 
 
 # ---------------------------------------------------------------------------
@@ -526,7 +560,8 @@ def render_review(console: Console, outcome: ReviewOutcome) -> None:
 
 async def run_review(model, config: dict, console: Console, lead_mode: str,
                      target: str = "", cwd: str | None = None,
-                     instructions_text: str | None = None) -> ReviewOutcome:
+                     instructions_text: str | None = None,
+                     paths: list[str] | None = None) -> ReviewOutcome:
     """The ``/review [target]`` command (and auto-review): collect the diff,
     run the swarm, render the result. Returns the outcome for callers/tests."""
     cwd = cwd or os.getcwd()
@@ -536,7 +571,7 @@ async def run_review(model, config: dict, console: Console, lead_mode: str,
         except Exception:
             instructions_text = ""
 
-    diff = collect_diff(cwd=cwd, target=target)
+    diff = collect_diff(cwd=cwd, target=target, paths=paths)
     if diff.error:
         console.print(f"[#8899aa]{diff.error}[/#8899aa]")
         return ReviewOutcome(dispatched=False, error=diff.error)
@@ -563,13 +598,20 @@ def should_auto_review(config: dict, wrote: bool) -> bool:
 async def maybe_auto_review(model, config: dict, console: Console,
                             lead_mode: str, wrote_this_turn: bool,
                             cwd: str | None = None,
-                            instructions_text: str | None = None
+                            instructions_text: str | None = None,
+                            changed_files: list[str] | None = None
                             ) -> ReviewOutcome | None:
     """Config-gated post-turn hook. No-op (returns None, zero dispatches) unless
-    ``review.auto`` is enabled and a write/edit succeeded this turn."""
+    ``review.auto`` is enabled and a write/edit succeeded this turn.
+
+    ``changed_files`` — the paths the TURN actually wrote (Agent tracks them) —
+    scopes the diff so pre-existing dirty files aren't swept into the review.
+    Empty/None falls back to the whole working-tree diff.
+    """
     if not should_auto_review(config, wrote_this_turn):
         return None
     console.print("[#4c566a]auto-review: changes detected, running "
                   "review swarm…[/#4c566a]")
     return await run_review(model, config, console, lead_mode,
-                            cwd=cwd, instructions_text=instructions_text)
+                            cwd=cwd, instructions_text=instructions_text,
+                            paths=changed_files)

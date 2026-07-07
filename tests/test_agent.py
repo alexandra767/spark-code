@@ -761,6 +761,33 @@ async def test_verify_nudge_fires_once_then_second_final_answer_ends_turn():
     assert "Second answer." in assistant_texts
 
 
+async def test_written_paths_tracked_per_turn():
+    """Successful write/edit calls collect their file paths for the turn
+    (auto-review scoping, Task 7) — and the list resets on the next turn."""
+    model = CapturingModel([
+        # Turn 1: write a.py, then another write of the SAME path (no dupes),
+        # then final answer.
+        [{"type": "tool_call", "id": "call_1", "name": "write_file",
+          "arguments": {"file_path": "a.py", "content": "x"}},
+         {"type": "done", "usage": {}}],
+        [{"type": "tool_call", "id": "call_2", "name": "write_file",
+          "arguments": {"file_path": "a.py", "content": "y"}},
+         {"type": "done", "usage": {}}],
+        [{"type": "text", "content": "Done."},
+         {"type": "done", "usage": {}}],
+        # Turn 2: read-only, no writes.
+        [{"type": "text", "content": "Nothing written."},
+         {"type": "done", "usage": {}}],
+    ])
+    agent = _make_agent(model, tools=[_WriteFileTool()])
+
+    await agent.run("change a file")
+    assert agent._verify_written_paths == ["a.py"]
+
+    await agent.run("just answer")
+    assert agent._verify_written_paths == []  # reset per turn
+
+
 async def test_verify_no_nudge_when_tests_ran_this_turn():
     """A bash call containing the detected test command marks tests as run —
     the subsequent final answer must NOT be interrupted by a nudge."""

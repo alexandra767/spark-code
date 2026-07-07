@@ -269,6 +269,9 @@ class Agent:
         self._verify_tests_run = False
         self._verify_nudged = False
         self._verify_nudge_pending = False
+        # Paths successfully written/edited THIS TURN (auto-review scoping,
+        # Task 7) — reset per turn alongside the flags above.
+        self._verify_written_paths: list[str] = []
         self.console = console or Console()
         self.output_prefix = output_prefix
         self.stats = stats
@@ -454,6 +457,7 @@ class Agent:
         self._verify_tests_run = False
         self._verify_nudged = False
         self._verify_nudge_pending = False
+        self._verify_written_paths = []
 
         while rounds < self.MAX_TOOL_ROUNDS:
             rounds += 1
@@ -836,6 +840,10 @@ class Agent:
         # about running tests, not passing them.
         if tc["name"] in _WRITE_TOOL_NAMES and "Error" not in result:
             self._verify_dirty = True
+            # Collect the written path for auto-review's turn scoping (Task 7).
+            written = tc["arguments"].get("file_path", "")
+            if written and written not in self._verify_written_paths:
+                self._verify_written_paths.append(written)
         elif tc["name"] == "bash" and self._test_command:
             command = tc["arguments"].get("command", "")
             if _bash_ran_test_command(command, self._test_command):
