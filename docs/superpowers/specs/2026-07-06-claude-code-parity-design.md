@@ -256,6 +256,16 @@ Post-Phase-4 round from real usage friction + program learnings:
   config drift (context_window vs server), RAG :8010 reachability, utility
   model status, MCP servers up, editor detection, version/branch of the
   install. Green/yellow/red table.
+- **Cloud API keys (added 2026-07-07, approved).** First-class, easy way to
+  plug in PUBLIC cloud provider keys so Spark can use a cloud model as primary,
+  utility, or fallback (esp. when the DGX is down/away-from-home). `gemini`/
+  `openai` providers + `${ENV}` key interpolation already exist — this makes it
+  easy and adds Anthropic: `/setkey <provider>` guided flow (masked input),
+  provider presets for anthropic/openai/gemini/openrouter (endpoints + model
+  ids prefilled), keys stored in a gitignored `~/.spark/keys` file (chmod 600)
+  or env — NEVER plaintext in a repo-committed config. Wire chosen provider
+  through the existing FallbackChain + dual-model routing. Corpus/secret scrub
+  must catch these key shapes (verify the Phase-4 scrub covers them).
 
 ## Non-goals (explicit)
 
