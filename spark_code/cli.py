@@ -881,6 +881,7 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
 
 **Code & Files**
 - `/diff` — Show git diff with syntax highlighting
+- `/review [path]` — Multi-agent review swarm on the diff (3 lenses + skeptic verify)
 - `/undo [N]` — Undo last N file operations (`/undo list` to see stack)
 - `/pin <file>` — Pin a file to always stay in context
 - `/unpin <file>` — Remove a pinned file
@@ -2267,6 +2268,13 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
     elif command == "/clean":
         return "__CLEAN__"
 
+    elif command == "/review":
+        # The /review COMMAND supersedes the builtin `review` skill: it runs the
+        # multi-agent swarm (async, non-streamed) rather than injecting a prompt.
+        # Deferred via a sentinel because this handler is sync. Optional arg is a
+        # path target for the diff.
+        return f"__REVIEW__{args.strip()}"
+
     # Check skills (skip /plan since we handle it above)
     skill = skills.get(command)
     if skill:
@@ -2892,6 +2900,17 @@ async def run_interactive(config: dict, resume_session: str = "",
                     instructions = result[len("__COMPACT__"):].strip() or None
                     # Ctrl+C-safe (sibling-branch pattern) — see _handle_compact.
                     await _handle_compact(model, context, console, instructions)
+                elif result.startswith("__REVIEW__"):
+                    from .review import run_review
+                    review_target = result[len("__REVIEW__"):].strip()
+                    lead_mode = getattr(permissions, "mode", "ask") or "ask"
+                    try:
+                        await run_review(model, config, console, lead_mode,
+                                         target=review_target)
+                    except KeyboardInterrupt:
+                        console.print("\n[#ebcb8b]Review cancelled.[/#ebcb8b]")
+                    except Exception as e:
+                        console.print(f"\n[#bf616a]Review error: {e}[/#bf616a]")
                 elif result.startswith("__TEAM_SPAWN__"):
                     prompt = result[len("__TEAM_SPAWN__"):]
                     try:
@@ -3457,6 +3476,25 @@ async def run_interactive(config: dict, resume_session: str = "",
                 compact_msg = None
             if compact_msg:
                 console.print(f"  [#ebcb8b]⚡ {compact_msg}[/#ebcb8b]")
+
+            # Auto-review (Task 7, OFF by default): when review.auto is enabled
+            # AND the turn just landed a successful write/edit (agent._verify_dirty
+            # — the same signal the verification nudge uses), run the review swarm
+            # on the working-tree diff. Consume the flag so a later non-agent
+            # iteration (e.g. /help) can't re-trigger it on the same diff.
+            if (getattr(agent, "_verify_dirty", False)
+                    and get(config, "review", "auto", default=False)):
+                from .review import maybe_auto_review
+                lead_mode = getattr(permissions, "mode", "ask") or "ask"
+                wrote = agent._verify_dirty
+                agent._verify_dirty = False  # consume
+                try:
+                    await maybe_auto_review(model, config, console, lead_mode,
+                                            wrote_this_turn=wrote)
+                except KeyboardInterrupt:
+                    console.print("\n[#ebcb8b]Auto-review cancelled.[/#ebcb8b]")
+                except Exception as e:
+                    console.print(f"[#8899aa]Auto-review skipped: {e}[/#8899aa]")
 
     finally:
         # Auto-save conversation history with label and cwd

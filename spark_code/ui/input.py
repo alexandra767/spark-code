@@ -33,6 +33,7 @@ _BUILTIN_COMMANDS: dict[str, str] = {
     "/stats": "Show session statistics",
     "/status": "Show session statistics (alias for /stats)",
     "/diff": "Show git diff with syntax highlighting",
+    "/review": "Multi-agent review swarm on the diff (find + skeptic-verify)",
     "/memory": "View or add to memory",
     "/image": "Send an image file with a prompt",
     "/mode": "Switch permission mode (ask/auto/trust/plan)",
