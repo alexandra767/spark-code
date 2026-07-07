@@ -19,6 +19,7 @@ from rich.text import Text
 from .context import Context
 from .model import ModelClient
 from .permissions import PermissionManager
+from .plan_mode import PLAN_DENIAL, PLAN_NUDGE, PlanState
 from .tools.base import ToolRegistry
 from .ui.output import (
     StreamingRenderer,
@@ -225,11 +226,15 @@ class Agent:
                  tool_cache: ToolCache | None = None,
                  hooks: HookManager | None = None,
                  on_iteration: object | None = None,
-                 result_budgets: dict[str, int] | None = None):
+                 result_budgets: dict[str, int] | None = None,
+                 plan_state: PlanState | None = None):
         self.model = model
         self.context = context
         self.tools = tools
         self.permissions = permissions
+        # Shared plan-mode flag (same object the CLI holds). None in contexts
+        # that never use plan mode (one-shot, sub-agents) → enforcement off.
+        self.plan_state = plan_state
         self.console = console or Console()
         self.output_prefix = output_prefix
         self.stats = stats
@@ -268,6 +273,38 @@ class Agent:
     def _budget_for(self, tool_name: str) -> int:
         """Char budget for a tool's result, from the merged per-tool map."""
         return self._result_budgets.get(tool_name, MAX_TOOL_RESULT_CHARS)
+
+    def _plan_denies(self, tc: dict, tool) -> bool:
+        """True iff plan mode is active AND this tool call is a write action.
+
+        The single enforcement predicate, called from BOTH the sequential path
+        (``_execute_single_tool``) and the parallel path (``_execute_parallel``)
+        so the two can never drift apart — the same failure mode the Phase-1
+        ``allows_without_prompt`` extraction was created to prevent.
+
+        Rules (in order):
+          * plan mode off / no state → never denies;
+          * ``exit_plan_mode`` → always allowed (it IS the plan gate);
+          * any ``is_read_only`` tool → allowed (research runs free);
+          * ``dispatch_agent`` → allowed ONLY for the read-only sub-agent types
+            ``explore``/``reviewer`` and blocked for ``implementer``. The tool's
+            ``is_read_only`` is conservatively False (a single instance can't
+            vary it per call), so the generic rule would block all three — this
+            special-case inspects the CALL's ``agent_type`` (Task-4 carry-forward);
+          * everything else that isn't read-only → denied.
+        """
+        if self.plan_state is None or not self.plan_state.active:
+            return False
+        name = tc.get("name")
+        if name == "exit_plan_mode":
+            return False
+        if tool is not None and tool.is_read_only:
+            return False
+        if name == "dispatch_agent":
+            args = tc.get("arguments") or {}
+            if args.get("agent_type") in ("explore", "reviewer"):
+                return False
+        return True
 
     async def _maybe_compact(self) -> str | None:
         """Auto-compact when the real-usage meter says we're low on room AND
@@ -375,6 +412,11 @@ class Agent:
             request_messages = self.context.get_messages()
             if round_note:
                 request_messages.append({"role": "system", "content": round_note})
+            # Plan-mode nudge is TRANSIENT too — injected into this request only
+            # while plan mode is active, never persisted (so it vanishes the
+            # moment the plan is approved / mode changes, same as round notes).
+            if self.plan_state is not None and self.plan_state.active:
+                request_messages.append({"role": "system", "content": PLAN_NUDGE})
 
             # Collect response from model
             text_parts = []
@@ -503,8 +545,12 @@ class Agent:
                 tool = self.tools.get(tc["name"])
                 authorized = tool is not None and self.permissions.allows_without_prompt(
                     tc["name"], tool.is_read_only)
+                # exit_plan_mode is read-only but runs a BLOCKING interactive
+                # approval prompt — it must never run under _execute_parallel's
+                # asyncio.gather (concurrent Prompt.ask), so force it sequential.
                 if (tool and tc.get("arguments") is not None
-                        and tool.is_read_only and authorized):
+                        and tool.is_read_only and authorized
+                        and tc["name"] != "exit_plan_mode"):
                     parallel_tcs.append(tc)
                 else:
                     sequential_tcs.append(tc)
@@ -573,6 +619,15 @@ class Agent:
             result = f"Error: Unknown tool '{tc['name']}'"
             self.context.add_tool_result(tc["id"], tc["name"], result)
             render_error(self.console, f"Unknown tool '{tc['name']}'")
+            return
+
+        # Plan mode: block write actions before any side effect (bash detect,
+        # edit diff, permission prompt, execution). Shared with the parallel
+        # path via _plan_denies so the two can't drift.
+        if self._plan_denies(tc, tool):
+            render_tool_call(self.console, tc["name"], tc.get("arguments") or {})
+            render_tool_denied(self.console, tc["name"])
+            self.context.add_tool_result(tc["id"], tc["name"], PLAN_DENIAL)
             return
 
         # Guard: skip tool calls with None/missing arguments
@@ -724,6 +779,12 @@ class Agent:
             tool = self.tools.get(tc["name"])
             if not tool:
                 return f"Error: Unknown tool '{tc['name']}'"
+
+            # Plan-mode enforcement lives on BOTH tool paths (defense in depth):
+            # today only read-only tools reach here, but a future partition
+            # change must not silently open a write hole in plan mode.
+            if self._plan_denies(tc, tool):
+                return PLAN_DENIAL
 
             # Check cache
             if (self.tool_cache

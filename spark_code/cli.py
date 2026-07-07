@@ -33,6 +33,7 @@ from .model import PROVIDERS, ModelClient, _pick_real_model_name, resolve_real_m
 from .permissions import PermissionManager, resolve_mode_name
 from .pinned import PinnedFiles
 from .plan_executor import execute_plan
+from .plan_mode import PlanState, cycle_mode
 from .platform_info import format_platform_prompt
 from .preflight import _extract_max_context, context_window_warning, fetch_server_models
 from .project_detect import detect_project_type
@@ -575,7 +576,9 @@ def _context_pct_style(pct: float) -> str:
 
 def build_tools(todo_list: TodoList | None = None, model=None,
                 config: dict | None = None,
-                permissions: "PermissionManager | None" = None) -> ToolRegistry:
+                permissions: "PermissionManager | None" = None,
+                plan_state: "PlanState | None" = None,
+                console: Console | None = None) -> ToolRegistry:
     """Register all built-in tools.
 
     ``todo_list`` is the session-scoped live checklist backing ``todo_write``.
@@ -590,6 +593,11 @@ def build_tools(todo_list: TodoList | None = None, model=None,
     (no model) so it structurally CANNOT contain ``dispatch_agent`` — that is
     the depth guard against nesting. ``permissions`` is read live at dispatch
     time so a mid-session mode change (Shift+Tab) is inherited by sub-agents.
+
+    ``plan_state`` enables the ``exit_plan_mode`` tool — the approval gate for
+    true plan mode. Only registered when a ``plan_state`` is supplied (the
+    interactive session), so one-shot runs and sub-agents (which pass none)
+    never see it.
     """
     registry = ToolRegistry()
     registry.register(ReadFileTool())
@@ -607,6 +615,10 @@ def build_tools(todo_list: TodoList | None = None, model=None,
         from .dispatch import DispatchAgentTool
         registry.register(DispatchAgentTool(
             model=model, config=config, permissions=permissions))
+    if plan_state is not None:
+        from .plan_mode import ExitPlanModeTool
+        registry.register(ExitPlanModeTool(
+            plan_state, permissions=permissions, console=console))
     return registry
 
 
@@ -834,7 +846,8 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
                          memory: Memory | None = None,
                          stats: SessionStats | None = None,
                          pinned: PinnedFiles | None = None,
-                         snippets: SnippetLibrary | None = None) -> str | None:
+                         snippets: SnippetLibrary | None = None,
+                         plan_state: PlanState | None = None) -> str | None:
     """Handle slash commands.
     Returns None if handled (no agent needed), or a prompt string for the agent.
     Returns "__ASYNC__" for commands that schedule async work (team spawn).
@@ -972,7 +985,8 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
                 # session (set_config only mutates the config dict/file).
                 if key_path == "permissions.mode" and permissions is not None:
                     permissions.mode = value.strip()
-                    config["_plan_mode"] = False
+                    if plan_state is not None:
+                        plan_state.active = False
                 elif key_path == "model.temperature":
                     try:
                         model.temperature = float(value)
@@ -1280,15 +1294,17 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
             # bypassPermissions/plan), case-insensitively.
             target = resolve_mode_name(target_raw)
             if target == "plan":
-                # Enter plan mode: explore with reads, prompt before writes.
-                config["_plan_mode"] = True
+                # Enter plan mode: reads run free, writes are blocked by the
+                # plan gate (drop to auto so reads never prompt either).
+                if plan_state is not None:
+                    plan_state.active = True
                 permissions.mode = "auto"
                 console.print("[#a3be8c]Switched to plan mode[/#a3be8c]")
                 return None
             if target in valid_modes:
                 new_mode = target
             else:
-                display = "plan" if config.get("_plan_mode") else permissions.mode
+                display = "plan" if (plan_state and plan_state.active) else permissions.mode
                 console.print(f"[#88c0d0]Current mode:[/#88c0d0] [#d8dee9]{display}[/#d8dee9]")
                 console.print("[#8899aa]Usage: /mode <ask|auto|trust|plan>  or  shift+tab to cycle[/#8899aa]")
                 console.print("[#8899aa]  ask   — confirm every tool call  (Claude Code: default)[/#8899aa]")
@@ -1299,7 +1315,8 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
         else:
             new_mode = command[1:]  # /trust -> trust, /auto -> auto, /ask -> ask
         # Any explicit mode switch exits plan mode.
-        config["_plan_mode"] = False
+        if plan_state is not None:
+            plan_state.active = False
         permissions.mode = new_mode
         config["permissions"]["mode"] = new_mode
         if team_manager is not None:
@@ -2427,9 +2444,14 @@ async def run_interactive(config: dict, resume_session: str = "",
         mode=get(config, "permissions", "mode", default="ask"),
         always_allow=get(config, "permissions", "always_allow", default=[]),
     )
+    # Shared plan-mode state — one object held by the CLI (Shift+Tab, slash
+    # handlers, toolbar) AND the Agent's tool-execution enforcement, so they can
+    # never disagree. Replaces the old loose config["_plan_mode"] dict flag.
+    plan_state = PlanState()
     todo_list = TodoList()
     tools = build_tools(todo_list=todo_list, model=model, config=config,
-                        permissions=permissions)
+                        permissions=permissions, plan_state=plan_state,
+                        console=console)
 
     # Register MCP tools
     for mcp_tool in mcp_tools:
@@ -2476,7 +2498,8 @@ async def run_interactive(config: dict, resume_session: str = "",
     agent = Agent(model, context, tools, permissions, console,
                   stats=session_stats, on_tool_start=_on_tool_start,
                   tool_cache=tool_cache, hooks=hook_manager,
-                  result_budgets=get(config, "tools", "result_budgets", default=None))
+                  result_budgets=get(config, "tools", "result_budgets", default=None),
+                  plan_state=plan_state)
 
     # Initialize team system — optionally use a faster model for workers
     task_store = TaskStore()
@@ -2571,43 +2594,26 @@ async def run_interactive(config: dict, resume_session: str = "",
 
         return parts
 
-    # Track plan mode in the shared config so slash-command handlers
-    # (/ask, /auto, /trust, /mode) can also see and clear it.
-    plan_mode = {"active": bool(config.get("_plan_mode", False))}
-
-    def _set_plan(active: bool):
-        plan_mode["active"] = active
-        config["_plan_mode"] = active
-
     def mode_switch():
         """Cycle modes: ask → auto → plan → ask (Shift+Tab).
 
         Trust is not in the cycle (matches Claude Code: bypassPermissions is
         never landed on via Shift+Tab) — it's reached only via /trust,
         --trust, or /mode trust. If the current mode is trust when
-        Shift+Tab is pressed, it's not in _MODE_CYCLE so the index lookup
-        falls back to 0 and the next press moves to "auto".
+        Shift+Tab is pressed, it's not in the cycle so it restarts at "auto".
+
+        The plan/permission bookkeeping lives in cycle_mode (shared, tested);
+        entering plan drops permissions to "auto" (reads free, writes blocked by
+        the plan gate). Persist the non-plan mode into config so it survives.
         """
-        from .ui.input import _MODE_CYCLE
-        # Sync from config in case a slash command changed plan state.
-        plan_mode["active"] = bool(config.get("_plan_mode", False))
-        current = "plan" if plan_mode["active"] else permissions.mode
-        idx = _MODE_CYCLE.index(current) if current in _MODE_CYCLE else 0
-        next_mode = _MODE_CYCLE[(idx + 1) % len(_MODE_CYCLE)]
-        if next_mode == "plan":
-            _set_plan(True)
-            # Plan mode explores with reads but still PROMPTS before any write
-            # or bash (auto), rather than silently trusting everything.
-            permissions.mode = "auto"
-        else:
-            _set_plan(False)
-            permissions.mode = next_mode
+        current = "plan" if plan_state.active else permissions.mode
+        next_mode = cycle_mode(current, plan_state, permissions)
+        if next_mode != "plan":
             config["permissions"]["mode"] = next_mode
 
     def mode_callback():
         """Line 2: ⏵⏵ mode on · shift+tab to switch · ctrl+t team."""
-        plan_mode["active"] = bool(config.get("_plan_mode", False))
-        if plan_mode["active"]:
+        if plan_state.active:
             display_mode = "plan"
         else:
             display_mode = permissions.mode
@@ -2861,6 +2867,7 @@ async def run_interactive(config: dict, resume_session: str = "",
                     stats=session_stats,
                     pinned=pinned,
                     snippets=snippet_lib,
+                    plan_state=plan_state,
                 )
                 if result is None:
                     continue
@@ -3408,19 +3415,10 @@ async def run_interactive(config: dict, resume_session: str = "",
                     if extra_context:
                         user_input += "\n\n" + extra_context
 
-                # In plan mode, wrap prompt to plan first. Applies to ALL
-                # requests — a short command like "delete old tests" must not
-                # slip through unwrapped (and un-planned).
-                if config.get("_plan_mode", False):
-                    user_input = (
-                        f"The user wants you to PLAN before executing. "
-                        f"Their request: {user_input}\n\n"
-                        "IMPORTANT: Do NOT execute changes yet. Instead:\n"
-                        "1. Use read-only tools to explore the codebase\n"
-                        "2. Create a detailed step-by-step plan\n"
-                        "3. Present the plan and ask for approval before executing\n"
-                        "4. Only after the user approves, execute the plan\n"
-                    )
+                # Plan mode is now ENFORCED at tool-execution time (writes are
+                # blocked, exit_plan_mode is the approval gate) plus a transient
+                # per-request system nudge — no prompt-wrapping of the user's
+                # message. See spark_code.plan_mode / Agent._plan_denies.
                 # Run agent
                 try:
                     team_monitor.start()
