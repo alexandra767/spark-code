@@ -335,6 +335,77 @@ class TestPathLabelSanitization:
 
 
 # ---------------------------------------------------------------------------
+# Diff-preview header sanitization (whole-branch review follow-up — the last
+# member of the same injection class): ui/diff.py rendered raw
+# model-controlled file_path in the inline-diff header (Text.append → ESC
+# injection) and interpolated it into Rich MARKUP f-string panel titles
+# (render_diff/render_file_created → markup injection like "[bold red]..."
+# on top of ESC injection; Rich's strip_control_codes doesn't strip 0x1b).
+# All three sites now route through ui/output._abbreviate_path (ESC → U+FFFD)
+# and the two markup-title sites additionally rich.markup.escape the label.
+# ---------------------------------------------------------------------------
+
+def _diff_console() -> Console:
+    return Console(file=io.StringIO(), force_terminal=True, width=200, record=True)
+
+
+class TestDiffHeaderSanitization:
+    def test_render_diff_title_neutralizes_esc_injection(self):
+        from spark_code.ui.diff import render_diff
+
+        console = _diff_console()
+        evil = "/tmp/\x1b]8;;http://evil\x1b\\x.py"
+        render_diff(console, evil, "old\n", "new\n")
+        raw = console.file.getvalue()
+        assert "\x1b]8;;http://evil" not in raw
+
+    def test_render_diff_title_escapes_markup_injection(self):
+        from spark_code.ui.diff import render_diff
+
+        console = _diff_console()
+        render_diff(console, "/tmp/[bold red]x[/].py", "old\n", "new\n")
+        # Escaped markup renders as literal bracket text IN THE TITLE, not
+        # as styling. (The unified-diff body lines always contained the
+        # literal — Text.append is markup-safe — so assert on the panel's
+        # title line specifically, or a pre-fix injected title slips by.)
+        title_lines = [
+            line for line in console.export_text().splitlines() if "Edit:" in line
+        ]
+        assert title_lines and "[bold red]x[/].py" in title_lines[0]
+
+    def test_render_inline_diff_header_neutralizes_esc_injection(self, tmp_path):
+        from spark_code.ui.diff import render_inline_diff
+
+        # ESC is a legal filename byte on APFS — create the hostile file for
+        # real so the inline (non-fallback) header path at diff.py:78 runs.
+        evil = tmp_path / "\x1b]8;;evil\x1b\\f.py"
+        evil.write_text("line 1\nline 2\nline 3\n")
+        console = _diff_console()
+        render_inline_diff(console, str(evil), "line 2", "line TWO")
+        raw = console.file.getvalue()
+        assert "\x1b]8;;evil" not in raw
+        assert "line TWO" in console.export_text()  # the diff itself rendered
+
+    def test_render_inline_diff_fallback_path_also_neutralized(self):
+        from spark_code.ui.diff import render_inline_diff
+
+        # Nonexistent file → falls back to render_diff (title + unified-diff
+        # a/…/b/… header lines, which are Text-appended raw pre-fix).
+        console = _diff_console()
+        evil = "/nonexistent/\x1b]8;;evil\x1b\\f.py"
+        render_inline_diff(console, evil, "old", "new")
+        assert "\x1b]8;;evil" not in console.file.getvalue()
+
+    def test_render_file_created_title_neutralizes_both_injections(self):
+        from spark_code.ui.diff import render_file_created
+
+        console = _diff_console()
+        render_file_created(console, "/tmp/\x1b]8;;evil\x1b\\[bold red]x[/].py", 3)
+        assert "\x1b]8;;evil" not in console.file.getvalue()
+        assert "[bold red]x[/].py" in console.export_text()
+
+
+# ---------------------------------------------------------------------------
 # Agent(editor=...) wiring — a resolved editor reaches render_tool_call.
 # ---------------------------------------------------------------------------
 

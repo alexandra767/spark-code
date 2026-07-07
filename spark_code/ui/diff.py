@@ -1,22 +1,35 @@
-"""Diff display for file edits."""
+"""Diff display for file edits.
+
+Every rendered file_path label routes through ui/output._abbreviate_path —
+the same choke point the tool-call renderer uses — because file_path is
+model-controlled: a hostile name containing raw ESC bytes would otherwise
+inject live terminal escape sequences (Rich's strip_control_codes does NOT
+strip 0x1b). Where the label additionally lands inside a Rich MARKUP
+f-string (the panel titles below), it is also rich.markup.escape()d so
+bracket sequences like "[bold red]" render literally instead of styling.
+"""
 
 import difflib
 
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.text import Text
+
+from .output import _abbreviate_path
 
 
 def render_diff(console: Console, file_path: str, old_string: str,
                 new_string: str):
     """Show a colored diff of the proposed edit."""
+    label = _abbreviate_path(file_path)
     old_lines = old_string.splitlines(keepends=True)
     new_lines = new_string.splitlines(keepends=True)
 
     diff = difflib.unified_diff(
         old_lines, new_lines,
-        fromfile=f"a/{file_path}",
-        tofile=f"b/{file_path}",
+        fromfile=f"a/{label}",
+        tofile=f"b/{label}",
         lineterm="",
     )
 
@@ -36,7 +49,7 @@ def render_diff(console: Console, file_path: str, old_string: str,
 
     console.print(Panel(
         text,
-        title=f"[yellow]Edit: {file_path}[/yellow]",
+        title=f"[yellow]Edit: {escape(label)}[/yellow]",
         border_style="yellow",
     ))
 
@@ -74,8 +87,8 @@ def render_inline_diff(console: Console, file_path: str,
     # Build display with context
     text = Text()
 
-    # Header
-    text.append(f"  {file_path}\n", style="bold #d8dee9")
+    # Header (Text.append is markup-safe; _abbreviate_path handles ESC)
+    text.append(f"  {_abbreviate_path(file_path)}\n", style="bold #d8dee9")
 
     # Before context
     ctx_start = max(0, start_line - context_lines)
@@ -118,6 +131,6 @@ def render_file_created(console: Console, file_path: str, line_count: int):
     """Show that a new file was created."""
     console.print(Panel(
         f"[green]+ {line_count} lines[/green]",
-        title=f"[green]New: {file_path}[/green]",
+        title=f"[green]New: {escape(_abbreviate_path(file_path))}[/green]",
         border_style="green",
     ))
