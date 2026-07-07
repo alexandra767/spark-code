@@ -6,6 +6,7 @@ import mimetypes
 import os
 import subprocess
 import sys
+import uuid
 from typing import Callable
 
 import click
@@ -26,6 +27,7 @@ from .branches import BranchManager
 from .codesearch import CodeSearchTool, index_project, resolve_service_url
 from .config import ensure_dirs, get, load_config, set_config
 from .context import AGENTIC_PROMPT, SYSTEM_PROMPT, Context, build_skill_prompt_section
+from .corpus import export_session
 from .custom_tools import CustomToolRegistry
 from .editor import detect_editor, open_in_editor
 from .hooks import HookManager
@@ -214,6 +216,37 @@ def _redacted_config(config: dict) -> dict:
         return obj
 
     return _mask(copy.deepcopy(config))
+
+
+def _export_corpus_session(config: dict, context, agent, *, error: str | None) -> None:
+    """Best-effort session -> training corpus export (Phase 4 Task 6).
+
+    Called from both teardown points (run_interactive's finally, and after
+    a headless _one_shot run) so every completed session — interactive or
+    scripted — gets one export attempt. All the actual gating (opt-in
+    ``corpus.export_enabled``, "skip if errored", "skip if no messages")
+    lives in :func:`spark_code.corpus.export_session` itself; this wrapper
+    just supplies the metadata each call site has available and swallows
+    any exception, because a broken corpus export must never surface as a
+    session-ending crash (interactive) or a headless-run failure (exit
+    code / JSON contract untouched either way).
+    """
+    try:
+        from datetime import datetime, timezone
+        export_session(
+            context,
+            get(config, "corpus", "dir", default="~/training-corpus/spark-code"),
+            meta={
+                "enabled": get(config, "corpus", "export_enabled", default=False),
+                "error": error,
+                "model": get(config, "model", "name", default=""),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "files_changed": list(getattr(agent, "_verify_written_paths", []) or []),
+                "session_id": uuid.uuid4().hex,
+            },
+        )
+    except Exception:
+        pass
 
 
 def _sessions_dir(create: bool = True) -> str:
@@ -3790,6 +3823,21 @@ async def run_interactive(config: dict, resume_session: str = "",
             except Exception:
                 pass  # Don't crash on save failure
 
+        # Session -> training corpus export (Phase 4 Task 6, opt-in,
+        # default OFF — see _export_corpus_session/corpus.py for the full
+        # privacy rationale). Gated the same way as the history auto-save
+        # above (turn_count > 0 — nothing happened, nothing to export).
+        # agent._last_stream_error is reset at the top of every Agent.run()
+        # call, so at this teardown point it reflects only the LAST
+        # completed turn — the closest thing to a whole-session "did this
+        # end cleanly" signal a REPL loop has (there's no single
+        # whole-session error state to check otherwise).
+        if context.turn_count > 0:
+            _export_corpus_session(
+                config, context, agent,
+                error=getattr(agent, "_last_stream_error", None),
+            )
+
         # Stop the file watcher so its poll task is cancelled cleanly.
         if file_watcher is not None and getattr(file_watcher, "is_running", False):
             try:
@@ -4168,6 +4216,12 @@ async def _one_shot(config: dict, prompt: str, output: str = "text",
         exit_code = 2
     else:
         exit_code = 0
+
+    # Session -> training corpus export (Phase 4 Task 6, opt-in, default
+    # OFF). ``error`` is the same headless "error flag" that already drives
+    # exit_code — export_session skips whenever it's set, so only clean
+    # headless completions are ever exported.
+    _export_corpus_session(config, context, agent, error=error)
 
     if json_mode:
         from .headless import HeadlessResult, build_headless_json

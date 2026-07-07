@@ -1,0 +1,152 @@
+"""Opt-in export of completed sessions into the user's training corpus.
+
+Phase 4 Task 6. Mirrors the shape of the existing Claude UI / JARVIS corpus
+pipeline (``~/training-corpus/claude-ui-conversations.jsonl``: one JSON
+object per line, keyed by ``source``/``model``/``exported_at``/``messages``
+— confirmed by reading a live line from that file) so a downstream LoRA
+training run can mix spark-code sessions in without a separate loader. Adds
+two spark-code-specific fields the plan calls for: ``system_prompt_hash``
+(so training code can group/filter by system-prompt version without storing
+the — large, static, and not itself training signal — prompt text) and
+``files_changed`` (the session's edit footprint).
+
+Privacy is opt-in and defense-in-depth:
+
+- ``corpus.export_enabled`` defaults to FALSE (see config.py's
+  ``DEFAULT_CONFIG``) — nothing is ever written without the user turning
+  this on. The check happens INSIDE :func:`export_session` (via
+  ``meta["enabled"]``) rather than trusting every call site to gate
+  correctly, so it's directly unit-testable and can't be bypassed by a
+  future call site that forgets the ``if``.
+- Sessions that errored mid-way are never exported (``meta["error"]``
+  truthy -> skip). Only clean completions teach the model good behavior.
+- Message content is scrubbed for API-key/token-shaped strings before
+  writing (see :func:`_scrub`).
+- This module never makes a network call — ``os.makedirs`` plus a local
+  file append are the only side effects.
+- No wall-clock reads here: the timestamp comes from ``meta`` (the caller,
+  which runs in a context where ``time``/``datetime`` are actually
+  available across both the interactive and headless entry points) so this
+  module stays a pure function of its inputs and is trivial to unit test.
+"""
+
+from __future__ import annotations
+
+import copy
+import hashlib
+import json
+import os
+import re
+
+DEFAULT_CORPUS_DIR = "~/training-corpus/spark-code"
+
+# API-key/token/credential-shaped strings. Aggressively pattern-based rather
+# than exhaustive: this is a *record of behavior* for training, not a
+# secrets-management surface — a false positive (redacting a long git SHA)
+# just costs a token, not the other kind of cost. No existing scrub utility
+# was found (grepped for scrub/redact/secret across spark_code/ — the only
+# hit, cli.py's ``_redacted_config``, masks config dict values by KEY name
+# and doesn't apply to free-text message content), so this is a small
+# purpose-built regex set.
+_SECRET_PATTERNS = [
+    re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"),  # OpenAI/Anthropic-style API keys
+    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"),  # GitHub tokens
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),  # AWS access key id
+    re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),  # JWT
+    re.compile(r"\b[A-Fa-f0-9]{32,}\b"),  # long hex strings (tokens/hashes-as-secrets)
+]
+
+_REDACTED = "[REDACTED]"
+
+
+def _scrub(value):
+    """Recursively scrub secret-shaped strings out of a message value.
+
+    Message ``content``/``tool_calls`` can be a plain string, a list of
+    ``{"type": ..., ...}`` blocks (multimodal), or nested dicts (tool-call
+    arguments) — this walks all three so nothing slips through unscrubbed.
+    """
+    if isinstance(value, str):
+        scrubbed = value
+        for pattern in _SECRET_PATTERNS:
+            scrubbed = pattern.sub(_REDACTED, scrubbed)
+        return scrubbed
+    if isinstance(value, list):
+        return [_scrub(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _scrub(v) for k, v in value.items()}
+    return value
+
+
+def _scrub_messages(messages: list[dict]) -> list[dict]:
+    """Deep-copy + scrub a session's message list for export.
+
+    Embedded image data (``add_user_with_image``'s base64 data URLs) is
+    dropped in favor of a lightweight marker — a text training corpus has no
+    use for multi-megabyte inline image blobs, and leaving them in would
+    bloat every export. Never mutates the live session's ``context.messages``.
+    """
+    cleaned = []
+    for msg in copy.deepcopy(messages):
+        content = msg.get("content")
+        if isinstance(content, list):
+            new_content = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "image_url":
+                    new_content.append({"type": "image_url", "image_url": "[image omitted]"})
+                else:
+                    new_content.append(_scrub(block))
+            msg["content"] = new_content
+        else:
+            msg["content"] = _scrub(content)
+        if "tool_calls" in msg:
+            msg["tool_calls"] = _scrub(msg["tool_calls"])
+        cleaned.append(msg)
+    return cleaned
+
+
+def export_session(context, path_dir: str, meta: dict) -> str | None:
+    """Append the completed session in ``context`` as one JSONL record.
+
+    ``meta`` carries everything this module deliberately does not compute
+    itself:
+
+    - ``enabled`` (bool): the resolved ``corpus.export_enabled`` config
+      value. Missing/false -> no-op (opt-in default-off).
+    - ``error`` (str | None): set -> the session errored mid-way, skip
+      export (only clean completions are exported).
+    - ``model`` (str): model name/id the session ran under.
+    - ``timestamp`` (str): export time, ISO8601 recommended. Caller-supplied
+      — see the module docstring for why this module never touches
+      wall-clock time itself.
+    - ``files_changed`` (list[str], optional): paths written this session.
+    - ``session_id`` (str, optional): stable id for the record.
+
+    Returns the path written, or ``None`` if disabled, errored, or there
+    were no messages to export (nothing happened -> nothing worth writing).
+    """
+    if not meta.get("enabled", False):
+        return None
+    if meta.get("error"):
+        return None
+    messages = getattr(context, "messages", None) or []
+    if not messages:
+        return None
+
+    system_prompt = getattr(context, "system_prompt", "") or ""
+    record = {
+        "source": "spark-code",
+        "session_id": meta.get("session_id", ""),
+        "system_prompt_hash": hashlib.sha256(system_prompt.encode("utf-8")).hexdigest(),
+        "model": meta.get("model"),
+        "exported_at": meta.get("timestamp"),
+        "messages": _scrub_messages(messages),
+        "files_changed": list(meta.get("files_changed") or []),
+    }
+
+    expanded_dir = os.path.expanduser(path_dir or DEFAULT_CORPUS_DIR)
+    os.makedirs(expanded_dir, exist_ok=True)
+    out_path = os.path.join(expanded_dir, "spark-code-sessions.jsonl")
+    with open(out_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return out_path

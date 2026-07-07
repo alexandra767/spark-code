@@ -90,6 +90,18 @@ DEFAULT_CONFIG = {
         "service_url": DEFAULT_RAG_SERVICE_URL,
         "code_search_enabled": True,
     },
+    # Phase 4 Task 6: opt-in export of completed sessions into the user's
+    # training corpus (spark_code/corpus.py). OFF by default — this is a
+    # privacy-sensitive feature (full conversation content leaves the
+    # session and lands on disk under `dir`) and must never turn on without
+    # the user explicitly setting `export_enabled: true`. `dir` mirrors the
+    # user's existing Claude UI/JARVIS corpus location
+    # (~/training-corpus) under a spark-code subdirectory so a downstream
+    # LoRA run can point at one parent directory.
+    "corpus": {
+        "export_enabled": False,
+        "dir": "~/training-corpus/spark-code",
+    },
 }
 
 GLOBAL_CONFIG_DIR = Path.home() / ".spark"
