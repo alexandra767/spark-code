@@ -45,10 +45,9 @@ PLAN_NUDGE = (
     "shell side effects — they are blocked until your plan is approved."
 )
 
-# Shift+Tab mode cycle. Trust is deliberately absent (reachable only via
-# /trust, --trust, or /mode trust) — matching Claude Code, where
-# bypassPermissions is never cycled into. Kept in lockstep with
-# spark_code.ui.input._MODE_CYCLE (the toolbar's copy).
+# Shift+Tab mode cycle — the single copy. Trust is deliberately absent
+# (reachable only via /trust, --trust, or /mode trust) — matching Claude Code,
+# where bypassPermissions is never cycled into.
 MODE_CYCLE = ("ask", "auto", "plan")
 
 

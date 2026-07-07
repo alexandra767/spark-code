@@ -114,7 +114,7 @@ def _format_permission_detail(tool_name: str, args: dict[str, Any]) -> Text:
 
 
 # Native Spark Code mode names. Shift+Tab only cycles through ask/auto/plan
-# (see spark_code.ui.input._MODE_CYCLE) — trust is reachable but not cycled,
+# (see spark_code.plan_mode.MODE_CYCLE) — trust is reachable but not cycled,
 # matching Claude Code where bypassPermissions is never in the cycle.
 NATIVE_MODES = {"ask", "auto", "trust", "plan"}
 

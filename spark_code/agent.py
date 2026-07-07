@@ -301,8 +301,13 @@ class Agent:
         if tool is not None and tool.is_read_only:
             return False
         if name == "dispatch_agent":
-            args = tc.get("arguments") or {}
-            if args.get("agent_type") in ("explore", "reviewer"):
+            # _parse_tool_arguments doesn't guarantee a dict (a bare-scalar
+            # payload like the json string '"explore"' parses fine) — anything
+            # non-dict can't prove a read-only agent_type, so it stays blocked
+            # (fail closed) instead of raising on .get().
+            args = tc.get("arguments")
+            if (isinstance(args, dict)
+                    and args.get("agent_type") in ("explore", "reviewer")):
                 return False
         return True
 

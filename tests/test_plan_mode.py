@@ -130,6 +130,48 @@ def test_plan_denies_matrix_when_active():
         dispatch) is True
 
 
+def test_plan_denies_dispatch_with_non_dict_args_blocks_gracefully():
+    """_parse_tool_arguments doesn't guarantee a dict — a bare-scalar payload
+    (e.g. the json string '"explore"') must be BLOCKED (fail closed), not raise
+    AttributeError on args.get()."""
+    ps = PlanState(active=True)
+    agent = _agent(MockModel([]), plan_state=ps)
+    dispatch = _FakeDispatch()
+
+    # String, list, int — none of them can prove a read-only agent_type.
+    assert agent._plan_denies(
+        {"name": "dispatch_agent", "arguments": "explore"}, dispatch) is True
+    assert agent._plan_denies(
+        {"name": "dispatch_agent", "arguments": ["explore"]}, dispatch) is True
+    assert agent._plan_denies(
+        {"name": "dispatch_agent", "arguments": 7}, dispatch) is True
+
+
+async def test_dispatch_string_args_in_plan_mode_denied_end_to_end():
+    """Full loop: a dispatch_agent tool_call whose arguments is the STRING
+    "explore" gets the denial result — no exception, no orphaned tool_call."""
+    model = MockModel([
+        [
+            {"type": "tool_call", "id": "c1", "name": "dispatch_agent",
+             "arguments": "explore"},
+            {"type": "done", "usage": {}},
+        ],
+        [
+            {"type": "text", "content": "Understood."},
+            {"type": "done", "usage": {}},
+        ],
+    ])
+    ps = PlanState(active=True)
+    agent = _agent(model, tools=[_FakeDispatch()],
+                   permissions=PermissionManager(mode="auto"), plan_state=ps)
+
+    await agent.run("dispatch something")  # must not raise
+
+    tool_msgs = [m for m in agent.context.messages if m["role"] == "tool"]
+    assert tool_msgs, "tool_call was orphaned — no tool result recorded"
+    assert PLAN_DENIAL in tool_msgs[-1]["content"]
+
+
 def test_plan_denies_nothing_when_inactive():
     ps = PlanState(active=False)
     agent = _agent(MockModel([]), plan_state=ps)

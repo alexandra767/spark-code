@@ -89,11 +89,6 @@ _BUILTIN_COMMANDS: dict[str, str] = {
     "/exit": "Exit Spark Code",
 }
 
-# Mode cycle order for Shift+Tab. Trust is NOT in the cycle — it's reachable
-# via /trust, --trust, or /mode trust — matching Claude Code, where
-# bypassPermissions is never cycled into via Shift+Tab either.
-_MODE_CYCLE = ["ask", "auto", "plan"]
-
 
 # ---------------------------------------------------------------------------
 # Slash-command completer
