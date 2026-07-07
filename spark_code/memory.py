@@ -15,6 +15,12 @@ DEFAULT_CLAUDE_MEMORY_PATH = "~/.claude/projects/-Users-alexandratitus/memory"
 # "caller explicitly passed None" (disable) and "caller passed a path".
 _UNSET = object()
 
+# The Claude Code MEMORY.md index can grow to tens of KB (this user's is
+# ~18KB / ~5,200 tokens) — injected whole into every system prompt it alone
+# busts a fixed-overhead budget of a few thousand tokens. Cap it. 0 disables
+# the bridge entirely (config: memory.bridge_budget_chars).
+DEFAULT_BRIDGE_BUDGET_CHARS = 4000
+
 
 def encode_cwd(cwd: str) -> str:
     """Encode an absolute path the way Claude Code names its project dirs."""
@@ -44,9 +50,11 @@ class Memory:
     def __init__(self, global_path: str = "~/.spark/memory",
                  project_path: str = ".spark/memory",
                  claude_memory_path=_UNSET,
-                 cwd: str | None = None):
+                 cwd: str | None = None,
+                 bridge_budget_chars: int = DEFAULT_BRIDGE_BUDGET_CHARS):
         self.global_path = Path(os.path.expanduser(global_path))
         self.project_path = Path(project_path)
+        self.bridge_budget_chars = bridge_budget_chars
         if claude_memory_path is _UNSET:
             # Derive from the current working directory (correct per-project),
             # instead of hardcoding one machine-specific path for every project.
@@ -82,13 +90,39 @@ class Memory:
         return ""
 
     def load_claude(self) -> str:
-        """Load Claude Code's MEMORY.md index (detail files stay lazy)."""
-        if not self.claude_memory_path:
+        """Load Claude Code's MEMORY.md index (detail files stay lazy).
+
+        Capped at ``bridge_budget_chars`` (default 4000) — this index can grow
+        to tens of KB, and injected whole it can single-handedly bust a fixed
+        system-prompt token budget. A value of 0 disables the bridge entirely.
+        """
+        if not self.claude_memory_path or self.bridge_budget_chars == 0:
             return ""
         mem_file = self.claude_memory_path / "MEMORY.md"
-        if mem_file.exists():
-            return mem_file.read_text(encoding="utf-8")
-        return ""
+        if not mem_file.exists():
+            return ""
+        content = mem_file.read_text(encoding="utf-8")
+        return self._apply_bridge_budget(content)
+
+    def _apply_bridge_budget(self, content: str) -> str:
+        """Head-truncate content to bridge_budget_chars at a line boundary.
+
+        Under-budget content passes through unchanged. Over-budget content is
+        cut at the last full line under the cap, with a marker line appended
+        pointing the model at read_file for the (now-dropped) rest of the
+        index and its detail files.
+        """
+        if len(content) <= self.bridge_budget_chars:
+            return content
+        head = content[:self.bridge_budget_chars]
+        last_line_break = head.rfind("\n")
+        if last_line_break != -1:
+            head = head[:last_line_break]
+        marker = (
+            "[memory index truncated — use read_file on "
+            f"{self.claude_memory_path}/<name>.md for details]"
+        )
+        return f"{head}\n\n{marker}"
 
     def load_all(self) -> str:
         """Load all memory and return as context string."""

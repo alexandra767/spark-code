@@ -2325,6 +2325,7 @@ async def run_interactive(config: dict, resume_session: str = "",
     # Initialize memory
     memory = Memory(
         global_path=get(config, "memory", "global_path", default="~/.spark/memory"),
+        bridge_budget_chars=get(config, "memory", "bridge_budget_chars", default=4000),
     )
     memory_context = memory.load_all()
     agentic = config.get("_agentic", False)

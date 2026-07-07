@@ -459,6 +459,14 @@ class TestSkillIndex:
         assert "show" not in RESERVED_COMMAND_NAMES
         assert len(RESERVED_COMMAND_NAMES) <= len(_BUILTIN_COMMANDS)
 
+    def test_docs_and_q_are_reserved(self):
+        # P2 Task 9 (from Task 8's re-review): /docs and /q are real CLI
+        # commands (cli.py handle_slash_command) that were missing from
+        # _BUILTIN_COMMANDS, so they weren't reserved and didn't autocomplete.
+        from spark_code.ui.input import RESERVED_COMMAND_NAMES
+        assert "docs" in RESERVED_COMMAND_NAMES
+        assert "q" in RESERVED_COMMAND_NAMES
+
 
 # ---------------------------------------------------------------------------
 # Trigger hint + model-reply auto-expand (agent.py) — a FINAL answer that is

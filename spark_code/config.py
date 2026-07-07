@@ -37,6 +37,9 @@ DEFAULT_CONFIG = {
     "memory": {
         "enabled": True,
         "global_path": "~/.spark/memory/",
+        # Cap on the injected Claude Code MEMORY.md bridge content (chars).
+        # 0 disables the bridge entirely. See spark_code/memory.py.
+        "bridge_budget_chars": 4000,
     },
 }
 

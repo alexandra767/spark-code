@@ -88,6 +88,8 @@ _BUILTIN_COMMANDS: dict[str, str] = {
     "/analytics": "Show detailed session analytics dashboard",
     "/quit": "Exit Spark Code",
     "/exit": "Exit Spark Code",
+    "/q": "Exit Spark Code (alias for /quit)",
+    "/docs": "Search indexed docs (Swift, SwiftUI, HIG, App Store Guidelines, CNN)",
 }
 
 # Bare command names (first token, no "/") reserved by the real commands
