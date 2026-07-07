@@ -282,7 +282,8 @@ class Agent:
                  skills: SkillRegistry | None = None,
                  editor: str | None = None,
                  diff_in_editor: bool = False,
-                 utility_model: ModelClient | None = None):
+                 utility_model: ModelClient | None = None,
+                 agent_defs: dict | None = None):
         self.model = model
         # Phase 4 Task 2: an optional cheaper model for the auto-compaction
         # summary request. Resolved and use_for-gated ONCE by the caller
@@ -332,6 +333,12 @@ class Agent:
         # test_command above. Guard resets per turn in _agent_loop.
         self.skills = skills
         self._skill_auto_expanded = False
+        # Phase 5 Task 4: custom subagent definitions (.spark/agents/*.md +
+        # ~/.spark/agents/*.md), keyed by name — read-only lookup used by
+        # ``_plan_denies`` to extend the explore/reviewer plan-mode allowance
+        # to a custom def whose own base_type is read-only. {} (the default)
+        # means no custom types are known, matching pre-Task-4 behavior.
+        self._agent_defs = agent_defs or {}
         # Phase 4 Task 4: screenshot image turns buffered during a round and
         # flushed AFTER the round's full tool-result run is recorded (see
         # _store_tool_result / _flush_pending_images). Injecting them inline
@@ -429,10 +436,13 @@ class Agent:
           * ``exit_plan_mode`` → always allowed (it IS the plan gate);
           * any ``is_read_only`` tool → allowed (research runs free);
           * ``dispatch_agent`` → allowed ONLY for the read-only sub-agent types
-            ``explore``/``reviewer`` and blocked for ``implementer``. The tool's
-            ``is_read_only`` is conservatively False (a single instance can't
-            vary it per call), so the generic rule would block all three — this
-            special-case inspects the CALL's ``agent_type`` (Task-4 carry-forward);
+            ``explore``/``reviewer`` (built-in) or a CUSTOM agent type
+            (``.spark/agents/*.md``, Phase 5 Task 4) whose own ``base_type``
+            is read-only, and blocked for ``implementer`` or a custom
+            implementer-class def. The tool's ``is_read_only`` is
+            conservatively False (a single instance can't vary it per call),
+            so the generic rule would block all three — this special-case
+            inspects the CALL's ``agent_type`` (Task-4 carry-forward);
           * everything else that isn't read-only → denied.
         """
         if self.plan_state is None or not self.plan_state.active:
@@ -448,9 +458,13 @@ class Agent:
             # non-dict can't prove a read-only agent_type, so it stays blocked
             # (fail closed) instead of raising on .get().
             args = tc.get("arguments")
-            if (isinstance(args, dict)
-                    and args.get("agent_type") in ("explore", "reviewer")):
-                return False
+            if isinstance(args, dict):
+                agent_type = args.get("agent_type")
+                if agent_type in ("explore", "reviewer"):
+                    return False
+                custom = self._agent_defs.get(agent_type)
+                if custom is not None and custom.is_read_only:
+                    return False
         return True
 
     def _should_nudge_verification(self) -> bool:

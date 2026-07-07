@@ -30,6 +30,7 @@ import asyncio
 from rich.console import Console
 
 from .agent import Agent, _truncate_result
+from .agents_registry import AgentDef
 from .config import get
 from .context import Context
 from .permissions import PermissionManager
@@ -147,8 +148,38 @@ def _build_subagent_registry(agent_type: str,
     return sub
 
 
+def _build_custom_registry(agent_def: AgentDef,
+                           base_registry: ToolRegistry | None = None) -> ToolRegistry:
+    """Build the filtered tool registry for a CUSTOM agent def.
+
+    SECURITY: this is an INTERSECTION, never a replacement. Start from the
+    def's ``base_type``'s own filtered registry (read-only for
+    explore/reviewer-class defs, everything-minus-dispatch_agent for
+    implementer-class) via ``_build_subagent_registry`` — exactly the same
+    call a built-in dispatch would make. THEN, if the def declares its own
+    ``tools`` allowlist, narrow further to that named subset.
+
+    A read-only-class def (``base_type in ("explore", "reviewer")``, the
+    default) can therefore never end up with a write tool no matter what its
+    ``tools:`` frontmatter claims — ``write_file`` was never in the base
+    registry to begin with, so it has nothing to intersect with. ``tools``
+    can only SHRINK the base type's permissions, never grow them.
+    """
+    base = _build_subagent_registry(agent_def.base_type, base_registry=base_registry)
+    if agent_def.tools is None:
+        return base
+    allow = set(agent_def.tools)
+    sub = ToolRegistry()
+    for tool in base.all():
+        if tool.name in allow:
+            sub.register(tool)
+    return sub
+
+
 async def run_subagent(model, prompt: str, agent_type: str, config: dict,
-                       lead_mode: str) -> str:
+                       lead_mode: str,
+                       agent_defs: dict[str, AgentDef] | None = None,
+                       utility_model=None) -> str:
     """Run a sub-agent to completion in a fresh context and return its report.
 
     Shares the lead's ``model`` (same engine handles concurrent requests) but
@@ -156,19 +187,40 @@ async def run_subagent(model, prompt: str, agent_type: str, config: dict,
     NON-interactive ``PermissionManager`` in the lead's ``lead_mode``. Bounded
     by ``agents.max_rounds`` rounds and the session-wide concurrency semaphore.
 
+    ``agent_defs`` (Phase 5 Task 4) additionally maps custom agent-type names
+    (from ``.spark/agents/*.md``) to :class:`~spark_code.agents_registry.AgentDef`.
+    When ``agent_type`` matches a key there instead of a built-in
+    ``AGENT_TYPES`` entry, the sub-agent runs with that def's
+    ``system_prompt`` and an INTERSECTED tool registry — see
+    ``_build_custom_registry`` for why a def can never exceed its
+    ``base_type``'s permissions. ``utility_model`` is used instead of the
+    lead's ``model`` only when the matched def's ``model_hint == "utility"``
+    (Phase 4 Task 2 dual-model routing); every other path is unaffected and
+    behaves exactly as before this feature existed.
+
     Any failure inside the sub-agent is caught and returned as a
     ``"[dispatch_agent error] ..."`` string — it NEVER raises into the lead's
     loop. The returned text is truncated head+tail to 8,000 chars.
     """
-    if agent_type not in AGENT_TYPES:
+    agent_defs = agent_defs or {}
+    custom = agent_defs.get(agent_type)
+    if agent_type not in AGENT_TYPES and custom is None:
+        known = list(AGENT_TYPES) + sorted(agent_defs)
         return (f"[dispatch_agent error] unknown agent_type '{agent_type}' "
-                f"(expected one of: {', '.join(AGENT_TYPES)})")
+                f"(expected one of: {', '.join(known)})")
     if not prompt or not prompt.strip():
         return "[dispatch_agent error] empty prompt — nothing to dispatch"
 
     try:
-        registry = _build_subagent_registry(agent_type)
-        system_prompt = _SUBAGENT_BASE_PROMPT + _SUBAGENT_TYPE_PROMPTS[agent_type]
+        if custom is not None:
+            registry = _build_custom_registry(custom)
+            system_prompt = _SUBAGENT_BASE_PROMPT + "\n\n" + custom.system_prompt
+            chosen_model = (utility_model if custom.model_hint == "utility"
+                            and utility_model is not None else model)
+        else:
+            registry = _build_subagent_registry(agent_type)
+            system_prompt = _SUBAGENT_BASE_PROMPT + _SUBAGENT_TYPE_PROMPTS[agent_type]
+            chosen_model = model
         sub_context = Context(
             system_prompt=system_prompt,
             max_tokens=int(get(config, "model", "context_window", default=32768)),
@@ -181,7 +233,7 @@ async def run_subagent(model, prompt: str, agent_type: str, config: dict,
         permissions = PermissionManager(mode=lead_mode, interactive=False)
 
         sub_agent = Agent(
-            model, sub_context, registry, permissions,
+            chosen_model, sub_context, registry, permissions,
             console=Console(quiet=True),
             # Non-empty prefix so the sub-agent skips the Rich Live display
             # (its output must not fight the lead's) in addition to the quiet
@@ -214,7 +266,7 @@ class DispatchAgentTool(Tool):
     """
 
     name = "dispatch_agent"
-    description = (
+    _BASE_DESCRIPTION = (
         "Launch a sub-agent that runs in its OWN fresh context and returns only "
         "a final summary — ideal for open-ended codebase searches, code reviews, "
         "or focused research where you don't want the raw exploration to fill "
@@ -226,7 +278,9 @@ class DispatchAgentTool(Tool):
     def __init__(self, model=None, config: dict | None = None,
                  permissions: PermissionManager | None = None,
                  lead_mode: str | None = None,
-                 get_lead_mode=None):
+                 get_lead_mode=None,
+                 agent_defs: dict[str, AgentDef] | None = None,
+                 utility_model=None):
         self._model = model
         self._config = config or {}
         # Lead-mode resolution, most-specific first: an explicit getter, then a
@@ -235,6 +289,29 @@ class DispatchAgentTool(Tool):
         self._permissions = permissions
         self._lead_mode = lead_mode
         self._get_lead_mode = get_lead_mode
+        # Phase 5 Task 4: custom agent types loaded from .spark/agents/*.md +
+        # ~/.spark/agents/*.md (agents_registry.load_agent_defs). {} when the
+        # feature is unused — the enum/description/dispatch behavior are then
+        # byte-for-byte what they were before this feature existed.
+        self._agent_defs = agent_defs or {}
+        # Phase 4 Task 2 dual-model routing: only consulted for a custom def
+        # whose model_hint == "utility" (see run_subagent) — every built-in
+        # dispatch and every def without that hint ignores this entirely.
+        self._utility_model = utility_model
+
+    @property
+    def description(self) -> str:
+        # Custom agent types (Phase 5 Task 4) get a LEAN index line each —
+        # name + one-line description, same shape as the skill index
+        # (SkillRegistry.build_index) — appended to the static base
+        # description. Never the def's full system_prompt: that only enters
+        # context on an actual dispatch (see run_subagent).
+        if not self._agent_defs:
+            return self._BASE_DESCRIPTION
+        from .agents_registry import build_agent_index
+        index = build_agent_index(self._agent_defs)
+        return (self._BASE_DESCRIPTION
+                + "\n\nCustom agent types (.spark/agents/*.md):\n" + index)
 
     @property
     def is_read_only(self) -> bool:
@@ -266,11 +343,15 @@ class DispatchAgentTool(Tool):
                 },
                 "agent_type": {
                     "type": "string",
-                    "enum": ["explore", "reviewer", "implementer"],
+                    # Built-ins first (stable order — existing tests assert
+                    # this exact list), then custom names sorted for a
+                    # deterministic, cache-friendly schema.
+                    "enum": list(AGENT_TYPES) + sorted(self._agent_defs),
                     "description": (
                         "explore = read-only codebase search/research; "
                         "reviewer = read-only code review; "
-                        "implementer = may edit files."
+                        "implementer = may edit files. See the description "
+                        "above for any custom agent types."
                     ),
                 },
             },
@@ -291,4 +372,5 @@ class DispatchAgentTool(Tool):
                       **kwargs) -> str:
         return await run_subagent(
             self._model, prompt, agent_type, self._config,
-            self._resolve_lead_mode())
+            self._resolve_lead_mode(),
+            agent_defs=self._agent_defs, utility_model=self._utility_model)

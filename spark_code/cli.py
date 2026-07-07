@@ -23,6 +23,7 @@ from rich.text import Text
 
 from . import __version__
 from .agent import Agent
+from .agents_registry import load_agent_defs
 from .branches import BranchManager
 from .codesearch import CodeSearchTool, index_project, resolve_service_url
 from .config import ensure_dirs, get, load_config, resolve_write_roots, set_config
@@ -647,7 +648,9 @@ def build_tools(todo_list: TodoList | None = None, model=None,
                 config: dict | None = None,
                 permissions: "PermissionManager | None" = None,
                 plan_state: "PlanState | None" = None,
-                console: Console | None = None) -> ToolRegistry:
+                console: Console | None = None,
+                agent_defs: dict | None = None,
+                utility_model=None) -> ToolRegistry:
     """Register all built-in tools.
 
     ``todo_list`` is the session-scoped live checklist backing ``todo_write``.
@@ -667,6 +670,14 @@ def build_tools(todo_list: TodoList | None = None, model=None,
     true plan mode. Only registered when a ``plan_state`` is supplied (the
     interactive session), so one-shot runs and sub-agents (which pass none)
     never see it.
+
+    ``agent_defs`` (Phase 5 Task 4) is the ``.spark/agents/*.md`` +
+    ``~/.spark/agents/*.md`` custom subagent map (``agents_registry.
+    load_agent_defs``) — threaded into ``DispatchAgentTool`` so its
+    ``agent_type`` enum/description/dispatch gain the custom names. Omitted
+    (``None``/``{}``) leaves dispatch_agent's schema exactly as it was before
+    this feature existed. ``utility_model`` (Phase 4 Task 2) is likewise only
+    consulted for a custom def whose ``model_hint == "utility"``.
     """
     registry = ToolRegistry()
     registry.register(ReadFileTool())
@@ -705,7 +716,8 @@ def build_tools(todo_list: TodoList | None = None, model=None,
     if model is not None and config is not None:
         from .dispatch import DispatchAgentTool
         registry.register(DispatchAgentTool(
-            model=model, config=config, permissions=permissions))
+            model=model, config=config, permissions=permissions,
+            agent_defs=agent_defs, utility_model=utility_model))
     if plan_state is not None:
         from .plan_mode import ExitPlanModeTool
         registry.register(ExitPlanModeTool(
@@ -2589,6 +2601,12 @@ async def run_interactive(config: dict, resume_session: str = "",
     skills = SkillRegistry()
     skills.load_all()
 
+    # Phase 5 Task 4: custom subagent definitions (.spark/agents/*.md +
+    # ~/.spark/agents/*.md). A malformed file is skipped with a logged
+    # warning inside load_agent_defs — never raises, so this can never fail
+    # startup the way an unguarded skill-index build once did.
+    agent_defs = load_agent_defs(os.getcwd())
+
     # Initialize pinned files and snippets
     pinned = PinnedFiles()
     snippet_lib = SnippetLibrary()
@@ -2760,9 +2778,17 @@ async def run_interactive(config: dict, resume_session: str = "",
     # never disagree. Replaces the old loose config["_plan_mode"] dict flag.
     plan_state = PlanState()
     todo_list = TodoList()
+    # Dual-model routing (Phase 4 Task 2): built here (rather than further
+    # below, its original spot) so build_tools can hand it to
+    # DispatchAgentTool for a custom agent def's model_hint=="utility"
+    # (Phase 5 Task 4). Same client instance is reused below for compaction —
+    # see the "Initialize tool cache" section for the rest of its lifecycle
+    # commentary.
+    utility_model = get_utility_client(config)
     tools = build_tools(todo_list=todo_list, model=model, config=config,
                         permissions=permissions, plan_state=plan_state,
-                        console=console)
+                        console=console, agent_defs=agent_defs,
+                        utility_model=resolve_utility_for(config, "dispatch", utility_model))
 
     # Register MCP tools
     for mcp_tool in mcp_tools:
@@ -2808,14 +2834,14 @@ async def run_interactive(config: dict, resume_session: str = "",
 
     # Dual-model routing (Phase 4 Task 2): an optional cheaper utility model
     # (default: the real 30B on Ollama, see routing.DEFAULT_UTILITY_MODEL)
-    # for compaction summaries and the /review swarm, built ONCE here and
-    # reused for the rest of the session. Its lifecycle is independent of
-    # the primary `model` — a /model switch below only rebinds `model`, and
-    # session teardown closes each separately. Building a ModelClient just
-    # sets up an httpx.AsyncClient (no request, no VRAM load), so an unused
-    # or use_for-gated-off utility model costs nothing even when GPU memory
-    # is tight next to a big primary model — see get_utility_client.
-    utility_model = get_utility_client(config)
+    # for compaction summaries and the /review swarm — built ABOVE (before
+    # build_tools, so DispatchAgentTool can see it too) and reused for the
+    # rest of the session. Its lifecycle is independent of the primary
+    # `model` — a /model switch below only rebinds `model`, and session
+    # teardown closes each separately. Building a ModelClient just sets up
+    # an httpx.AsyncClient (no request, no VRAM load), so an unused or
+    # use_for-gated-off utility model costs nothing even when GPU memory is
+    # tight next to a big primary model — see get_utility_client.
 
     agent = Agent(model, context, tools, permissions, console,
                   stats=session_stats, on_tool_start=_on_tool_start,
@@ -2824,7 +2850,8 @@ async def run_interactive(config: dict, resume_session: str = "",
                   plan_state=plan_state, test_command=test_command,
                   skills=skills, editor=_resolve_editor(config),
                   diff_in_editor=get(config, "ui", "diff_in_editor", default=False),
-                  utility_model=resolve_utility_for(config, "compaction", utility_model))
+                  utility_model=resolve_utility_for(config, "compaction", utility_model),
+                  agent_defs=agent_defs)
 
     # Initialize team system — optionally use a faster model for workers
     task_store = TaskStore()
@@ -4276,8 +4303,16 @@ async def _one_shot(config: dict, prompt: str, output: str = "text",
         mode=get(config, "permissions", "mode", default="auto"),
         interactive=False)
     todo_list = TodoList()
+    # Phase 5 Task 4: same custom-agent-def load as run_interactive — a
+    # one-shot/headless run gets the same dispatch_agent custom types.
+    agent_defs = load_agent_defs(os.getcwd())
+    # Dual-model routing (Phase 4 Task 2) — built here (before build_tools,
+    # same reordering rationale as run_interactive) so DispatchAgentTool can
+    # route a model_hint=="utility" custom def to it.
+    utility_model = get_utility_client(config)
     tools = build_tools(todo_list=todo_list, model=model, config=config,
-                        permissions=permissions)
+                        permissions=permissions, agent_defs=agent_defs,
+                        utility_model=resolve_utility_for(config, "dispatch", utility_model))
     # Verification habit (Task 6) — see run_interactive for the full rationale.
     test_command = detect_test_command(os.getcwd(), load_instructions(os.getcwd()).text)
 
@@ -4297,16 +4332,16 @@ async def _one_shot(config: dict, prompt: str, output: str = "text",
                 commands_run.append(cmd)
 
     # Dual-model routing (Phase 4 Task 2) — same pattern as run_interactive:
-    # built once, own lifecycle, use_for-gated for compaction (the only
-    # routing consumer reachable from a headless one-shot run — /review and
-    # /compact are interactive-only commands).
-    utility_model = get_utility_client(config)
+    # built above (before build_tools), own lifecycle, use_for-gated for
+    # compaction (the only OTHER routing consumer reachable from a headless
+    # one-shot run — /review and /compact are interactive-only commands).
     agent = Agent(model, context, tools, permissions, console,
                   stats=stats, on_tool_start=_on_tool_start,
                   result_budgets=get(config, "tools", "result_budgets", default=None),
                   test_command=test_command, editor=_resolve_editor(config),
                   diff_in_editor=get(config, "ui", "diff_in_editor", default=False),
-                  utility_model=resolve_utility_for(config, "compaction", utility_model))
+                  utility_model=resolve_utility_for(config, "compaction", utility_model),
+                  agent_defs=agent_defs)
     if max_rounds is not None:
         # Instance attribute shadows the class constant — same pattern
         # dispatch.py already uses to give sub-agents their own round cap.

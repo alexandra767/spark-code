@@ -46,8 +46,10 @@ DEFAULT_UTILITY_MODEL: dict[str, Any] = {
     "provider": "ollama",
 }
 
-# Consumers `routing.use_for` can scope.
-USE_FOR_CHOICES = ("compaction", "review", "labels")
+# Consumers `routing.use_for` can scope. "dispatch" (Phase 5 Task 4) is a
+# custom subagent def whose `model_hint == "utility"` — see dispatch.py's
+# run_subagent and cli.py's build_tools wiring.
+USE_FOR_CHOICES = ("compaction", "review", "labels", "dispatch")
 
 
 def get_utility_client(config: dict,

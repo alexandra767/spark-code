@@ -239,7 +239,7 @@ async def test_tool_reads_live_lead_mode_from_permissions():
     perms = PermissionManager(mode="ask")
     captured = {}
 
-    async def _fake_run(model, prompt, agent_type, config, lead_mode):
+    async def _fake_run(model, prompt, agent_type, config, lead_mode, **kwargs):
         captured["mode"] = lead_mode
         return "ok"
 
