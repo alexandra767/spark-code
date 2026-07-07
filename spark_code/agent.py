@@ -7,6 +7,7 @@ feeds results back, and repeats until the model gives a final answer.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import re
@@ -24,6 +25,7 @@ from .plan_mode import PLAN_DENIAL, PLAN_NUDGE, PlanState
 from .routing import call_with_fallback
 from .skills.base import SkillRegistry
 from .tools.base import ToolRegistry
+from .tools.simulator import SCREENSHOT_SENTINEL_PREFIX
 from .ui.input import RESERVED_COMMAND_NAMES
 from .ui.output import (
     StreamingRenderer,
@@ -785,10 +787,13 @@ class Agent:
             parallel_results: list[str] = []
             if len(parallel_tcs) > 1:
                 parallel_results = await self._execute_parallel(parallel_tcs)
-                for tc, result in zip(parallel_tcs, parallel_results):
-                    self.context.add_tool_result(
-                        tc["id"], tc["name"],
-                        _truncate_result(result, self._budget_for(tc["name"])))
+                for i, tc in enumerate(parallel_tcs):
+                    truncated = _truncate_result(
+                        parallel_results[i], self._budget_for(tc["name"]))
+                    # Reassign so the display loop below (which reuses this
+                    # same list) renders the friendly text, not a screenshot
+                    # sentinel.
+                    parallel_results[i] = self._store_tool_result(tc, truncated)
             elif parallel_tcs:
                 # Single auto-allowed call — run normally
                 sequential_tcs = parallel_tcs + sequential_tcs
@@ -841,6 +846,41 @@ class Agent:
         tool = self.tools.get(tool_name)
         items = getattr(tool, "items", None)
         return {"todo_items": items} if items is not None else {}
+
+    def _store_tool_result(self, tc: dict, result: str) -> str:
+        """Store a tool's result into context; returns the text used for
+        storage/display (normally just ``result`` unchanged).
+
+        Special-cases ``simulator_screenshot``'s image sentinel (Phase 4
+        Task 4, see tools/simulator.py's module docstring): tool results are
+        plain strings subject to per-tool truncation, so the actual PNG
+        bytes never travel through ``result`` — the tool instead returns
+        ``SCREENSHOT_SENTINEL_PREFIX`` + the saved file's path. Detected
+        here, this reads the file itself and injects an
+        ``add_user_with_image``-shaped multimodal turn (context.py:207) —
+        the same mechanism dragged-and-dropped images use (cli.py's
+        ``_is_image_drop``/``/image`` handling) — while still answering the
+        tool_call id with a short plain-text confirmation, since role:"tool"
+        messages must stay text-only for OpenAI-compatible APIs.
+        """
+        if tc["name"] == "simulator_screenshot" and result.startswith(
+                SCREENSHOT_SENTINEL_PREFIX):
+            path = result[len(SCREENSHOT_SENTINEL_PREFIX):]
+            try:
+                with open(path, "rb") as f:
+                    image_b64 = base64.b64encode(f.read()).decode("utf-8")
+            except OSError as e:
+                text = (f"Error: screenshot saved to {path} but could not be "
+                        f"read back for the model ({e})")
+                self.context.add_tool_result(tc["id"], tc["name"], text)
+                return text
+            text = f"Screenshot captured — see image below. (saved to {path})"
+            self.context.add_tool_result(tc["id"], tc["name"], text)
+            self.context.add_user_with_image(
+                "Simulator screenshot:", image_b64, "image/png")
+            return text
+        self.context.add_tool_result(tc["id"], tc["name"], result)
+        return result
 
     async def _execute_single_tool(self, tc: dict):
         """Execute a single tool call with all the checks and display."""
@@ -1006,7 +1046,7 @@ class Agent:
         # bash (sed/git/formatters), not just write_file/edit_file.
         self._invalidate_cache_for(tc)
 
-        self.context.add_tool_result(tc["id"], tc["name"], result)
+        result = self._store_tool_result(tc, result)
 
         # Display result
         if is_streamed_bash:

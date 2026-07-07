@@ -638,6 +638,17 @@ def build_tools(todo_list: TodoList | None = None, model=None,
     if config is None or get(config, "rag", "code_search_enabled", default=True):
         registry.register(CodeSearchTool(config=config))
     registry.register(TodoWriteTool(todo_list if todo_list is not None else TodoList()))
+    # Phase 4 Task 4: iOS vision loop — only registered on macOS with Xcode's
+    # command line tools installed (`xcrun`/`simctl` on the PATH); absent
+    # everywhere else (e.g. this project's own Linux/DGX host) — no error,
+    # just no tool. Registered even when `model` is None (sub-agents) since
+    # the guard here is purely platform-level; the tool itself degrades to
+    # its non-vision message if there's no model to check.
+    import platform
+    import shutil
+    if platform.system() == "Darwin" and shutil.which("xcrun"):
+        from .tools.simulator import SimulatorScreenshotTool
+        registry.register(SimulatorScreenshotTool(model=model))
     if model is not None and config is not None:
         from .dispatch import DispatchAgentTool
         registry.register(DispatchAgentTool(
@@ -2532,6 +2543,7 @@ async def run_interactive(config: dict, resume_session: str = "",
         provider=get(config, "model", "provider", default="ollama"),
         timeout=float(get(config, "model", "timeout", default=300)),
         real_model_name=real_model_name or "",
+        supports_vision=bool(get(config, "model", "vision", default=False)),
     )
 
     # Opt-in provider failover: if the config declares a `fallback.chain`,
@@ -2550,6 +2562,7 @@ async def run_interactive(config: dict, resume_session: str = "",
                 api_key=pconf.get("api_key", ""),
                 provider=name,
                 timeout=float(pconf.get("timeout", 300)),
+                supports_vision=bool(pconf.get("vision", False)),
             )
 
         await model.close()  # the chain manages its own per-provider clients
@@ -3613,11 +3626,13 @@ async def run_interactive(config: dict, resume_session: str = "",
                         provider=provider_name,
                         timeout=float(pconf.get("timeout", 300)),
                         real_model_name=new_real or "",
+                        supports_vision=bool(pconf.get("vision", False)),
                     )
                     # Update config
                     config["model"]["name"] = pconf.get("model", "unknown")
                     config["model"]["endpoint"] = pconf.get("endpoint", "http://localhost:11434")
                     config["model"]["provider"] = provider_name
+                    config["model"]["vision"] = bool(pconf.get("vision", False))
 
                     # Update every holder of the PRIMARY model client — the
                     # agent AND the team manager (which kept the now-closed
@@ -4080,6 +4095,7 @@ async def _one_shot(config: dict, prompt: str, output: str = "text",
         api_key=get(config, "model", "api_key", default=""),
         provider=get(config, "model", "provider", default="ollama"),
         timeout=float(get(config, "model", "timeout", default=300)),
+        supports_vision=bool(get(config, "model", "vision", default=False)),
     )
     # Honor --trust/--auto/--yolo (main() writes them into config) instead of
     # hardcoding "auto", so `spark --trust "do X"` doesn't still prompt.

@@ -22,6 +22,12 @@ DEFAULT_CONFIG = {
         "temperature": 0.7,
         "max_tokens": 4096,
         "context_window": 262144,
+        # Phase 4 Task 4: gates the simulator_screenshot tool's image path
+        # (ModelClient.supports_vision). True by default — the shipped
+        # default model, qwen3.5:122b, has vision. Override per-provider via
+        # `providers.<name>.vision` (see resolve_provider below), or set
+        # `model.vision: false` directly for a non-providers config.
+        "vision": True,
     },
     "permissions": {
         "mode": "ask",  # ask | auto | trust
@@ -166,6 +172,11 @@ def resolve_provider(config: dict, provider_name: str | None = None) -> dict:
     resolved["cost_per_million_output"] = provider_conf.get("cost_per_million_output", 0)
     resolved["worker_model"] = provider_conf.get("worker_model", "")
     resolved["worker_endpoint"] = provider_conf.get("worker_endpoint", "")
+    # Phase 4 Task 4: per-provider vision capability (ModelClient.supports_vision,
+    # gates simulator_screenshot's image path). Defaults False here — unlike
+    # DEFAULT_CONFIG["model"]["vision"], an arbitrary named provider isn't
+    # presumed to have vision unless its config says so.
+    resolved["vision"] = bool(provider_conf.get("vision", False))
     return config
 
 

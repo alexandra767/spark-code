@@ -247,9 +247,17 @@ class ModelClient:
     def __init__(self, endpoint: str, model: str, temperature: float = 0.7,
                  max_tokens: int = 4096, api_key: str = "",
                  provider: str = "ollama", timeout: float = 300.0,
-                 max_retries: int = 3, real_model_name: str = ""):
+                 max_retries: int = 3, real_model_name: str = "",
+                 supports_vision: bool = False):
         self.provider = provider
         self.model = model
+        # Phase 4 Task 4: gates spark_code.tools.simulator.SimulatorScreenshotTool
+        # (and anything else multimodal) — set from config
+        # `providers.<name>.vision` / `model.vision` (see config.resolve_provider).
+        # False by default: most providers/models this client talks to have no
+        # vision, and a wrongly-True default would silently feed an image the
+        # model can't read into every request.
+        self.supports_vision = supports_vision
         # Underlying model name (unmasked from a vLLM --served-model-name alias);
         # display-only (shown in the startup banner). Falls back to `model`.
         self.real_model_name = real_model_name
