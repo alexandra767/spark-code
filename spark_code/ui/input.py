@@ -75,7 +75,7 @@ _BUILTIN_COMMANDS: dict[str, str] = {
     "/watch off": "Stop the file watcher",
     "/checkpoint": "Create a git stash checkpoint",
     "/rollback": "Restore from a checkpoint",
-    "/rewind": "Restore files from undo stack or checkpoint",
+    "/rewind": "Restore files (undo/checkpoint) or the conversation itself",
     "/continue": "Resume from last checkpoint",
     "/clean": "Delete files created this session",
     "/profile": "Benchmark model performance (TTFT, tokens/sec)",

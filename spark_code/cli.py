@@ -913,6 +913,22 @@ def _rewind_files(console: Console) -> bool:
     return _apply_checkpoint(console, checkpoints, 0)
 
 
+def _rewind_conversation(console: Console, context: Context) -> bool:
+    """Restore the conversation to its state before the most recent turn.
+
+    Phase 5 Task 7: unlike ``_undo_last``/``_rewind_files`` (which restore
+    FILES), this restores the actual message history via
+    ``Context.rewind_conversation`` — closing the Phase 1 honest-labels gap
+    where /rewind could only ever touch files, never the conversation
+    itself. Shared by /rewind's "conversation" and "both" options.
+    """
+    if context.rewind_conversation(1):
+        console.print("[#a3be8c]Rewound conversation to before the last turn[/#a3be8c]")
+        return True
+    console.print("[#8899aa]No conversation snapshot to rewind to.[/#8899aa]")
+    return False
+
+
 async def _handle_compact(model, context: Context, console: Console,
                           instructions: str | None, utility_model=None):
     """Run the /compact flow: model summary, then compact — Ctrl+C-safe.
@@ -1000,7 +1016,7 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
 - `/watch <cmd>` — Auto-run command on file changes (`/watch off` to stop)
 - `/checkpoint` — Create a restorable checkpoint (git stash)
 - `/rollback [N]` — Restore from a checkpoint
-- `/rewind` — Restore files from undo stack or checkpoint (unified menu)
+- `/rewind` — Restore files (undo stack/checkpoint) or the conversation itself (unified menu)
 - `/continue` — Resume from last checkpoint
 - `/retry` — Re-send the last message
 - `/clean` — Delete files created this session
@@ -1510,6 +1526,11 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
             img_data = base64.b64encode(f.read()).decode("utf-8")
         size_kb = len(img_data) * 3 / 4 / 1024
         console.print(f"  [#88c0d0]Image[/#88c0d0] [#d8dee9]{os.path.basename(img_path)}[/#d8dee9] [#4c566a]({size_kb:.0f} KB, {mime_type})[/#4c566a]")
+        # Snapshot BEFORE the turn's user message enters context (Phase 5
+        # Task 7) — agent.run_without_user_add() (called by the caller once
+        # it sees __IMAGE_SENT__) intentionally does not snapshot itself
+        # since the message is already added by the time it runs.
+        context.snapshot()
         # Store image in context and return prompt for agent
         context.add_user_with_image(img_prompt, img_data, mime_type)
         return "__IMAGE_SENT__"  # Signal to skip add_user in agent
@@ -2384,30 +2405,33 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
         return None
 
     elif command == "/rewind":
-        # Unified file restore: the undo stack (last write/edit snapshots)
-        # or the latest /checkpoint git stash, or both. Delegates to /undo's
-        # and /rollback's own logic via the shared _undo_last/_rewind_files
+        # Unified restore: the undo stack (last write/edit snapshots), the
+        # latest /checkpoint git stash, the conversation itself (per-turn
+        # snapshot ring — Phase 5 Task 7), or all three. Delegates to
+        # /undo's, /rollback's, and Context.rewind_conversation's own logic
+        # via the shared _undo_last/_rewind_files/_rewind_conversation
         # helpers so there's exactly one implementation of each restore
-        # action. No conversation rewind exists in this codebase — the
-        # labels say exactly what each option does (plan amendment
-        # 2026-07-06; true context rewind is a Phase 2 candidate).
-        alias = {"undo": "1", "checkpoint": "2", "both": "3"}
+        # action. The Phase 1 honest labels (plan amendment 2026-07-06) said
+        # each option must do exactly what it claims — "conversation" now
+        # really does restore the message history, not just files.
+        alias = {"undo": "1", "checkpoint": "2", "both": "3", "conversation": "4"}
         choice = args.strip().lower() if args else ""
         choice = alias.get(choice, choice)
-        if choice and choice not in ("1", "2", "3"):
+        if choice and choice not in ("1", "2", "3", "4"):
             console.print(f"[#bf616a]Unknown /rewind option: {args.strip()}[/#bf616a]")
-            console.print("[#8899aa]Use 1 (last file edits), 2 (checkpoint), or 3 (both)[/#8899aa]")
+            console.print("[#8899aa]Use 1 (last file edits), 2 (checkpoint), 3 (both), or 4 (conversation)[/#8899aa]")
             return None
 
         if not choice:
             console.print("[bold #eceff4]Rewind:[/bold #eceff4]")
             console.print("  [#88c0d0]1.[/#88c0d0] last file edits (undo stack)")
             console.print("  [#88c0d0]2.[/#88c0d0] checkpoint (git stash)")
-            console.print("  [#88c0d0]3.[/#88c0d0] both")
+            console.print("  [#88c0d0]3.[/#88c0d0] both (files + conversation)")
+            console.print("  [#88c0d0]4.[/#88c0d0] conversation (last turn)")
             try:
                 choice = Prompt.ask(
                     "[#8899aa]Rewind what?[/#8899aa]",
-                    choices=["1", "2", "3"],
+                    choices=["1", "2", "3", "4"],
                     default="1",
                 )
             except KeyboardInterrupt:
@@ -2418,9 +2442,12 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
             _undo_last(console, 1)
         elif choice == "2":
             _rewind_files(console)
-        else:
+        elif choice == "3":
             _undo_last(console, 1)
             _rewind_files(console)
+            _rewind_conversation(console, context)
+        else:  # "4"
+            _rewind_conversation(console, context)
         return None
 
     elif command == "/profile":
@@ -3103,7 +3130,7 @@ async def run_interactive(config: dict, resume_session: str = "",
         "/setkey": lambda: list(PROVIDER_PRESETS.keys()),
         "/mode": _mode_arg_candidates,
         "/resume": _resume_names_provider,
-        "/rewind": lambda: ["undo", "checkpoint", "both"],
+        "/rewind": lambda: ["undo", "checkpoint", "both", "conversation"],
     }
 
     # Non-CPR terminal fallback (Phase 3 Task 3): `cpr_state["supported"]`
@@ -3299,6 +3326,10 @@ async def run_interactive(config: dict, resume_session: str = "",
                         img_data = base64.b64encode(f.read()).decode("utf-8")
                     size_kb = len(img_data) * 3 / 4 / 1024
                     console.print(f"  [#88c0d0]Image[/#88c0d0] [#d8dee9]{os.path.basename(img_path)}[/#d8dee9] [#4c566a]({size_kb:.0f} KB, {mime_type})[/#4c566a]")
+                    # Snapshot BEFORE the turn's user message enters context
+                    # (Phase 5 Task 7) — see the /image handler above for why
+                    # this can't live inside run_without_user_add() itself.
+                    context.snapshot()
                     context.add_user_with_image(img_prompt, img_data, mime_type)
                     try:
                         team_monitor.start()

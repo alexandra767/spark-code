@@ -576,9 +576,10 @@ class TestResumeCommand:
 
 class TestRewindCommand:
     def test_menu_shows_honest_labels_and_option1_delegates_to_undo(self, monkeypatch):
-        # Plan amendment 2026-07-06: no conversation rewind exists in this
-        # codebase — the menu must label the options by what they actually
-        # do (undo stack / git stash checkpoint), not fake a message rewind.
+        # Plan amendment 2026-07-06 (Phase 1): the menu must label options by
+        # what they actually do (undo stack / git stash checkpoint), not fake
+        # a message rewind. Phase 5 Task 7 made "conversation" real (true
+        # per-turn snapshot rewind), so the menu now legitimately shows it.
         import spark_code.cli as cli
         calls = []
         monkeypatch.setattr(cli, "_undo_last", lambda console, n: calls.append(("undo", n)))
@@ -595,7 +596,7 @@ class TestRewindCommand:
         assert "Rewind" in out
         assert "last file edits (undo stack)" in out
         assert "checkpoint (git stash)" in out
-        assert "conversation" not in out
+        assert "conversation" in out
 
     def test_word_alias_undo_skips_prompt(self, monkeypatch):
         import spark_code.cli as cli
@@ -629,7 +630,7 @@ class TestRewindCommand:
 
     def test_autocomplete_text_is_honest(self):
         from spark_code.ui.input import _BUILTIN_COMMANDS
-        assert _BUILTIN_COMMANDS["/rewind"] == "Restore files from undo stack or checkpoint"
+        assert _BUILTIN_COMMANDS["/rewind"] == "Restore files (undo/checkpoint) or the conversation itself"
         assert _BUILTIN_COMMANDS["/resume"] == "Pick a past session to resume"
 
     def test_files_option_delegates_to_rewind_files(self, monkeypatch):
@@ -646,10 +647,14 @@ class TestRewindCommand:
         assert calls == ["files"]
 
     def test_both_option_delegates_to_both_in_order(self, monkeypatch):
+        # Phase 5 Task 7: "both" now also rewinds the conversation, in
+        # addition to the two file-restore actions it already did.
         import spark_code.cli as cli
         calls = []
         monkeypatch.setattr(cli, "_undo_last", lambda console, n: calls.append(("undo", n)))
         monkeypatch.setattr(cli, "_rewind_files", lambda console: calls.append("files"))
+        monkeypatch.setattr(cli, "_rewind_conversation",
+                            lambda console, context: calls.append("conversation"))
 
         deps = _init_command_deps()
         result = handle_slash_command(
@@ -657,7 +662,39 @@ class TestRewindCommand:
             deps["skills"], deps["model"], permissions=deps["permissions"],
         )
         assert result is None
-        assert calls == [("undo", 1), "files"]
+        assert calls == [("undo", 1), "files", "conversation"]
+
+    def test_word_alias_conversation_delegates_to_rewind_conversation(self, monkeypatch):
+        import spark_code.cli as cli
+        calls = []
+        monkeypatch.setattr(cli, "_rewind_conversation",
+                            lambda console, context: calls.append("conversation"))
+
+        def _boom(*a, **k):
+            raise AssertionError("Prompt.ask should not run when an option is given")
+        monkeypatch.setattr(cli.Prompt, "ask", _boom)
+
+        deps = _init_command_deps()
+        result = handle_slash_command(
+            "/rewind conversation", deps["context"], deps["console"], deps["config"],
+            deps["skills"], deps["model"], permissions=deps["permissions"],
+        )
+        assert result is None
+        assert calls == ["conversation"]
+
+    def test_numeric_option4_delegates_to_rewind_conversation(self, monkeypatch):
+        import spark_code.cli as cli
+        calls = []
+        monkeypatch.setattr(cli, "_rewind_conversation",
+                            lambda console, context: calls.append("conversation"))
+
+        deps = _init_command_deps()
+        result = handle_slash_command(
+            "/rewind 4", deps["context"], deps["console"], deps["config"],
+            deps["skills"], deps["model"], permissions=deps["permissions"],
+        )
+        assert result is None
+        assert calls == ["conversation"]
 
     def test_unknown_option_reports_error_without_crash(self, monkeypatch):
         import spark_code.cli as cli

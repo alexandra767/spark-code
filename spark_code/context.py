@@ -1,7 +1,9 @@
 """Conversation context and history management."""
 
+import copy
 import json
 import os
+from collections import deque
 from datetime import datetime
 
 SYSTEM_PROMPT = """You are Spark Code, a local AI coding assistant running on DGX Spark.
@@ -186,13 +188,20 @@ class Context:
     """Manages conversation history and context window."""
 
     def __init__(self, system_prompt: str = SYSTEM_PROMPT, max_tokens: int = 32768,
-                 platform_prompt: str = "", provider_prompt: str = ""):
+                 platform_prompt: str = "", provider_prompt: str = "",
+                 snapshot_maxlen: int = 10):
         self.system_prompt = system_prompt
         self.platform_prompt = platform_prompt
         self.provider_prompt = provider_prompt
         self.max_tokens = max_tokens
         self.messages: list[dict] = []
         self.turn_count = 0
+        # Phase 5 Task 7: per-turn conversation snapshot ring for true
+        # /rewind (restoring the CONVERSATION, not just files). Session-only
+        # — never persisted via save()/load() — and bounded so a long
+        # session can't grow this unboundedly (deque(maxlen=...) silently
+        # drops the oldest entry once full).
+        self._snapshots: deque[dict] = deque(maxlen=snapshot_maxlen)
         # Fixed per-request overhead of the tool schemas (sent on EVERY request
         # but absent from `messages`). The agent seeds this from the size of its
         # tool schemas so estimate_tokens — and thus auto-compaction — accounts
@@ -310,6 +319,65 @@ class Context:
         if backfilled:
             self.messages = new_messages
         return backfilled
+
+    def snapshot(self) -> None:
+        """Push a deep copy of the current turn state onto the rewind ring.
+
+        Called once at the START of each user turn, BEFORE the new turn's
+        ``add_user``/``add_user_with_image`` — so the pushed snapshot is
+        exactly the state the conversation was in immediately before this
+        turn began. ``rewind_conversation`` pops entries off this ring to
+        restore that earlier state.
+
+        Deep-copies ``messages`` (a list of mutable dicts) rather than
+        shallow-copying: a shallow copy would share the same dict/list
+        objects with ``self.messages``, so later in-place mutation (e.g.
+        ``sanitize_orphaned_tool_calls`` rebuilding the list, or any code
+        that mutates a message dict) would corrupt the "frozen" snapshot
+        too. ``turn_count``/``last_prompt_tokens`` are plain ints — copied
+        by value regardless — but are captured here for symmetry and so
+        ``rewind_conversation`` has one bundle to restore from.
+
+        Session-only: this ring is never written to disk (save/load), by
+        design — a rewind is only meaningful within the live session that
+        took the snapshots.
+        """
+        self._snapshots.append({
+            "messages": copy.deepcopy(self.messages),
+            "turn_count": self.turn_count,
+            "last_prompt_tokens": self.last_prompt_tokens,
+        })
+
+    def rewind_conversation(self, steps: int = 1) -> bool:
+        """Restore the conversation to the state ``steps`` turns ago.
+
+        Pops ``steps`` entries off the snapshot ring (most recent first) and
+        restores ``messages``/``turn_count``/``last_prompt_tokens`` from the
+        last one popped — i.e. the state immediately before the ``steps``-th
+        most recent turn began. Returns False (no mutation at all) when the
+        ring doesn't hold at least ``steps`` snapshots — including the empty
+        ring — rather than performing a partial rewind.
+
+        Snapshots are only ever taken at turn boundaries where the message
+        sequence is already valid (no assistant ``tool_calls`` left
+        unanswered mid-turn), so a restored snapshot is inherently valid
+        too. This is re-asserted defensively here — mirroring the same
+        self-healing convention ``load()`` uses for a session file that
+        might have been saved mid-interrupt — by running
+        ``sanitize_orphaned_tool_calls`` immediately after restoring, so a
+        caller can never observe an invalid sequence even if that
+        invariant were ever violated.
+        """
+        if steps < 1 or len(self._snapshots) < steps:
+            return False
+        snap = None
+        for _ in range(steps):
+            snap = self._snapshots.pop()
+        self.messages = copy.deepcopy(snap["messages"])
+        self.turn_count = snap["turn_count"]
+        self.last_prompt_tokens = snap["last_prompt_tokens"]
+        self.sanitize_orphaned_tool_calls()
+        return True
 
     def get_messages(self) -> list[dict]:
         """Return messages with system prompt prepended."""

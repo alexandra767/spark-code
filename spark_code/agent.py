@@ -602,6 +602,15 @@ class Agent:
         """Run the agent loop without adding a user message.
 
         Used when the message (e.g. image) was already added to context.
+        No snapshot() call here (Phase 5 Task 7): the caller already added
+        the turn's user message before invoking this, so a true "before
+        add_user" snapshot has to be taken at THAT call site instead — see
+        cli.py's ``/image`` handler and the dragged-in-image path, which
+        call ``context.snapshot()`` immediately before
+        ``context.add_user_with_image``. ``/continue``'s checkpoint-resume
+        path (also routed through here) intentionally does NOT snapshot —
+        it replays already-saved history rather than starting a new
+        user-initiated turn.
         """
         return await self._agent_loop()
 
@@ -610,6 +619,11 @@ class Agent:
 
         Returns the final text response from the model.
         """
+        # Phase 5 Task 7: snapshot the pre-turn state BEFORE this turn's user
+        # message enters context — this is the turn boundary /rewind's
+        # "conversation" option rewinds to. Must come before add_user so the
+        # snapshot excludes the message that's about to be added.
+        self.context.snapshot()
         self.context.add_user(user_input)
         return await self._agent_loop()
 

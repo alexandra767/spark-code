@@ -536,3 +536,158 @@ class TestCompactSummaryParam:
         self._long_history(ctx)
         ctx.compact(keep_recent=6, summary="SUMMARY")
         assert pinned_block in ctx.system_prompt
+
+
+class TestConversationSnapshot:
+    """Phase 5 Task 7: true conversation rewind via a per-turn snapshot ring.
+
+    snapshot() is called at the START of each user turn, BEFORE that turn's
+    add_user — so rewind_conversation() restores the state exactly as it was
+    right before the rewound turn(s) began."""
+
+    def test_snapshot_then_turn_then_rewind_restores_pre_turn_state(self):
+        ctx = Context()
+        ctx.add_user("turn 1 user")
+        ctx.add_assistant("turn 1 reply")
+        pre_turn_messages = list(ctx.messages)
+        pre_turn_count = ctx.turn_count
+
+        ctx.snapshot()
+        ctx.add_user("turn 2 user")
+        ctx.add_assistant("turn 2 reply")
+        assert len(ctx.messages) == 4  # sanity: turn 2 really landed
+
+        assert ctx.rewind_conversation(1) is True
+        assert ctx.messages == pre_turn_messages
+        assert ctx.turn_count == pre_turn_count
+
+    def test_rewind_restores_last_prompt_tokens(self):
+        ctx = Context()
+        ctx.record_usage(500)
+        ctx.snapshot()
+        ctx.add_user("hi")
+        ctx.record_usage(900)
+        assert ctx.rewind_conversation(1) is True
+        assert ctx.last_prompt_tokens == 500
+
+    def test_deep_copy_snapshot_is_immune_to_later_mutation(self):
+        """A shallow copy would share message dicts with self.messages, so
+        mutating a message after snapshotting would corrupt the "frozen"
+        snapshot too. Prove the snapshot is a true deep copy."""
+        ctx = Context()
+        ctx.add_user("original")
+        ctx.snapshot()
+        # Mutate the message dict in place (not through add_* — simulating any
+        # code that mutates a stored message) AFTER the snapshot was taken.
+        ctx.messages[0]["content"] = "mutated after snapshot"
+        ctx.add_user("turn 2")
+
+        assert ctx.rewind_conversation(1) is True
+        # The restored snapshot must show the ORIGINAL content, proving the
+        # mutation above never touched the snapshot's own copy.
+        assert ctx.messages[0]["content"] == "original"
+
+    def test_ring_bounded_at_maxlen_oldest_dropped(self):
+        ctx = Context(snapshot_maxlen=10)
+        for i in range(11):
+            ctx.snapshot()
+            ctx.add_user(f"turn {i}")
+        assert len(ctx._snapshots) == 10
+        # The oldest snapshot (taken before "turn 0") was evicted — rewinding
+        # 10 times lands on the state right before "turn 1", not empty.
+        for _ in range(9):
+            assert ctx.rewind_conversation(1) is True
+        assert ctx.rewind_conversation(1) is True
+        assert ctx.messages[-1]["content"] == "turn 0"
+        # No 11th snapshot survives to rewind past that.
+        assert ctx.rewind_conversation(1) is False
+
+    def test_rewind_with_empty_ring_returns_false(self):
+        ctx = Context()
+        ctx.add_user("no snapshot was ever taken")
+        assert ctx.rewind_conversation(1) is False
+        # Nothing was mutated by the failed rewind.
+        assert len(ctx.messages) == 1
+
+    def test_rewind_conversation_two_pops_two(self):
+        ctx = Context()
+        pre_turn1_state = list(ctx.messages)  # [] — the true state before turn 1,
+        # i.e. the target rewind_conversation(2) must land on.
+
+        ctx.snapshot()  # before turn 1
+        ctx.add_user("turn 1")
+        ctx.add_assistant("reply 1")
+
+        ctx.snapshot()  # before turn 2
+        ctx.add_user("turn 2")
+        ctx.add_assistant("reply 2")
+
+        assert ctx.rewind_conversation(2) is True
+        assert ctx.messages == pre_turn1_state == []
+
+    def test_rewind_conversation_two_with_only_one_snapshot_returns_false(self):
+        ctx = Context()
+        ctx.snapshot()
+        ctx.add_user("turn 1")
+        before = list(ctx.messages)
+        assert ctx.rewind_conversation(2) is False
+        # No partial rewind — state untouched.
+        assert ctx.messages == before
+
+    def test_restored_sequence_has_no_orphaned_tool_calls(self):
+        """CRITICAL correctness: snapshots are taken at turn boundaries where
+        the sequence is already valid, so a restored sequence is inherently
+        valid too — assert it explicitly rather than trusting the theory."""
+        ctx = Context()
+        ctx.add_user("read a file")
+        ctx.add_assistant_tool_calls(
+            [{"id": "c1", "name": "read_file", "arguments": {"path": "/tmp/x"}}])
+        ctx.add_tool_result("c1", "read_file", "contents")
+        ctx.add_assistant("here it is")
+
+        ctx.snapshot()
+        ctx.add_user("now run a command")
+        ctx.add_assistant_tool_calls(
+            [{"id": "c2", "name": "bash", "arguments": {"command": "ls"}}])
+        ctx.add_tool_result("c2", "bash", "file1 file2")
+        ctx.add_assistant("done")
+
+        assert ctx.rewind_conversation(1) is True
+        # sanitize_orphaned_tool_calls returns the number of synthetic
+        # "[interrupted]" backfills it had to perform — 0 means the restored
+        # sequence was already fully valid, no orphaned tool_calls.
+        assert ctx.sanitize_orphaned_tool_calls() == 0
+        # get_messages() must not have injected anything either.
+        msgs = ctx.get_messages()
+        assert not any(m.get("content") == "[interrupted]" for m in msgs)
+
+    def test_snapshot_is_session_only_not_persisted(self, tmp_path):
+        ctx = Context()
+        ctx.add_user("turn 1")
+        ctx.snapshot()
+        ctx.add_user("turn 2")
+        path = tmp_path / "session.json"
+        ctx.save(str(path))
+        import json
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        assert "snapshots" not in data
+        assert "_snapshots" not in data
+
+        # A freshly loaded context has an empty ring even though the saved
+        # session had one turn's worth of snapshot state before loading.
+        ctx2 = Context()
+        ctx2.load(str(path))
+        assert ctx2.rewind_conversation(1) is False
+
+
+class TestRewindConversationInvalidInput:
+    def test_steps_zero_returns_false(self):
+        ctx = Context()
+        ctx.snapshot()
+        assert ctx.rewind_conversation(0) is False
+
+    def test_negative_steps_returns_false(self):
+        ctx = Context()
+        ctx.snapshot()
+        assert ctx.rewind_conversation(-1) is False
