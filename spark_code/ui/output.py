@@ -210,10 +210,20 @@ def _format_tool_args(name: str, args: dict[str, Any], editor: str | None = None
 
 
 def _abbreviate_path(path: str) -> str:
+    """Home-abbreviate a path AND sanitize it for terminal display.
+
+    Sanitization (review follow-up to Phase 3 Task 4): every rendered path
+    LABEL routes through here (the six sites in ``_format_tool_args``), so
+    this is the single choke point where non-printable characters — raw
+    ESC, C0 controls, anything a hostile filename could use to inject live
+    terminal escape sequences (e.g. its own OSC 8 ``\\x1b]8;;url`` open) —
+    are replaced with U+FFFD. The OSC 8 URL side never needed this
+    (``file_link`` percent-encodes); this covers the visible text.
+    """
     home = os.path.expanduser("~")
     if path.startswith(home):
-        return "~" + path[len(home):]
-    return path
+        path = "~" + path[len(home):]
+    return "".join(ch if ch.isprintable() else "�" for ch in path)
 
 
 # ---------------------------------------------------------------------------

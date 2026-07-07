@@ -104,6 +104,14 @@ class TestOpenInEditor:
         args, _ = mock_popen.call_args
         assert args[0] == ["xed", "/tmp/baz.swift"]
 
+    def test_line_zero_is_not_dropped(self):
+        # `line` is guarded with `is not None`, not truthiness — 0 is a
+        # value the caller passed, not "no line" (review minor).
+        with patch("spark_code.editor.subprocess.Popen") as mock_popen:
+            open_in_editor("cursor", "/tmp/foo.py", line=0)
+        args, _ = mock_popen.call_args
+        assert args[0] == ["cursor", "--goto", "/tmp/foo.py:0"]
+
     def test_unrecognized_editor_returns_false_no_popen(self):
         with patch("spark_code.editor.subprocess.Popen") as mock_popen:
             ok = open_in_editor("vim", "/tmp/foo.py")
@@ -258,6 +266,50 @@ class TestRenderToolCallLinkify:
 
 
 # ---------------------------------------------------------------------------
+# Path-label escape-injection hardening (review follow-up). The OSC 8 URL
+# side was always percent-encoded (file_link), but the VISIBLE label text
+# was appended raw — a filename containing ESC/]8;; bytes injected live
+# terminal escape sequences. _abbreviate_path is the single choke point all
+# six rendered-path sites route through; it now replaces non-printable
+# characters with U+FFFD.
+# ---------------------------------------------------------------------------
+
+class TestPathLabelSanitization:
+    def test_abbreviate_path_replaces_control_chars(self):
+        from spark_code.ui.output import _abbreviate_path
+        assert _abbreviate_path("/tmp/a\x1bb.py") == "/tmp/a�b.py"
+
+    def test_abbreviate_path_printable_paths_unchanged(self):
+        from spark_code.ui.output import _abbreviate_path
+        assert _abbreviate_path("/tmp/x.py") == "/tmp/x.py"
+        assert _abbreviate_path("/tmp/with space.py") == "/tmp/with space.py"
+
+    def test_osc8_injection_via_filename_is_neutralized(self):
+        console = _record_console()
+        evil = "/tmp/\x1b]8;;http://evil\x1b\\click.py"
+        render_tool_call(console, "read_file", {"file_path": evil})
+        raw = console.file.getvalue()
+        # The injected OSC 8 open-sequence must not survive into the stream.
+        assert "\x1b]8;;http://evil" not in raw
+        # The printable remainder of the name still renders.
+        assert "click.py" in raw
+
+    def test_injection_neutralized_at_every_path_site(self):
+        evil = "/tmp/\x1b]8;;evil\x1b\\f"
+        cases = [
+            ("write_file", {"file_path": evil, "content": "x"}),
+            ("edit_file", {"file_path": evil, "old_string": "a", "new_string": "b"}),
+            ("grep", {"pattern": "p", "path": evil}),
+            ("glob", {"pattern": "*.py", "path": evil}),
+            ("list_dir", {"path": evil}),
+        ]
+        for name, args in cases:
+            console = _record_console()
+            render_tool_call(console, name, args)
+            assert "\x1b]8;;evil" not in console.file.getvalue(), name
+
+
+# ---------------------------------------------------------------------------
 # Agent(editor=...) wiring — a resolved editor reaches render_tool_call.
 # ---------------------------------------------------------------------------
 
@@ -325,6 +377,34 @@ def _open_command_deps(editor: str = "none"):
         "model": MagicMock(spec=ModelClient),
         "permissions": PermissionManager(mode="auto"),
     }
+
+
+class TestResolveEditor:
+    def test_explicit_config_wins_without_detection(self, monkeypatch):
+        import spark_code.cli as cli_mod
+
+        def _fail():
+            raise AssertionError("detect_editor must not be called on explicit config")
+        monkeypatch.setattr(cli_mod, "detect_editor", _fail)
+        assert cli_mod._resolve_editor({"ui": {"editor": "code"}}) == "code"
+        assert cli_mod._resolve_editor({"ui": {"editor": "cursor"}}) == "cursor"
+        assert cli_mod._resolve_editor({"ui": {"editor": "xed"}}) == "xed"
+
+    def test_auto_delegates_to_detect_editor(self, monkeypatch):
+        import spark_code.cli as cli_mod
+        monkeypatch.setattr(cli_mod, "detect_editor", lambda: "cursor")
+        assert cli_mod._resolve_editor({"ui": {"editor": "auto"}}) == "cursor"
+
+    def test_missing_key_defaults_to_auto(self, monkeypatch):
+        import spark_code.cli as cli_mod
+        monkeypatch.setattr(cli_mod, "detect_editor", lambda: "xed")
+        assert cli_mod._resolve_editor({}) == "xed"
+
+    def test_none_and_unrecognized_resolve_to_none(self, monkeypatch):
+        import spark_code.cli as cli_mod
+        monkeypatch.setattr(cli_mod, "detect_editor", lambda: "cursor")
+        assert cli_mod._resolve_editor({"ui": {"editor": "none"}}) is None
+        assert cli_mod._resolve_editor({"ui": {"editor": "emacs"}}) is None
 
 
 class TestOpenCommand:

@@ -68,11 +68,11 @@ def open_in_editor(editor: str, path: str, line: int | None = None) -> bool:
     launch failure (binary missing, permission error, etc.).
     """
     if editor in ("cursor", "code"):
-        target = f"{path}:{line}" if line else path
+        target = f"{path}:{line}" if line is not None else path
         argv = [editor, "--goto", target]
     elif editor == "xed":
         argv = [editor]
-        if line:
+        if line is not None:
             argv += ["--line", str(line)]
         argv.append(path)
     else:
