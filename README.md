@@ -12,7 +12,7 @@ Your local AI coding assistant — like Claude Code, powered by your own model.
 - **Smart UX**: slash commands, autocomplete, Nord theme, inline diffs
 - **Persistence**: session history, memory, pinned files, snippets
 - **MCP support**: connect external tool servers
-- **Skills**: built-in /commit, /review, /test, /fix, /refactor, /explain
+- **Skills**: built-in /commit, /test, /fix, /refactor, /explain (plus /review — a multi-agent review swarm command)
 
 ## Install
 

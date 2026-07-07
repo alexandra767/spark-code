@@ -79,3 +79,8 @@ Phase 0 merge by the final whole-branch review.
 - **Skill index** cap check is O(n²) at tens-of-skills scale (cosmetic).
 - From Phase 1, still open: nested pause_all() single-depth limitation
   (comment-guarded); @-mention rel/abs dedup; 50ms Esc grace on laggy SSH.
+- Final P2 review minors: model auto-expand skips requires_args/compatibility
+  checks (degraded not broken); auto-expand lowercases skill names (uppercase
+  bridged skills can't auto-expand — CLI path agrees); plan-mode denies
+  agent_type-omitted dispatches that execute() would default to explore
+  (fail-closed asymmetry, correct direction).
