@@ -349,6 +349,66 @@ class TestMcpServers:
         assert mcp.status == "warn"
         assert "1/2" in mcp.detail
 
+    async def test_hanging_server_is_bounded_by_timeout_not_a_hang(self, monkeypatch):
+        # The whole point of /doctor is diagnosing the away-from-home/DGX-down
+        # case — a server that accepts the connection but never answers must
+        # NOT block the check for the transport's default ~30s. Each per-server
+        # connect is bounded by _MCP_TIMEOUT; a stuck server → a row, not a hang,
+        # and the loop moves on to the next server.
+        import asyncio
+        import time
+
+        from spark_code import doctor as doctor_mod
+
+        monkeypatch.setattr("spark_code.doctor.load_keys", lambda: {})
+        monkeypatch.setattr(doctor_mod, "_MCP_TIMEOUT", 0.2)
+        payload = {"data": [{"id": "qwen3.5:122b"}]}
+        # Two stuck servers: if they were awaited sequentially with no ceiling
+        # this would take ~20s; bounded it's ~2 × _MCP_TIMEOUT.
+        config = _base_config(mcp_servers={"stuck1": {}, "stuck2": {}})
+
+        async def connector(name, conf):
+            await asyncio.sleep(10)
+
+        start = time.monotonic()
+        checks = await run_doctor(
+            config, transport=_transport(payload), utility_transport=_transport(payload),
+            rag_transport=_transport({"status": "ok"}), mcp_connector=connector,
+            git_runner=_FakeGitRunner(),
+        )
+        elapsed = time.monotonic() - start
+        mcp = next(c for c in checks if c.name == "MCP servers")
+        # Returned within roughly N × timeout (generous 2× headroom for both
+        # servers + overhead) — nowhere near the 10s-per-server sleep.
+        assert elapsed < 2, f"MCP check hung for {elapsed:.1f}s — timeout not enforced"
+        assert mcp.status == "fail"  # 0/2 launched
+        assert "did not respond" in mcp.detail
+
+    async def test_one_hanging_server_still_reports_the_healthy_one(self, monkeypatch):
+        import asyncio
+
+        from spark_code import doctor as doctor_mod
+
+        monkeypatch.setattr("spark_code.doctor.load_keys", lambda: {})
+        monkeypatch.setattr(doctor_mod, "_MCP_TIMEOUT", 0.2)
+        payload = {"data": [{"id": "qwen3.5:122b"}]}
+        config = _base_config(mcp_servers={"good": {}, "stuck": {}})
+
+        async def connector(name, conf):
+            if name == "stuck":
+                await asyncio.sleep(10)
+
+        checks = await run_doctor(
+            config, transport=_transport(payload), utility_transport=_transport(payload),
+            rag_transport=_transport({"status": "ok"}), mcp_connector=connector,
+            git_runner=_FakeGitRunner(),
+        )
+        mcp = next(c for c in checks if c.name == "MCP servers")
+        # One stuck, one healthy → warn, and the healthy one is still counted.
+        assert mcp.status == "warn"
+        assert "1/2" in mcp.detail
+        assert "did not respond" in mcp.detail
+
 
 @pytest.mark.asyncio
 class TestEditor:

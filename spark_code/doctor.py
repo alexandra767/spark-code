@@ -34,6 +34,7 @@ docstring.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import subprocess
 from dataclasses import dataclass
@@ -61,6 +62,13 @@ logger = logging.getLogger(__name__)
 # tighter budget per the plan ("brief GET, short timeout").
 _RAG_TIMEOUT = 3.0
 _GIT_TIMEOUT = 5.0
+# Per-server ceiling for the MCP check. StdioTransport/HTTPTransport default
+# to ~30s, so a server that accepts the connection but never answers
+# `initialize` would otherwise block `/doctor` up to 30s PER server,
+# sequentially — reproducibly minutes in exactly the away-from-home/DGX-down
+# scenario this command exists to diagnose. asyncio.wait_for bounds each
+# connect (see _check_mcp).
+_MCP_TIMEOUT = 6.0
 
 Status = str  # "ok" | "warn" | "fail"
 
@@ -216,8 +224,15 @@ async def _check_mcp(
     failed: list[str] = []
     for name, server_conf in mcp_configs.items():
         try:
-            await connect(name, server_conf)
+            # Bound each server independently: a server stuck mid-handshake
+            # times out into a row and the loop moves on, rather than one
+            # unresponsive server blocking the whole check (and every server
+            # after it) for the transport's default ~30s.
+            await asyncio.wait_for(
+                connect(name, server_conf), timeout=_MCP_TIMEOUT)
             launched.append(name)
+        except (asyncio.TimeoutError, TimeoutError):
+            failed.append(f"{name} (did not respond within {_MCP_TIMEOUT:g}s)")
         except Exception as e:
             failed.append(f"{name} ({e})")
 
@@ -264,7 +279,9 @@ async def _check_install(cwd: str | None, git_runner: Callable[..., Any]) -> Doc
         capture_output=True, text=True, timeout=_GIT_TIMEOUT, cwd=cwd,
     )
     if branch_result.returncode != 0:
-        parts.append("not a git repo")
+        # Non-zero covers both "not a git repo" and a perms/corrupt-.git case
+        # (git present but rev-parse failed) — don't mislabel the latter.
+        parts.append("not a git repo or git unavailable")
         return DoctorCheck("Install", "ok", ", ".join(parts))
 
     branch = branch_result.stdout.strip()
