@@ -141,3 +141,42 @@ def test_command_completion_unchanged_without_arg():
     c = SlashCommandCompleter(value_providers={"/model": lambda: ["llm"]})
     got = _completions(c, "/mod")
     assert any("/model" in x for x in got)
+
+
+def test_model_candidates_include_list_subcommand():
+    # Review fast-follow: wiring provider names as /model's value provider
+    # must not shadow the real "/model list" subcommand — "list" has to stay
+    # a suggested argument alongside the provider names.
+    from spark_code.cli import _model_arg_candidates
+
+    cfg = {"providers": {"llm": {}, "coder": {}}}
+    c = SlashCommandCompleter(
+        value_providers={"/model": lambda: _model_arg_candidates(cfg)}
+    )
+    got = _completions(c, "/model li")
+    assert "list" in got
+    assert "llm" not in got  # prefix filter still applies
+    got = _completions(c, "/model l")
+    assert "llm" in got and "list" in got
+
+
+def test_mode_candidates_derived_from_permissions_constants():
+    # Review fast-follow: /mode's candidate list is derived from the
+    # permissions constants (single source of truth), not a hand-typed
+    # duplicate in cli.py that could drift when a mode is added/renamed.
+    from spark_code.cli import _mode_arg_candidates
+    from spark_code.permissions import DISPLAY_ALIASES, MODE_ALIASES, NATIVE_MODES
+
+    derived = sorted(NATIVE_MODES) + sorted(
+        a for a in DISPLAY_ALIASES if a.lower() not in NATIVE_MODES
+    )
+    assert _mode_arg_candidates() == derived
+    # DISPLAY_ALIASES must cover exactly MODE_ALIASES' keys (it exists only
+    # to preserve the camelCase spellings that the lowercased keys destroy).
+    assert {a.lower() for a in DISPLAY_ALIASES} == set(MODE_ALIASES)
+    # The Claude Code spellings users actually type must be offered verbatim.
+    got = _mode_arg_candidates()
+    assert "acceptEdits" in got
+    assert "bypassPermissions" in got
+    for native in NATIVE_MODES:
+        assert native in got

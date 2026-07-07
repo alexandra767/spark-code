@@ -31,7 +31,12 @@ from .mcp.client import MCPClient
 from .mcp.registry import find_mcp_configs
 from .memory import Memory
 from .model import PROVIDERS, ModelClient, _pick_real_model_name, resolve_real_model_name
-from .permissions import PermissionManager, resolve_mode_name
+from .permissions import (
+    DISPLAY_ALIASES,
+    NATIVE_MODES,
+    PermissionManager,
+    resolve_mode_name,
+)
 from .pinned import PinnedFiles
 from .plan_executor import execute_plan
 from .plan_mode import PlanState, cycle_mode
@@ -2296,6 +2301,30 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
     return None
 
 
+def _model_arg_candidates(config: dict) -> list[str]:
+    """/model argument candidates: the literal "list" subcommand plus the
+    configured provider names — /model accepts either. Without "list" here,
+    wiring provider names as /model's value provider would shadow the real
+    "/model list" subcommand in autocomplete (review fast-follow 2026-07-07):
+    the argument branch returns early, so the whole-phrase match that used to
+    suggest "/model list" is never reached once a provider is registered.
+    """
+    return ["list"] + list(config.get("providers", {}).keys())
+
+
+def _mode_arg_candidates() -> list[str]:
+    """/mode argument candidates, derived from the permissions constants —
+    the single source of truth — rather than a hand-typed duplicate that
+    could drift when a mode is added or renamed: native names first, then
+    the Claude Code alias spellings that aren't already a native name.
+    DISPLAY_ALIASES supplies the original camelCase forms ("acceptEdits")
+    that MODE_ALIASES' lowercased keys destroy.
+    """
+    return sorted(NATIVE_MODES) + sorted(
+        a for a in DISPLAY_ALIASES if a.lower() not in NATIVE_MODES
+    )
+
+
 async def run_interactive(config: dict, resume_session: str = "",
                           continue_prompt: str = ""):
     """Run interactive CLI session.
@@ -2754,12 +2783,9 @@ async def run_interactive(config: dict, resume_session: str = "",
     # exceptions — so a stale config or a session-listing hiccup can only
     # cost a missing suggestion, never a crashed prompt.
     value_providers: dict[str, Callable[[], list[str]]] = {
-        "/model": lambda: list(config.get("providers", {}).keys()),
+        "/model": lambda: _model_arg_candidates(config),
         "/providers": lambda: list(config.get("providers", {}).keys()),
-        "/mode": lambda: [
-            "ask", "auto", "plan", "trust",
-            "default", "acceptEdits", "bypassPermissions",
-        ],
+        "/mode": _mode_arg_candidates,
         "/resume": _resume_names_provider,
         "/rewind": lambda: ["undo", "checkpoint", "both"],
     }

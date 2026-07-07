@@ -127,6 +127,15 @@ MODE_ALIASES = {
     "plan": "plan",
 }
 
+# Claude Code's ORIGINAL spellings of the alias names above. MODE_ALIASES'
+# keys are lowercased for case-insensitive matching, which destroys the
+# camelCase display forms ("acceptEdits" → "acceptedits") — this tuple
+# preserves them for user-facing surfaces (the /mode argument autocomplete).
+# Kept right next to MODE_ALIASES so the two can't drift apart: every entry
+# here must lowercase to a MODE_ALIASES key, and every key must be covered
+# (guarded by test_mode_candidates_derived_from_permissions_constants).
+DISPLAY_ALIASES = ("default", "acceptEdits", "bypassPermissions", "plan")
+
 
 def resolve_mode_name(name: str) -> str | None:
     """Resolve a user/config-supplied mode name to a native mode name.
