@@ -56,3 +56,26 @@ Phase 0 merge by the final whole-branch review.
 - **NVFP4 / server-side changes** — out of scope for this repo entirely.
 - **Weakening the `qwen3.5:122b` alias contract** — the masquerade is
   load-bearing for JARVIS + Claude UI; Spark must never depend on unmasking.
+
+## Phase 2 deferrals (recorded 2026-07-07, all triaged non-blocking)
+
+- **Implementer-type dispatch_agent sub-contexts lack project instructions**
+  (CLAUDE.md/SPARK.md) — conventions reach the /review lens via prompt text;
+  fold instructions into implementer dispatches when they become primary
+  (Phase 3/4). Sub-managers also don't inherit always_allow (conscious).
+- **Auto-review blind spots**: brand-new untracked files never appear in
+  `git diff HEAD` (pre-existing class); no-op write turns fall back to
+  HEAD~1..HEAD scoped re-review (harmless, labeled); finding dedup can
+  collapse two same-location findings sharing a 60-char description prefix.
+- **Verification nudge** dropped if pending on the exact 75-round ceiling
+  (graceful checkpoint path covers); plan-mode guard inside
+  _should_nudge_verification verified by trace but not regression-locked;
+  word-boundary regex duplicated (project_detect + agent).
+- **Todo render on the parallel tool path** wired identically but untested
+  directly; cosmetic indent inconsistency at the two render call sites.
+- **Workers keep default tool-result budgets** (config override is lead-only).
+- **One-shot system prompt** still omits instructions.text (pre-existing gap,
+  noted during T6; interactive mode unaffected).
+- **Skill index** cap check is O(n²) at tens-of-skills scale (cosmetic).
+- From Phase 1, still open: nested pause_all() single-depth limitation
+  (comment-guarded); @-mention rel/abs dedup; 50ms Esc grace on laggy SSH.
