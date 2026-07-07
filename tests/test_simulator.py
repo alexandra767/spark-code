@@ -312,6 +312,53 @@ class _OtherReadOnlyTool(Tool):
         return "peeked"
 
 
+class _FakeReadFileTool(Tool):
+    """A read-only stand-in for read_file so a mixed round can pair a genuine
+    non-screenshot read tool with simulator_screenshot."""
+
+    name = "read_file"
+    description = "fake"
+    is_read_only = True
+    requires_permission = False
+
+    @property
+    def parameters(self):
+        return {"type": "object",
+                "properties": {"file_path": {"type": "string"}}}
+
+    async def execute(self, **kwargs) -> str:
+        return "file contents here"
+
+
+def _assert_valid_tool_transcript(messages):
+    """Assert every assistant tool_calls message is followed IMMEDIATELY by a
+    contiguous run of role:"tool" results answering exactly its ids (each
+    once, in order, with no other role — e.g. an injected user image —
+    interleaved), and that no stray/orphaned role:"tool" message exists
+    outside such a run. Mirrors what a strict OpenAI-compatible server
+    enforces; the pre-fix bug (image spliced into the middle of a multi-tool
+    round) violates it."""
+    i = 0
+    n = len(messages)
+    while i < n:
+        m = messages[i]
+        if m["role"] == "assistant" and m.get("tool_calls"):
+            expected = [tc["id"] for tc in m["tool_calls"]]
+            j = i + 1
+            got = []
+            while j < n and messages[j]["role"] == "tool":
+                got.append(messages[j]["tool_call_id"])
+                j += 1
+            assert got == expected, (
+                f"tool-result run {got} does not match tool_calls {expected} "
+                f"at index {i} — run was broken (image spliced in?)")
+            i = j
+        else:
+            assert m["role"] != "tool", (
+                f"stray/orphaned tool message at index {i}: {m}")
+            i += 1
+
+
 def _make_agent(model, tools, tmp_dir_console=None):
     from rich.console import Console
 
@@ -439,9 +486,12 @@ async def test_missing_file_at_sentinel_path_degrades_without_crashing(tmp_dir):
 
 
 async def test_parallel_path_also_injects_image_content_block(tmp_dir):
-    """Two auto-allowed read-only tool calls in one round route through
-    Agent._execute_parallel (not the sequential path) — the image-injection
-    wiring must work there too."""
+    """Screenshot called ALONGSIDE another tool in one round (parallel path,
+    screenshot NOT last) — the image must be injected AFTER the round's
+    complete tool-result run, never spliced into the middle of it. The
+    pre-fix bug corrupted the transcript here: sanitize_orphaned_tool_calls
+    saw a broken run, backfilled a synthetic '[interrupted]', and stranded
+    the real second result in an invalid position."""
     png_path = _make_png_file(tmp_dir)
     canned = f"{SCREENSHOT_SENTINEL_PREFIX}{png_path}"
     model = _FakeMockChatModel([
@@ -462,14 +512,78 @@ async def test_parallel_path_also_injects_image_content_block(tmp_dir):
     await agent.run("Screenshot and peek")
 
     messages = agent.context.messages
-    tool_msgs = {m["tool_call_id"]: m["content"] for m in messages if m["role"] == "tool"}
-    assert tool_msgs["call_2"] == "peeked"
-    assert tool_msgs["call_1"].startswith("Screenshot captured")
+    # Full-sequence validity: the tool-result run must be intact (no image
+    # spliced in) and there must be no stray/synthetic tool message.
+    _assert_valid_tool_transcript(messages)
+    # And get_messages()'s sanitize pass must have nothing to repair.
+    assert agent.context.sanitize_orphaned_tool_calls() == 0
 
-    image_msgs = [
-        m for m in messages
+    # Exactly ONE result per tool call, each answered once (no duplicates).
+    tool_msgs = [m for m in messages if m["role"] == "tool"]
+    assert len(tool_msgs) == 2
+    by_id = {m["tool_call_id"]: m["content"] for m in tool_msgs}
+    assert set(by_id) == {"call_1", "call_2"}
+    assert by_id["call_2"] == "peeked"
+    assert by_id["call_1"].startswith("Screenshot captured")
+
+    # Exactly one image message, and it lands AFTER the last tool result.
+    image_indices = [
+        idx for idx, m in enumerate(messages)
         if m["role"] == "user" and isinstance(m["content"], list)
     ]
-    assert len(image_msgs) == 1
-    url = image_msgs[0]["content"][1]["image_url"]["url"]
+    assert len(image_indices) == 1
+    last_tool_idx = max(
+        idx for idx, m in enumerate(messages) if m["role"] == "tool")
+    assert image_indices[0] > last_tool_idx
+    url = messages[image_indices[0]]["content"][1]["image_url"]["url"]
+    assert base64.b64decode(url.split("base64,", 1)[1]) == FAKE_PNG_BYTES
+
+
+async def test_mixed_round_read_file_and_screenshot_keeps_transcript_valid(tmp_dir):
+    """The exact mixed-round case: model calls [read_file, simulator_screenshot,
+    peek_tool] in ONE round, with the screenshot in the MIDDLE (so a
+    naive immediate-inject would splice the image between two real tool
+    results). Result must be a valid transcript with the image present."""
+    png_path = _make_png_file(tmp_dir)
+    canned = f"{SCREENSHOT_SENTINEL_PREFIX}{png_path}"
+    model = _FakeMockChatModel([
+        [
+            {"type": "tool_call", "id": "call_1", "name": "read_file",
+             "arguments": {"file_path": "App.swift"}},
+            {"type": "tool_call", "id": "call_2", "name": "simulator_screenshot",
+             "arguments": {}},
+            {"type": "tool_call", "id": "call_3", "name": "peek_tool",
+             "arguments": {}},
+            {"type": "done", "usage": {}},
+        ],
+        [
+            {"type": "text", "content": "Compared code to the running UI."},
+            {"type": "done", "usage": {}},
+        ],
+    ])
+    agent = _make_agent(
+        model,
+        [_FakeReadFileTool(), _ScriptedScreenshotTool(canned), _OtherReadOnlyTool()])
+    await agent.run("Read the file and screenshot the simulator")
+
+    messages = agent.context.messages
+    _assert_valid_tool_transcript(messages)
+    assert agent.context.sanitize_orphaned_tool_calls() == 0
+
+    tool_msgs = [m for m in messages if m["role"] == "tool"]
+    assert len(tool_msgs) == 3
+    by_id = {m["tool_call_id"]: m["content"] for m in tool_msgs}
+    assert set(by_id) == {"call_1", "call_2", "call_3"}
+    assert by_id["call_2"].startswith("Screenshot captured")
+
+    # Image present, decodes to the real PNG, and sits after the last tool result.
+    image_indices = [
+        idx for idx, m in enumerate(messages)
+        if m["role"] == "user" and isinstance(m["content"], list)
+    ]
+    assert len(image_indices) == 1
+    last_tool_idx = max(
+        idx for idx, m in enumerate(messages) if m["role"] == "tool")
+    assert image_indices[0] > last_tool_idx
+    url = messages[image_indices[0]]["content"][1]["image_url"]["url"]
     assert base64.b64decode(url.split("base64,", 1)[1]) == FAKE_PNG_BYTES

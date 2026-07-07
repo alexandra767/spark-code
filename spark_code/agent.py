@@ -332,6 +332,13 @@ class Agent:
         # test_command above. Guard resets per turn in _agent_loop.
         self.skills = skills
         self._skill_auto_expanded = False
+        # Phase 4 Task 4: screenshot image turns buffered during a round and
+        # flushed AFTER the round's full tool-result run is recorded (see
+        # _store_tool_result / _flush_pending_images). Injecting them inline
+        # would splice a user message into the middle of a multi-tool round's
+        # tool-result run and corrupt the transcript. Each entry is
+        # (text, image_b64, mime).
+        self._pending_image_injections: list[tuple[str, str, str]] = []
         self.console = console or Console()
         # Resolved host editor (Phase 3 Task 4 — "cursor"/"code"/"xed", or
         # None). Threaded into render_tool_call so rendered file paths get
@@ -844,6 +851,12 @@ class Agent:
             for tc in sequential_tcs:
                 await self._execute_single_tool(tc)
 
+            # Flush any buffered screenshot image turns NOW — after every tool
+            # result for this round (parallel + sequential) is recorded — so
+            # the image lands after a complete, valid tool-result run rather
+            # than spliced into the middle of it. See _flush_pending_images.
+            self._flush_pending_images()
+
             # Display results for parallel calls
             if parallel_tcs and parallel_results:
                 for tc, result in zip(parallel_tcs, parallel_results):
@@ -897,12 +910,16 @@ class Agent:
         plain strings subject to per-tool truncation, so the actual PNG
         bytes never travel through ``result`` — the tool instead returns
         ``SCREENSHOT_SENTINEL_PREFIX`` + the saved file's path. Detected
-        here, this reads the file itself and injects an
+        here, this reads the file itself and BUFFERS an
         ``add_user_with_image``-shaped multimodal turn (context.py:207) —
         the same mechanism dragged-and-dropped images use (cli.py's
-        ``_is_image_drop``/``/image`` handling) — while still answering the
-        tool_call id with a short plain-text confirmation, since role:"tool"
-        messages must stay text-only for OpenAI-compatible APIs.
+        ``_is_image_drop``/``/image`` handling). The tool_call id is answered
+        immediately with a short plain-text confirmation (role:"tool"
+        messages must stay text-only for OpenAI-compatible APIs), but the
+        image turn is NOT emitted here — it is flushed by
+        ``_flush_pending_images`` only after every tool result for the round
+        is recorded, so a screenshot called alongside other tools can't
+        splice a user message into the middle of the tool-result run.
         """
         if tc["name"] == "simulator_screenshot" and result.startswith(
                 SCREENSHOT_SENTINEL_PREFIX):
@@ -917,11 +934,34 @@ class Agent:
                 return text
             text = f"Screenshot captured — see image below. (saved to {path})"
             self.context.add_tool_result(tc["id"], tc["name"], text)
-            self.context.add_user_with_image(
-                "Simulator screenshot:", image_b64, "image/png")
+            self._pending_image_injections.append(
+                ("Simulator screenshot:", image_b64, "image/png"))
             return text
         self.context.add_tool_result(tc["id"], tc["name"], result)
         return result
+
+    def _flush_pending_images(self):
+        """Emit any buffered screenshot image turns, AFTER the round's full
+        tool-result run is recorded.
+
+        Image content can't live in a role:"tool" message (it must be a user
+        multimodal message), so a screenshot is followed by an injected user
+        turn. Emitting that turn the instant the screenshot's own result is
+        stored would splice a user message INTO the middle of a multi-tool
+        round's tool-result run — the next request's
+        ``sanitize_orphaned_tool_calls`` would then see a broken run, backfill
+        a synthetic "[interrupted]" result, and strand the round's remaining
+        real tool results in an invalid position (a 400 on strict servers).
+        Buffering during the round and flushing once here — after every tool
+        result for the round is in — keeps the tool-result run contiguous and
+        valid, with the image(s) landing immediately after it. Idempotent: a
+        no-op when nothing is buffered, and clears the buffer so it never
+        leaks into a later round."""
+        if not self._pending_image_injections:
+            return
+        for text, image_b64, mime in self._pending_image_injections:
+            self.context.add_user_with_image(text, image_b64, mime)
+        self._pending_image_injections = []
 
     async def _execute_single_tool(self, tc: dict):
         """Execute a single tool call with all the checks and display."""
