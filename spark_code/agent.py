@@ -620,6 +620,9 @@ class Agent:
         self._hit_max_rounds = False
         self._last_stream_error = None
         self._final_answer_given = False
+        # Defensive: images buffer per-round and always flush in-round, but
+        # reset here too so the "always flushed" invariant is guaranteed.
+        self._pending_image_injections = []
 
         while rounds < self.MAX_TOOL_ROUNDS:
             rounds += 1
