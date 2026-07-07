@@ -285,6 +285,14 @@ class Agent:
         # Paths successfully written/edited THIS TURN (auto-review scoping,
         # Task 7) — reset per turn alongside the flags above.
         self._verify_written_paths: list[str] = []
+        # Headless/machine-contract exposure (Phase 4 Task 1): how the turn
+        # ended, read by spark_code.headless (via cli.py's _one_shot) AFTER
+        # run() returns so a script can build an accurate JSON result without
+        # the Agent knowing anything about JSON. Reset per turn alongside the
+        # verification flags above; pure bookkeeping — never gates behavior.
+        self._last_rounds: int = 0
+        self._hit_max_rounds: bool = False
+        self._last_stream_error: str | None = None
         # 80B-friendly skills (Task 8): the registry used to expand a model
         # FINAL answer that is solely a "/<skill-name> [args]" line. None
         # (one-shot mode, sub-agents) → feature silently off, same pattern as
@@ -537,9 +545,14 @@ class Agent:
         # Skill auto-expand guard (Task 8) — one hop max per turn, same reset
         # boundary as the verification flags above.
         self._skill_auto_expanded = False
+        # Headless exposure (Phase 4 Task 1) — same per-turn reset boundary.
+        self._last_rounds = 0
+        self._hit_max_rounds = False
+        self._last_stream_error = None
 
         while rounds < self.MAX_TOOL_ROUNDS:
             rounds += 1
+            self._last_rounds = rounds
 
             # Safe boundary: drain any queued inter-agent messages into context
             # before building the next request (workers set this hook).
@@ -681,6 +694,7 @@ class Agent:
                 if text.strip():
                     self.context.add_assistant(text)
                 render_error(self.console, stream_error)
+                self._last_stream_error = stream_error
                 break
 
             if repeat_detected:
@@ -764,6 +778,7 @@ class Agent:
             # Continue loop — model will process tool results
 
         if rounds >= self.MAX_TOOL_ROUNDS:
+            self._hit_max_rounds = True
             render_warning(self.console, "Reached maximum tool rounds")
             try:
                 checkpoint_path = str(CHECKPOINT_DIR / "latest.json")

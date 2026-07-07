@@ -79,6 +79,7 @@ from .ui.input import (
     toolbar_mode_segments,
     toolbar_status_segments,
 )
+from .ui.output import render_error
 from .ui.theme import get_theme
 from .watcher import FileWatcher
 
@@ -3879,7 +3880,10 @@ def _run_setup():
 @click.command()
 @click.option("--endpoint", "-e", help="Model API endpoint URL")
 @click.option("--model", "-m", "model_name", help="Model name")
-@click.option("--provider", "-p", help="Provider: ollama, gemini, openai")
+@click.option("--provider", help="Provider: ollama, gemini, openai")
+@click.option("--prompt", "-p", "prompt_flag", default="",
+              help="One-shot prompt (headless print mode; Claude Code parity) "
+                   "— same as passing PROMPT positionally")
 @click.option("--trust", is_flag=True, help="Trust mode (allow all tool calls)")
 @click.option("--auto", "auto_mode", is_flag=True, help="Auto mode (allow reads, ask for writes)")
 @click.option("--yolo", is_flag=True, help="Full agent mode (trust + autonomous execution)")
@@ -3887,9 +3891,17 @@ def _run_setup():
 @click.option("--continue", "-c", "continue_prompt", default="", help="Resume last session and send a prompt")
 @click.option("--setup", is_flag=True, help="Run interactive setup wizard")
 @click.option("--version", "-v", is_flag=True, help="Show version")
+@click.option("--output", "output_format", type=click.Choice(["text", "json"]),
+              default="text",
+              help="One-shot output format. 'json' prints a single machine-"
+                   "readable JSON object to stdout (headless contract) instead "
+                   "of streaming Rich text.")
+@click.option("--max-rounds", "max_rounds", type=int, default=None,
+              help="Override the agent's tool-round cap for this one-shot run.")
 @click.argument("prompt", nargs=-1, required=False)
-def main(endpoint, model_name, provider, trust, auto_mode, yolo, resume,
-         continue_prompt, setup, version, prompt):
+def main(endpoint, model_name, provider, prompt_flag, trust, auto_mode, yolo,
+         resume, continue_prompt, setup, version, output_format, max_rounds,
+         prompt):
     """Spark Code — Your local AI coding assistant."""
     if version:
         click.echo(f"Spark Code v{__version__}")
@@ -3898,6 +3910,14 @@ def main(endpoint, model_name, provider, trust, auto_mode, yolo, resume,
     if setup:
         _run_setup()
         return
+
+    # -p/--prompt (headless print mode, Phase 4 Task 1) is just another way
+    # to supply the one-shot prompt. NOTE: -p was --provider's short flag
+    # until Phase 4; the plan's headless contract (`spark -p "<prompt>"`,
+    # mirroring Claude Code) claims it — use --provider long-form to pick a
+    # provider.
+    if prompt_flag:
+        prompt = (prompt_flag, *prompt)
 
     # Load config with provider selection
     config = load_config(os.getcwd(), provider=provider)
@@ -3925,11 +3945,16 @@ def main(endpoint, model_name, provider, trust, auto_mode, yolo, resume,
                 # Fall through to interactive mode without resume
                 pass
 
-    # One-shot mode (skip if --resume or --continue)
+    # One-shot mode (skip if --resume or --continue) — this is the headless
+    # contract (Phase 4 Task 1): non-interactive by construction, so exit
+    # codes matter to callers (scripts/cron/JARVIS). Click's own main()
+    # ignores this function's return value in standalone mode (it always
+    # ctx.exit()s with 0), so the exit code must be forced via sys.exit here.
     if prompt and not resume and not continue_prompt:
         prompt_text = " ".join(prompt)
-        asyncio.run(_one_shot(config, prompt_text))
-        return
+        exit_code = asyncio.run(_one_shot(
+            config, prompt_text, output=output_format, max_rounds=max_rounds))
+        sys.exit(exit_code)
 
     # Interactive mode
     asyncio.run(run_interactive(
@@ -3939,9 +3964,33 @@ def main(endpoint, model_name, provider, trust, auto_mode, yolo, resume,
     ))
 
 
-async def _one_shot(config: dict, prompt: str):
-    """Run a single prompt and exit."""
-    console = Console(theme=get_theme())
+async def _one_shot(config: dict, prompt: str, output: str = "text",
+                     max_rounds: int | None = None) -> int:
+    """Run a single prompt and exit — the headless contract (Phase 4 Task 1).
+
+    This is the integration surface scripts/cron/JARVIS use to drive Spark as
+    an engine. ``output="text"`` streams the same Rich rendering one-shot mode
+    has always produced. ``output="json"`` prints exactly ONE JSON object to
+    stdout (see spark_code.headless) and nothing else — the Console is built
+    quiet so none of the agent's tool-call/streaming rendering reaches stdout.
+
+    Non-interactive by construction (one-shot is never a TTY prompt session):
+    the PermissionManager is ALWAYS built with ``interactive=False`` so a mode
+    that would otherwise prompt (e.g. "ask", or "auto" on a write) fails safe
+    by recording a denial instead of blocking on a prompt nothing can answer.
+    ``--trust``/``--auto``/``--yolo`` (written into config by main()) still
+    widen what's allowed without a prompt in the first place.
+
+    Returns a process exit code: 0 = completed, 1 = error/exception (including
+    a model/transport stream error), 2 = hit the tool-round cap without a
+    final answer. main() forwards this to sys.exit().
+    """
+    json_mode = output == "json"
+    # quiet=True (same mechanism dispatch.py already uses for worker
+    # sub-agents) discards every Console.print call — Live display, tool-call
+    # panels, permission-denial notices, everything — so stdout in JSON mode
+    # carries ONLY the JSON line printed at the end of this function.
+    console = Console(theme=get_theme(), quiet=json_mode)
     model = ModelClient(
         endpoint=get(config, "model", "endpoint"),
         model=get(config, "model", "name"),
@@ -3956,23 +4005,79 @@ async def _one_shot(config: dict, prompt: str):
     agentic = config.get("_agentic", False)
     context = Context(system_prompt=AGENTIC_PROMPT if agentic else SYSTEM_PROMPT)
     permissions = PermissionManager(
-        mode=get(config, "permissions", "mode", default="auto"))
+        mode=get(config, "permissions", "mode", default="auto"),
+        interactive=False)
     todo_list = TodoList()
     tools = build_tools(todo_list=todo_list, model=model, config=config,
                         permissions=permissions)
     # Verification habit (Task 6) — see run_interactive for the full rationale.
     test_command = detect_test_command(os.getcwd(), load_instructions(os.getcwd()).text)
+
+    stats = SessionStats()
+    commands_run: list[str] = []
+
+    def _on_tool_start(tool_name, args):
+        # Bash tool invocations only — files_changed already comes from
+        # agent._verify_written_paths (Phase 2), so this is the one piece
+        # the agent doesn't already expose (per the task brief).
+        if tool_name == "bash":
+            cmd = args.get("command", "")
+            if cmd:
+                commands_run.append(cmd)
+
     agent = Agent(model, context, tools, permissions, console,
+                  stats=stats, on_tool_start=_on_tool_start,
                   result_budgets=get(config, "tools", "result_budgets", default=None),
                   test_command=test_command, editor=_resolve_editor(config),
                   diff_in_editor=get(config, "ui", "diff_in_editor", default=False))
+    if max_rounds is not None:
+        # Instance attribute shadows the class constant — same pattern
+        # dispatch.py already uses to give sub-agents their own round cap.
+        agent.MAX_TOOL_ROUNDS = max_rounds
 
+    result_text = ""
+    error: str | None = None
     try:
-        await agent.run(prompt)
+        result_text = await agent.run(prompt)
+        # A model/transport error ends the turn without raising (agent.py
+        # renders it and breaks the loop) — surface it as a headless error
+        # too, since it's user-actionable and otherwise invisible in JSON
+        # mode (the render went to a quiet console).
+        error = agent._last_stream_error
+    except Exception as e:
+        error = str(e)
     finally:
         await model.close()
         from .editor import cleanup_diff_temp_dirs
         cleanup_diff_temp_dirs()
+
+    if error is not None:
+        exit_code = 1
+    elif agent._hit_max_rounds:
+        exit_code = 2
+    else:
+        exit_code = 0
+
+    if json_mode:
+        from .headless import HeadlessResult, build_headless_json
+        headless_result = HeadlessResult(
+            result=result_text,
+            files_changed=list(agent._verify_written_paths),
+            commands_run=commands_run,
+            tool_calls=stats.total_tool_calls,
+            rounds=agent._last_rounds,
+            input_tokens=stats.input_tokens,
+            output_tokens=stats.output_tokens,
+            error=error,
+        )
+        click.echo(build_headless_json(headless_result))
+    elif error is not None:
+        # Text mode: still surface the error visibly (previously an uncaught
+        # exception here crashed with a raw traceback) rather than exiting
+        # silently with code 1.
+        render_error(console, error)
+
+    return exit_code
 
 
 if __name__ == "__main__":

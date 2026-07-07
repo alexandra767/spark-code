@@ -30,8 +30,10 @@ HELLO = 'GREETING = "smoke-7f3a9"\n\nprint(GREETING)\n'
 
 
 def one_shot(provider: str, prompt: str, cwd: str) -> tuple[int, str]:
+    # --provider long-form: -p is the one-shot PROMPT since Phase 4 headless
+    # (Claude Code parity contract), no longer the provider short flag.
     cmd = [sys.executable, "-m", "spark_code.cli", "--trust",
-           "-p", provider, prompt]
+           "--provider", provider, prompt]
     proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
                           timeout=ONE_SHOT_TIMEOUT)
     return proc.returncode, proc.stdout + proc.stderr
