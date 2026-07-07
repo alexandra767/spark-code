@@ -84,3 +84,25 @@ Phase 0 merge by the final whole-branch review.
   bridged skills can't auto-expand — CLI path agrees); plan-mode denies
   agent_type-omitted dispatches that execute() would default to explore
   (fail-closed asymmetry, correct direction).
+
+## Phase 5 deferrals (recorded 2026-07-07, all triaged non-blocking)
+
+- **read/glob/grep relative-path in isolated worktree dispatches** resolve
+  against the real process cwd (read-only wrong-scope; no data loss — write
+  tools + bash are worktree-scoped). First Phase-6 hygiene item.
+- **Absolute-path / `cd` bash in isolated dispatch** can still reach the real
+  tree (inherent to an unsandboxed shell; isolation is an anti-footgun boundary
+  for accidental/relative ops, not a jail). write_file/edit_file stay
+  hard-sandboxed regardless.
+- **Compaction cooldown counter not rewound** by /rewind conversation (can
+  defer one auto-compact post-rewind; self-corrects; can't corrupt).
+- **create_subprocess_shell in custom_tools.py:69 / watcher.py:142** —
+  custom_tools shlex-quotes its {args}; watcher runs the user's own literal
+  /watch command; migrate to argv opportunistically for parity with hooks.
+- **Simulator screenshot sentinel** uses tool-name+prefix scoping (sound: tool
+  composes its own result) while MCP images use path-confinement; consider
+  unifying on path-confinement for drift-safety.
+- **Hooks shell-operator warning** misses attached operators (`a;b` one token);
+  warning-only heuristic, cosmetic.
+- **.spark/agents/finder.md committed** as a read-only example agent (benign,
+  ships to clones); remove if example-in-repo isn't wanted.
