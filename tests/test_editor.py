@@ -1,23 +1,48 @@
-"""Tests for editor detection + file handoff (Phase 3 Task 4).
+"""Tests for editor detection + file handoff (Phase 3 Task 4) and the
+diff-in-editor option (Phase 3 Task 5).
 
 Everything here is fully injected: fake env dicts, fake path_checkers, and
 patched ``subprocess.Popen`` / ``shutil.which``. No test ever touches the
-real environment or launches a real editor.
+real environment or launches a real editor. ``open_diff_in_editor`` tests DO
+use real ``tempfile.mkdtemp`` directories (so file CONTENTS can be asserted)
+but every one of those is registered in ``spark_code.editor._diff_temp_dirs``
+and swept by the ``_clean_diff_temp_dirs`` autouse fixture below.
 """
 
 import io
+import os
 import re
-from unittest.mock import patch
+import subprocess
+from unittest.mock import MagicMock, patch
 
+import pytest
 from rich.console import Console
 
-from spark_code.editor import detect_editor, file_link, open_in_editor
+import spark_code.editor as editor_mod
+from spark_code.editor import (
+    cleanup_diff_temp_dirs,
+    detect_editor,
+    file_link,
+    maybe_preview_diff_in_editor,
+    open_diff_in_editor,
+    open_in_editor,
+)
 from spark_code.ui.output import (
     _C_PATH,
     _path_style,
     _should_linkify,
     render_tool_call,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clean_diff_temp_dirs():
+    """Every test starts and ends with an empty tracking list so a test
+    that forgets to clean up its own diff temp dirs can't leak into (or
+    inherit stray state from) another test."""
+    editor_mod._diff_temp_dirs.clear()
+    yield
+    cleanup_diff_temp_dirs()
 
 
 def _which_only(*names: str):
@@ -526,3 +551,326 @@ class TestOpenCommand:
         )
         assert result is None
         assert "No editor detected" in deps["console"].export_text()
+
+
+# ---------------------------------------------------------------------------
+# open_diff_in_editor (Phase 3 Task 5) — writes old/new to temp files under
+# one mkdtemp and launches `cursor|code --diff before after`, fire-and-forget.
+# Popen is patched; file WRITES are real (temp-dir only) so contents can be
+# asserted; nothing here ever launches a real editor.
+# ---------------------------------------------------------------------------
+
+class TestOpenDiffInEditor:
+    def test_code_launches_diff_with_matching_contents(self):
+        with patch("spark_code.editor.subprocess.Popen") as mock_popen:
+            ok = open_diff_in_editor(
+                "code", "/some/proj/app.py", "old content\n", "new content\n")
+        assert ok is True
+        args, kwargs = mock_popen.call_args
+        argv = args[0]
+        assert argv[0] == "code"
+        assert argv[1] == "--diff"
+        before_path, after_path = argv[2], argv[3]
+        assert os.path.basename(before_path) == "app.py.before"
+        assert os.path.basename(after_path) == "app.py.after"
+        with open(before_path, encoding="utf-8") as f:
+            assert f.read() == "old content\n"
+        with open(after_path, encoding="utf-8") as f:
+            assert f.read() == "new content\n"
+        assert kwargs.get("start_new_session") is True
+        assert kwargs.get("stdin") == subprocess.DEVNULL
+
+    def test_cursor_launches_diff(self):
+        with patch("spark_code.editor.subprocess.Popen") as mock_popen:
+            ok = open_diff_in_editor("cursor", "/some/proj/app.py", "a", "b")
+        assert ok is True
+        argv = mock_popen.call_args[0][0]
+        assert argv[0] == "cursor"
+        assert argv[1] == "--diff"
+
+    def test_xed_is_a_noop_no_popen_no_temp_dir(self):
+        with patch("spark_code.editor.subprocess.Popen") as mock_popen:
+            ok = open_diff_in_editor("xed", "/some/proj/app.py", "a", "b")
+        assert ok is False
+        mock_popen.assert_not_called()
+        assert editor_mod._diff_temp_dirs == []
+
+    def test_unrecognized_editor_returns_false_no_popen(self):
+        with patch("spark_code.editor.subprocess.Popen") as mock_popen:
+            ok = open_diff_in_editor("vim", "/some/proj/app.py", "a", "b")
+        assert ok is False
+        mock_popen.assert_not_called()
+        assert editor_mod._diff_temp_dirs == []
+
+    def test_temp_dir_registered_for_cleanup(self):
+        with patch("spark_code.editor.subprocess.Popen"):
+            open_diff_in_editor("code", "/some/proj/app.py", "a", "b")
+        assert len(editor_mod._diff_temp_dirs) == 1
+        assert os.path.isdir(editor_mod._diff_temp_dirs[0])
+
+    def test_basename_sanitized_stays_under_temp_dir(self):
+        evil = "/some/proj/../../etc/evil name!\x1b.py"
+        with patch("spark_code.editor.subprocess.Popen") as mock_popen:
+            open_diff_in_editor("code", evil, "a", "b")
+        before_path = mock_popen.call_args[0][0][2]
+        tmp_dir = editor_mod._diff_temp_dirs[0]
+        # Strictly under the mkdtemp dir — no ../ or separators smuggled in.
+        assert os.path.dirname(before_path) == tmp_dir
+        name = os.path.basename(before_path)
+        assert "/" not in name
+        assert ".." not in name
+        assert name.endswith(".before")
+
+    def test_empty_file_path_falls_back_to_generic_name(self):
+        with patch("spark_code.editor.subprocess.Popen") as mock_popen:
+            open_diff_in_editor("code", "", "a", "b")
+        before_path = mock_popen.call_args[0][0][2]
+        assert os.path.basename(before_path) == "file.before"
+
+    def test_popen_failure_returns_false_but_files_stay_tracked(self):
+        with patch("spark_code.editor.subprocess.Popen",
+                   side_effect=OSError("nope")):
+            ok = open_diff_in_editor("code", "/some/proj/app.py", "a", "b")
+        assert ok is False
+        # The temp files were already written before the launch attempt —
+        # cleanup still owns them even though the launch itself failed.
+        assert len(editor_mod._diff_temp_dirs) == 1
+
+
+# ---------------------------------------------------------------------------
+# cleanup_diff_temp_dirs — removes exactly what THIS module tracked, never
+# an arbitrary path, and is safe to call repeatedly / with nothing tracked.
+# ---------------------------------------------------------------------------
+
+class TestCleanupDiffTempDirs:
+    def test_removes_tracked_dirs(self):
+        with patch("spark_code.editor.subprocess.Popen"):
+            open_diff_in_editor("code", "/some/proj/app.py", "a", "b")
+        tmp_dir = editor_mod._diff_temp_dirs[0]
+        assert os.path.isdir(tmp_dir)
+        cleanup_diff_temp_dirs()
+        assert not os.path.isdir(tmp_dir)
+        assert editor_mod._diff_temp_dirs == []
+
+    def test_noop_when_nothing_tracked(self):
+        cleanup_diff_temp_dirs()  # must not raise
+        assert editor_mod._diff_temp_dirs == []
+
+    def test_idempotent_double_call(self):
+        with patch("spark_code.editor.subprocess.Popen"):
+            open_diff_in_editor("code", "/some/proj/app.py", "a", "b")
+        cleanup_diff_temp_dirs()
+        cleanup_diff_temp_dirs()  # must not raise the second time
+
+
+# ---------------------------------------------------------------------------
+# maybe_preview_diff_in_editor — the pure(ish) gate the agent call site uses:
+# disabled → never touches Popen; enabled+cursor/code → launches the diff;
+# enabled+xed → no Popen, one-time dim note (state threaded via a bool the
+# caller stores back on itself, same pattern as the agent's other
+# fire-once flags); enabled+None editor → silent no-op (no note invented
+# for an editor /open itself doesn't recognize as diff-capable).
+# ---------------------------------------------------------------------------
+
+class TestMaybePreviewDiffInEditor:
+    def test_disabled_never_calls_popen(self):
+        console = Console(record=True, width=100)
+        with patch("spark_code.editor.subprocess.Popen") as mock_popen:
+            noted = maybe_preview_diff_in_editor(
+                console, "code", False, "/tmp/a.py", "old", "new", False)
+        mock_popen.assert_not_called()
+        assert noted is False
+
+    def test_enabled_code_launches_diff(self):
+        console = Console(record=True, width=100)
+        with patch("spark_code.editor.subprocess.Popen") as mock_popen:
+            noted = maybe_preview_diff_in_editor(
+                console, "code", True, "/tmp/a.py", "old", "new", False)
+        argv = mock_popen.call_args[0][0]
+        assert argv[1] == "--diff"
+        assert noted is False  # xed-note flag untouched for non-xed editors
+
+    def test_enabled_cursor_launches_diff(self):
+        console = Console(record=True, width=100)
+        with patch("spark_code.editor.subprocess.Popen") as mock_popen:
+            maybe_preview_diff_in_editor(
+                console, "cursor", True, "/tmp/a.py", "old", "new", False)
+        argv = mock_popen.call_args[0][0]
+        assert argv[0] == "cursor"
+        assert argv[1] == "--diff"
+
+    def test_enabled_none_editor_is_silent_noop(self):
+        console = Console(record=True, width=100)
+        with patch("spark_code.editor.subprocess.Popen") as mock_popen:
+            noted = maybe_preview_diff_in_editor(
+                console, None, True, "/tmp/a.py", "old", "new", False)
+        mock_popen.assert_not_called()
+        assert noted is False
+        assert console.export_text() == ""
+
+    def test_xed_notes_once(self):
+        console = Console(record=True, width=100)
+        with patch("spark_code.editor.subprocess.Popen") as mock_popen:
+            noted = maybe_preview_diff_in_editor(
+                console, "xed", True, "/tmp/a.py", "old", "new", False)
+        mock_popen.assert_not_called()
+        assert noted is True
+        assert "xed" in console.export_text().lower()
+
+    def test_xed_second_call_does_not_repeat_note(self):
+        console = Console(record=True, width=100)
+        noted = maybe_preview_diff_in_editor(
+            console, "xed", True, "/tmp/a.py", "old", "new", True)
+        assert noted is True
+        assert console.export_text() == ""  # already noted this session
+
+
+# ---------------------------------------------------------------------------
+# Agent wiring — ``diff_in_editor`` config read once at construction (same
+# pattern as ``editor``) and threaded through the real edit_file preview
+# call site in ``_execute_single_tool``.
+# ---------------------------------------------------------------------------
+
+class TestAgentDiffInEditorWiring:
+    def test_default_diff_in_editor_is_false(self):
+        from spark_code.agent import Agent
+        from spark_code.context import Context
+        from spark_code.permissions import PermissionManager
+        from spark_code.tools.base import ToolRegistry
+
+        agent = Agent(
+            model=MagicMock(), context=Context(), tools=ToolRegistry(),
+            permissions=PermissionManager(mode="trust", always_allow=[]),
+        )
+        assert agent.diff_in_editor is False
+
+    def test_diff_in_editor_kwarg_is_stored(self):
+        from spark_code.agent import Agent
+        from spark_code.context import Context
+        from spark_code.permissions import PermissionManager
+        from spark_code.tools.base import ToolRegistry
+
+        agent = Agent(
+            model=MagicMock(), context=Context(), tools=ToolRegistry(),
+            permissions=PermissionManager(mode="trust", always_allow=[]),
+            diff_in_editor=True,
+        )
+        assert agent.diff_in_editor is True
+
+    @pytest.mark.asyncio
+    async def test_edit_file_preview_opens_diff_when_enabled_and_code(self, tmp_path):
+        from spark_code.agent import Agent
+        from spark_code.context import Context
+        from spark_code.permissions import PermissionManager
+        from spark_code.tools.base import ToolRegistry
+        from spark_code.tools.edit_file import EditFileTool
+
+        target = tmp_path / "app.py"
+        target.write_text("old content\n")
+
+        tools = ToolRegistry()
+        tools.register(EditFileTool())
+        # auto + non-interactive: denies edit_file (a write) WITHOUT ever
+        # blocking on a real prompt — exactly what a unit test needs, and
+        # the diff preview fires unconditionally before that check runs.
+        permissions = PermissionManager(mode="auto", interactive=False)
+
+        agent = Agent(
+            model=MagicMock(), context=Context(), tools=tools,
+            permissions=permissions, console=Console(record=True, width=100),
+            editor="code", diff_in_editor=True,
+        )
+
+        tc = {
+            "id": "1", "name": "edit_file",
+            "arguments": {
+                "file_path": str(target),
+                "old_string": "old content\n",
+                "new_string": "new content\n",
+            },
+        }
+        with patch("spark_code.editor.subprocess.Popen") as mock_popen:
+            await agent._execute_single_tool(tc)
+
+        mock_popen.assert_called_once()
+        argv = mock_popen.call_args[0][0]
+        assert argv[0] == "code"
+        assert argv[1] == "--diff"
+        with open(argv[2], encoding="utf-8") as f:
+            assert f.read() == "old content\n"
+        with open(argv[3], encoding="utf-8") as f:
+            assert f.read() == "new content\n"
+
+    @pytest.mark.asyncio
+    async def test_edit_file_preview_no_popen_when_disabled(self, tmp_path):
+        from spark_code.agent import Agent
+        from spark_code.context import Context
+        from spark_code.permissions import PermissionManager
+        from spark_code.tools.base import ToolRegistry
+        from spark_code.tools.edit_file import EditFileTool
+
+        target = tmp_path / "app.py"
+        target.write_text("old content\n")
+
+        tools = ToolRegistry()
+        tools.register(EditFileTool())
+        permissions = PermissionManager(mode="auto", interactive=False)
+
+        agent = Agent(
+            model=MagicMock(), context=Context(), tools=tools,
+            permissions=permissions, console=Console(record=True, width=100),
+            editor="code", diff_in_editor=False,
+        )
+
+        tc = {
+            "id": "1", "name": "edit_file",
+            "arguments": {
+                "file_path": str(target),
+                "old_string": "old content\n",
+                "new_string": "new content\n",
+            },
+        }
+        with patch("spark_code.editor.subprocess.Popen") as mock_popen:
+            await agent._execute_single_tool(tc)
+
+        mock_popen.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_edit_file_preview_xed_notes_once_across_two_edits(self, tmp_path):
+        from spark_code.agent import Agent
+        from spark_code.context import Context
+        from spark_code.permissions import PermissionManager
+        from spark_code.tools.base import ToolRegistry
+        from spark_code.tools.edit_file import EditFileTool
+
+        target = tmp_path / "app.py"
+        target.write_text("old content\n")
+
+        tools = ToolRegistry()
+        tools.register(EditFileTool())
+        permissions = PermissionManager(mode="auto", interactive=False)
+        console = Console(record=True, width=100)
+
+        agent = Agent(
+            model=MagicMock(), context=Context(), tools=tools,
+            permissions=permissions, console=console,
+            editor="xed", diff_in_editor=True,
+        )
+
+        tc = {
+            "id": "1", "name": "edit_file",
+            "arguments": {
+                "file_path": str(target),
+                "old_string": "old content\n",
+                "new_string": "new content\n",
+            },
+        }
+        with patch("spark_code.editor.subprocess.Popen") as mock_popen:
+            await agent._execute_single_tool(dict(tc))
+            first_output = console.export_text()
+            await agent._execute_single_tool(dict(tc))
+            second_output = console.export_text()[len(first_output):]
+
+        mock_popen.assert_not_called()
+        assert "xed" in first_output.lower()
+        assert "xed" not in second_output.lower()

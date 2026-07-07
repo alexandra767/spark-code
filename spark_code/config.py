@@ -42,6 +42,13 @@ DEFAULT_CONFIG = {
         # | "cursor" | "code" | "xed" (force one) | "none" (disable /open +
         # OSC 8 file-link styling entirely). See spark_code/editor.py.
         "editor": "auto",
+        # Phase 3 Task 5: when True AND the resolved editor above is
+        # "cursor"/"code", the edit_file permission preview ADDITIONALLY
+        # launches `cursor|code --diff before after` on temp files — the
+        # inline terminal diff still renders either way. xed has no
+        # `--diff` flag so it's a one-time note instead. Off by default —
+        # this is a nice-to-have, not something to surprise-launch.
+        "diff_in_editor": False,
     },
     "mcp_servers": {},
     "memory": {

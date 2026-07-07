@@ -13,11 +13,15 @@ caller turns that into a dim console note, never an exception.
 
 from __future__ import annotations
 
+import atexit
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from urllib.parse import quote
+
+from rich.console import Console
 
 # The three editors Spark knows how to hand a file to. Kept in sync with the
 # `ui.editor` config values ("auto" | "cursor" | "code" | "xed" | "none") —
@@ -101,3 +105,129 @@ def file_link(path: str) -> str:
     """
     abs_path = os.path.abspath(os.path.expanduser(path))
     return "file://" + quote(abs_path)
+
+
+# ---------------------------------------------------------------------------
+# Diff-in-editor (Phase 3 Task 5)
+# ---------------------------------------------------------------------------
+#
+# Opt-in (``ui.diff_in_editor``, default False). When enabled AND the
+# resolved editor is "cursor" or "code", the edit-permission preview
+# ADDITIONALLY writes the proposed before/after content to two temp files
+# and launches `cursor|code --diff before after` — the existing inline
+# terminal diff (spark_code/ui/diff.py) still renders regardless; this is
+# purely an extra view, never a replacement. xed has no `--diff` flag, so
+# it gets a one-time dim note instead of a launch attempt.
+
+# Every mkdtemp() directory created by ``open_diff_in_editor`` this process,
+# so it can be swept at session exit. Cleanup only ever removes paths FROM
+# this list (never an arbitrary caller-supplied path), so a bug elsewhere
+# can't turn "clean up my own temp files" into deleting something a user
+# cares about.
+_diff_temp_dirs: list[str] = []
+
+
+def open_diff_in_editor(editor: str, file_path: str, old_string: str,
+                        new_string: str) -> bool:
+    """Write ``old_string``/``new_string`` to temp files and launch a
+    side-by-side diff in ``editor``, detached — fire-and-forget like
+    ``open_in_editor``.
+
+    Only "cursor" and "code" support `--diff before after`; anything else
+    (xed, or an unrecognized name) returns False WITHOUT creating any
+    files or launching anything — callers decide how (or whether) to note
+    that (see ``maybe_preview_diff_in_editor`` for the xed one-time note).
+
+    The two files live under a single fresh ``tempfile.mkdtemp()``
+    directory, named ``<basename>.before`` / ``<basename>.after`` where
+    ``basename`` is derived from ``file_path`` but stripped down to
+    alnum/dot/dash/underscore (falling back to "file" if that leaves
+    nothing) — deliberately boring and safe, so a hostile or unusual
+    ``file_path`` (path separators, escape bytes, ``..`` segments) can
+    never smuggle anything past the temp directory it's confined to. The
+    directory is registered in ``_diff_temp_dirs`` for cleanup regardless
+    of whether the editor launch itself succeeds — the files exist either
+    way and still need to be swept.
+    """
+    if editor not in ("cursor", "code"):
+        return False
+
+    raw_basename = os.path.basename(file_path) or "file"
+    safe_basename = "".join(
+        ch if (ch.isalnum() or ch in "._-") else "_" for ch in raw_basename
+    ) or "file"
+
+    try:
+        tmp_dir = tempfile.mkdtemp(prefix="spark-diff-")
+        before_path = os.path.join(tmp_dir, f"{safe_basename}.before")
+        after_path = os.path.join(tmp_dir, f"{safe_basename}.after")
+        with open(before_path, "w", encoding="utf-8") as f:
+            f.write(old_string)
+        with open(after_path, "w", encoding="utf-8") as f:
+            f.write(new_string)
+        _diff_temp_dirs.append(tmp_dir)
+    except Exception:
+        return False
+
+    try:
+        subprocess.Popen(
+            [editor, "--diff", before_path, after_path],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def cleanup_diff_temp_dirs() -> None:
+    """Remove every temp dir ``open_diff_in_editor`` created this session.
+
+    Safe to call multiple times (registered with ``atexit`` AND called
+    explicitly from the CLI's session-teardown ``finally`` block, so
+    whichever runs first empties the list) — each dir is popped before
+    being removed, and ``ignore_errors=True`` means an already-gone or
+    unreadable dir is skipped rather than raising during shutdown.
+    """
+    while _diff_temp_dirs:
+        tmp_dir = _diff_temp_dirs.pop()
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+atexit.register(cleanup_diff_temp_dirs)
+
+
+def maybe_preview_diff_in_editor(console: Console, editor: str | None,
+                                 diff_in_editor: bool, file_path: str,
+                                 old_string: str, new_string: str,
+                                 xed_noted: bool) -> bool:
+    """Gate + dispatch for the edit-permission preview's editor-side diff.
+
+    Called unconditionally alongside (never instead of) the inline
+    terminal diff. Returns the ``xed_noted`` flag the caller should store
+    back on itself for the rest of the session:
+
+      * ``diff_in_editor`` False → no-op, flag unchanged.
+      * ``editor`` "cursor"/"code" → launches the diff (``open_diff_in_editor``
+        already swallows every failure); flag unchanged.
+      * ``editor`` "xed" → xed has no ``--diff`` flag, so this never
+        launches anything; prints a ONE-TIME dim note the first time
+        (``xed_noted`` False → True), stays silent on every call after.
+      * ``editor`` None (or anything else unrecognized) → silent no-op —
+        no note is invented for an editor this feature doesn't know how
+        to diff in.
+    """
+    if not diff_in_editor:
+        return xed_noted
+
+    if editor in ("cursor", "code"):
+        open_diff_in_editor(editor, file_path, old_string, new_string)
+    elif editor == "xed" and not xed_noted:
+        xed_noted = True
+        console.print(
+            "[dim]xed has no side-by-side diff view — showing inline diff only[/dim]"
+        )
+
+    return xed_noted

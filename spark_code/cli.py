@@ -2639,7 +2639,8 @@ async def run_interactive(config: dict, resume_session: str = "",
                   tool_cache=tool_cache, hooks=hook_manager,
                   result_budgets=get(config, "tools", "result_budgets", default=None),
                   plan_state=plan_state, test_command=test_command,
-                  skills=skills, editor=_resolve_editor(config))
+                  skills=skills, editor=_resolve_editor(config),
+                  diff_in_editor=get(config, "ui", "diff_in_editor", default=False))
 
     # Initialize team system — optionally use a faster model for workers
     task_store = TaskStore()
@@ -3720,6 +3721,13 @@ async def run_interactive(config: dict, resume_session: str = "",
         await team_manager.stop_all()
         await model.close()
         await mcp_client.disconnect_all()
+        # Remove any diff-in-editor temp files (Task 5) created this
+        # session. Also atexit-registered in spark_code.editor as a
+        # backstop (e.g. one-shot mode, or an exit path that skips this
+        # finally) — calling it here just means interactive sessions don't
+        # wait on process exit for cleanup.
+        from .editor import cleanup_diff_temp_dirs
+        cleanup_diff_temp_dirs()
         console.print("[dim]Session ended.[/dim]")
 
 
@@ -3956,12 +3964,15 @@ async def _one_shot(config: dict, prompt: str):
     test_command = detect_test_command(os.getcwd(), load_instructions(os.getcwd()).text)
     agent = Agent(model, context, tools, permissions, console,
                   result_budgets=get(config, "tools", "result_budgets", default=None),
-                  test_command=test_command, editor=_resolve_editor(config))
+                  test_command=test_command, editor=_resolve_editor(config),
+                  diff_in_editor=get(config, "ui", "diff_in_editor", default=False))
 
     try:
         await agent.run(prompt)
     finally:
         await model.close()
+        from .editor import cleanup_diff_temp_dirs
+        cleanup_diff_temp_dirs()
 
 
 if __name__ == "__main__":

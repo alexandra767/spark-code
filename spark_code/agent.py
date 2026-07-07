@@ -263,7 +263,8 @@ class Agent:
                  plan_state: PlanState | None = None,
                  test_command: str | None = None,
                  skills: SkillRegistry | None = None,
-                 editor: str | None = None):
+                 editor: str | None = None,
+                 diff_in_editor: bool = False):
         self.model = model
         self.context = context
         self.tools = tools
@@ -296,6 +297,16 @@ class Agent:
         # an OSC 8 hyperlink; None (the default) keeps every existing
         # caller's output byte-identical to before this feature existed.
         self.editor = editor
+        # Diff-in-editor (Phase 3 Task 5): config read ONCE here at
+        # construction (same pattern as ``editor`` above), not re-read per
+        # tool call. Only takes effect when ``self.editor`` is "cursor" or
+        # "code" — see the edit_file preview in _execute_single_tool.
+        self.diff_in_editor = diff_in_editor
+        # One-time-per-session note for xed users when diff_in_editor is
+        # enabled but xed has no `--diff` flag to hand off to. Threaded
+        # through maybe_preview_diff_in_editor, which returns the flag's
+        # next value so this stays the single source of truth.
+        self._diff_editor_xed_noted = False
         self.output_prefix = output_prefix
         self.stats = stats
         self.on_tool_start = on_tool_start  # callback(tool_name, args)
@@ -831,6 +842,14 @@ class Agent:
                 new_str = tc["arguments"].get("new_string", "")
                 if file_path and old_str:
                     render_inline_diff(self.console, file_path, old_str, new_str)
+                    # Editor-side diff view (Phase 3 Task 5, opt-in via
+                    # ui.diff_in_editor). ADDITIVE to the inline diff above,
+                    # never a replacement — it still rendered unconditionally.
+                    from .editor import maybe_preview_diff_in_editor
+                    self._diff_editor_xed_noted = maybe_preview_diff_in_editor(
+                        self.console, self.editor, self.diff_in_editor,
+                        file_path, old_str, new_str, self._diff_editor_xed_noted,
+                    )
             except Exception:
                 pass
 
