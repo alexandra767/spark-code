@@ -8,6 +8,20 @@ from abc import ABC, abstractmethod
 MAX_READ_SIZE = 50 * 1024 * 1024
 
 
+def _temp_dir_candidates() -> tuple[str, ...]:
+    """Temp directories allowed as legitimate write scratch space.
+
+    On macOS ``gettempdir()`` is ``/var/folders/...`` but ``/tmp`` (->
+    ``/private/tmp``) is also a widely-used scratch location, so both are
+    allowed. Factored into a single function so it's one patch point in tests:
+    the hardcoded ``"/tmp"`` literal can't otherwise be neutralized, and on
+    Linux — where pytest's ``tmp_path`` nests under ``/tmp`` — write-sandbox
+    tests would silently pass via this allowance instead of the path they mean
+    to exercise.
+    """
+    return (tempfile.gettempdir(), "/tmp")
+
+
 def _validate_path(file_path: str, cwd: str | None = None,
                    for_write: bool = False,
                    extra_roots: list[str] | None = None) -> str:
@@ -39,10 +53,9 @@ def _validate_path(file_path: str, cwd: str | None = None,
     if for_write:
         root = os.path.realpath(cwd or os.getcwd())
         allowed_roots = [root]
-        # Allow the common temp dirs as legitimate scratch space. On macOS
-        # gettempdir() is /var/folders/... but /tmp (-> /private/tmp) is also a
-        # widely-used scratch location, so allow both.
-        for tmp_candidate in (tempfile.gettempdir(), "/tmp"):
+        # Allow the common temp dirs as legitimate scratch space (single patch
+        # point — see _temp_dir_candidates).
+        for tmp_candidate in _temp_dir_candidates():
             try:
                 real_tmp = os.path.realpath(tmp_candidate)
                 if real_tmp not in allowed_roots:

@@ -257,6 +257,12 @@ def resolve_write_roots(config: dict) -> list[str]:
     where these get passed as ``extra_roots`` on top of cwd + temp.
     """
     roots = get(config, "permissions", "write_roots", default=[]) or []
+    # Guard against a YAML authoring mistake like `write_roots: /tmp` (a bare
+    # string): iterating a str yields characters, so `/tmp` would resolve to
+    # ['/']. Only a genuine list is honored — anything else is treated as "none
+    # configured" rather than silently allowing a garbage root.
+    if not isinstance(roots, list):
+        return []
     resolved = []
     for root in roots:
         if not isinstance(root, str) or not root:
