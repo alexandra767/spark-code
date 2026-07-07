@@ -223,22 +223,34 @@ def _export_corpus_session(config: dict, context, agent, *, error: str | None) -
 
     Called from both teardown points (run_interactive's finally, and after
     a headless _one_shot run) so every completed session — interactive or
-    scripted — gets one export attempt. All the actual gating (opt-in
-    ``corpus.export_enabled``, "skip if errored", "skip if no messages")
-    lives in :func:`spark_code.corpus.export_session` itself; this wrapper
-    just supplies the metadata each call site has available and swallows
-    any exception, because a broken corpus export must never surface as a
+    scripted — gets one export attempt. Opt-in gating and secret scrubbing
+    live in :func:`spark_code.corpus.export_session` itself (strict-coerced
+    ``enabled``, "skip if errored", "skip if no messages"); this wrapper
+    supplies the metadata each call site has available and swallows any
+    exception, because a broken corpus export must never surface as a
     session-ending crash (interactive) or a headless-run failure (exit
     code / JSON contract untouched either way).
+
+    Interruption handling: a Ctrl+C / task-cancel returns via the agent's
+    ``if self._cancelled: return`` branch WITHOUT setting a stream error, so
+    ``error`` alone can't tell a clean completion from an interrupted one.
+    We treat the session as errored (-> skipped) when the last turn was
+    cancelled (``agent._cancelled``) OR any earlier turn was interrupted
+    (the persistent ``agent._session_interrupted`` flag, set in the cancel
+    branch and never reset within a session) — an interrupted session may
+    hold partial/orphaned turns and must never be exported as "clean".
     """
     try:
         from datetime import datetime, timezone
+        interrupted = (getattr(agent, "_cancelled", False)
+                       or getattr(agent, "_session_interrupted", False))
+        effective_error = error or ("interrupted" if interrupted else None)
         export_session(
             context,
             get(config, "corpus", "dir", default="~/training-corpus/spark-code"),
             meta={
                 "enabled": get(config, "corpus", "export_enabled", default=False),
-                "error": error,
+                "error": effective_error,
                 "model": get(config, "model", "name", default=""),
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "files_changed": list(getattr(agent, "_verify_written_paths", []) or []),

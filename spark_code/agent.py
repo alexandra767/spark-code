@@ -358,6 +358,12 @@ class Agent:
         # inter-agent messages are injected without corrupting a tool exchange.
         self.on_iteration = on_iteration
         self._cancelled = False
+        # Persistent "this session was interrupted at least once" flag
+        # (Phase 4 Task 6). Unlike self._cancelled — which is reset at the
+        # top of every turn — this is set in the cancel branch and NEVER
+        # reset within a session, so an earlier interrupted turn can't be
+        # laundered into a "clean" corpus export by a later clean turn.
+        self._session_interrupted = False
         # Guards against the auto-compaction summary request re-triggering
         # compaction (which would recurse). Set only while _maybe_compact runs.
         self._compacting = False
@@ -731,6 +737,13 @@ class Agent:
                 await chat_stream.aclose()
 
             if self._cancelled:
+                # Persistent session-level mark (Phase 4 Task 6): this turn
+                # was interrupted, so the session must never export to the
+                # training corpus as a clean completion — even if a later
+                # turn finishes cleanly. Set here at the single choke point
+                # every cancellation path (Ctrl+C flag + CancelledError)
+                # converges on before returning.
+                self._session_interrupted = True
                 # Show whatever was generated before the interrupt
                 renderer.flush()
                 partial = "".join(text_parts)

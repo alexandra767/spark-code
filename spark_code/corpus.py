@@ -50,13 +50,38 @@ DEFAULT_CORPUS_DIR = "~/training-corpus/spark-code"
 # purpose-built regex set.
 _SECRET_PATTERNS = [
     re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"),  # OpenAI/Anthropic-style API keys
+    re.compile(r"\b[sr]k_live_[A-Za-z0-9]{16,}"),  # Stripe live secret/restricted keys
     re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"),  # GitHub tokens
+    re.compile(r"\bnpm_[A-Za-z0-9]{20,}"),  # npm access tokens
+    re.compile(r"\bxox[bpars]-[A-Za-z0-9-]{10,}"),  # Slack tokens
+    re.compile(r"\bya29\.[A-Za-z0-9_-]{20,}"),  # Google OAuth access tokens
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),  # AWS access key id
     re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),  # JWT
+    # Generic "Bearer <opaque>" auth header — whole match redacted (drops the
+    # token; the literal word "Bearer" going too is harmless).
+    re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{20,}"),
     re.compile(r"\b[A-Fa-f0-9]{32,}\b"),  # long hex strings (tokens/hashes-as-secrets)
 ]
 
 _REDACTED = "[REDACTED]"
+
+_ENABLED_TRUE_STRINGS = {"true", "1", "yes"}
+
+
+def _is_enabled(value) -> bool:
+    """Strictly coerce the opt-in ``export_enabled`` flag to a bool.
+
+    Privacy-critical: a hand-edited quoted ``export_enabled: "false"`` in
+    YAML loads as the (truthy!) STRING ``"false"`` — a plain ``if value:``
+    would silently turn export ON. Only real ``True`` or an explicit
+    affirmative string (case-insensitive ``true``/``1``/``yes``) enables;
+    everything else (any other string, 0, None, "") is OFF.
+    """
+    if value is True:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() in _ENABLED_TRUE_STRINGS
+    return False
 
 
 def _scrub(value):
@@ -76,6 +101,26 @@ def _scrub(value):
     if isinstance(value, dict):
         return {k: _scrub(v) for k, v in value.items()}
     return value
+
+
+def _session_messages(context) -> list[dict]:
+    """Return the session's non-system messages, orphaned-tool_call-repaired.
+
+    Prefers ``Context.get_messages()`` over a raw ``.messages`` read: that
+    method runs ``sanitize_orphaned_tool_calls()`` first, so an interrupted
+    turn's assistant ``tool_calls`` message left without its matching
+    ``role:"tool"`` reply is backfilled into a VALID sequence before it's
+    serialized (an unsanitized orphan would be a malformed OpenAI transcript
+    that no consumer — training or otherwise — should ingest). The
+    system message ``get_messages`` prepends is dropped here: its content is
+    captured as ``system_prompt_hash`` instead of stored inline (it's large,
+    static, and not itself training signal). Falls back to a bare ``.messages``
+    read for stand-ins without ``get_messages``.
+    """
+    getter = getattr(context, "get_messages", None)
+    if callable(getter):
+        return [m for m in getter() if m.get("role") != "system"]
+    return list(getattr(context, "messages", None) or [])
 
 
 def _scrub_messages(messages: list[dict]) -> list[dict]:
@@ -125,11 +170,11 @@ def export_session(context, path_dir: str, meta: dict) -> str | None:
     Returns the path written, or ``None`` if disabled, errored, or there
     were no messages to export (nothing happened -> nothing worth writing).
     """
-    if not meta.get("enabled", False):
+    if not _is_enabled(meta.get("enabled")):
         return None
     if meta.get("error"):
         return None
-    messages = getattr(context, "messages", None) or []
+    messages = _session_messages(context)
     if not messages:
         return None
 

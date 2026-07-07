@@ -9,6 +9,8 @@ stay fast, deterministic unit tests.
 import json
 import os
 
+import spark_code.cli as cli_mod
+from spark_code.context import Context
 from spark_code.corpus import export_session
 
 
@@ -163,3 +165,185 @@ def test_image_content_is_not_embedded_raw(tmp_path):
     blob = json.dumps(record)
     assert "AAAA" not in blob
     assert "base64" not in blob
+
+
+# ---------------------------------------------------------------------------
+# Fix 2 — sanitize orphaned tool_calls via context.get_messages()
+# ---------------------------------------------------------------------------
+
+
+def _orphaned_tool_call_ids(messages: list[dict]) -> set:
+    """Return assistant tool_call ids with no matching role:tool reply."""
+    answered = {m.get("tool_call_id") for m in messages if m.get("role") == "tool"}
+    ids = set()
+    for m in messages:
+        for tc in m.get("tool_calls") or []:
+            ids.add(tc.get("id"))
+    return ids - answered
+
+
+def test_orphaned_tool_calls_are_sanitized_before_export(tmp_path):
+    # A real Context left in the interrupted state: an assistant tool_calls
+    # message with NO following role:tool reply. export_session must go
+    # through get_messages() (which runs sanitize_orphaned_tool_calls) so the
+    # serialized sequence is valid — every tool_call id answered.
+    context = Context(system_prompt="sys")
+    context.add_user("do the thing")
+    context.add_assistant_tool_calls(
+        [{"id": "call-1", "name": "bash", "arguments": {"command": "ls"}}],
+        content="running it",
+    )
+    # deliberately NO add_tool_result — this is the orphaned/interrupted state
+    path = export_session(context, str(tmp_path), _meta())
+    with open(path) as f:
+        record = json.loads(f.readline())
+    assert record["messages"], "expected messages exported"
+    # No system message leaked inline (hash carries it instead).
+    assert all(m.get("role") != "system" for m in record["messages"])
+    # Sanitize backfilled a synthetic tool result → no orphans.
+    assert _orphaned_tool_call_ids(record["messages"]) == set()
+
+
+def test_export_does_not_inline_system_message(tmp_path):
+    context = Context(system_prompt="the big system prompt")
+    context.add_user("hi")
+    context.add_assistant("hello")
+    path = export_session(context, str(tmp_path), _meta())
+    with open(path) as f:
+        record = json.loads(f.readline())
+    roles = [m["role"] for m in record["messages"]]
+    assert roles == ["user", "assistant"]
+    # The system prompt text is NOT stored inline, only its hash.
+    assert "the big system prompt" not in json.dumps(record["messages"])
+
+
+# ---------------------------------------------------------------------------
+# Fix 3 — strict boolean coercion for the opt-in flag
+# ---------------------------------------------------------------------------
+
+
+def test_enabled_string_false_does_not_export(tmp_path):
+    context = FakeContext(messages=[{"role": "user", "content": "hi"}])
+    # A hand-edited quoted "false" is a truthy STRING — must NOT enable export.
+    assert export_session(context, str(tmp_path), _meta(enabled="false")) is None
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_enabled_various_falsey_strings_do_not_export(tmp_path):
+    context = FakeContext(messages=[{"role": "user", "content": "hi"}])
+    for val in ("false", "no", "off", "0", "", 0, None):
+        assert export_session(context, str(tmp_path), _meta(enabled=val)) is None
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_enabled_true_variants_do_export(tmp_path):
+    context = FakeContext(messages=[{"role": "user", "content": "hi"}])
+    for val in (True, "true", "TRUE", "1", "yes"):
+        assert export_session(context, str(tmp_path), _meta(enabled=val)) is not None
+
+
+# ---------------------------------------------------------------------------
+# Fix 4 — wider secret scrub
+# ---------------------------------------------------------------------------
+
+
+def test_wider_secret_shapes_are_scrubbed(tmp_path):
+    secrets = [
+        "ya29.z_-" + "AbCdEf0" * 6,               # Google OAuth access token
+        "xoxb-" + "zzz1234567890abc",             # Slack bot token
+        "npm_" + "zZ" + "AbCdEfGhIjKlMnOpQrSt",   # npm token (non-hex chars)
+        "sk_live_" + "zABC1234DEFG5678HIJK",      # Stripe secret key
+        "Bearer " + "zzzzABCDefgh1234ijkl5678mnop",  # generic bearer token
+        "ghp_" + "zZ" + "AbCdEfGhIjKlMnOpQrSt",   # GitHub token (existing pattern)
+    ]
+    for secret in secrets:
+        context = FakeContext(messages=[
+            {"role": "user", "content": f"here it is: {secret} <-- please store"},
+        ])
+        path = export_session(context, str(tmp_path), _meta())
+        with open(path) as f:
+            lines = f.readlines()
+        blob = lines[-1]
+        # strip the 'Bearer '/'ya29.' non-secret prefixes when asserting the
+        # opaque part is gone
+        opaque = secret.split(" ")[-1]
+        assert opaque not in blob, f"unscrubbed secret: {secret!r}"
+        assert "[REDACTED]" in blob
+
+
+# ---------------------------------------------------------------------------
+# Fix 1 — interrupted sessions must NOT export as "clean" (CLI wiring)
+# ---------------------------------------------------------------------------
+
+
+class FakeAgent:
+    """Minimal stand-in for Agent — only the attrs _export_corpus_session reads."""
+
+    def __init__(self, cancelled=False, interrupted=False, stream_error=None,
+                 written=None):
+        self._cancelled = cancelled
+        self._session_interrupted = interrupted
+        self._last_stream_error = stream_error
+        self._verify_written_paths = written or []
+
+
+def _corpus_config(tmp_path, enabled=True):
+    return {"corpus": {"export_enabled": enabled, "dir": str(tmp_path)},
+            "model": {"name": "qwen3.5:122b"}}
+
+
+def test_cli_hook_skips_cancelled_session(tmp_path):
+    context = FakeContext(messages=[{"role": "user", "content": "partial work"}])
+    agent = FakeAgent(cancelled=True, stream_error=None)  # Ctrl+C: no stream error
+    cli_mod._export_corpus_session(_corpus_config(tmp_path), context, agent,
+                                   error=None)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_cli_hook_skips_session_interrupted_on_earlier_turn(tmp_path):
+    # Last turn finished clean (_cancelled False, no error) but an EARLIER turn
+    # was interrupted → the persistent flag must still block export.
+    context = FakeContext(messages=[{"role": "user", "content": "later clean turn"}])
+    agent = FakeAgent(cancelled=False, interrupted=True, stream_error=None)
+    cli_mod._export_corpus_session(_corpus_config(tmp_path), context, agent,
+                                   error=None)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_cli_hook_skips_stream_error_session(tmp_path):
+    context = FakeContext(messages=[{"role": "user", "content": "hi"}])
+    agent = FakeAgent(stream_error="API error (503)")
+    cli_mod._export_corpus_session(_corpus_config(tmp_path), context, agent,
+                                   error="API error (503)")
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_cli_hook_exports_clean_session(tmp_path):
+    context = FakeContext(messages=[
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "hello"},
+    ])
+    agent = FakeAgent(written=["a.py"])
+    cli_mod._export_corpus_session(_corpus_config(tmp_path), context, agent,
+                                   error=None)
+    files = list(tmp_path.iterdir())
+    assert len(files) == 1
+    with open(files[0]) as f:
+        record = json.loads(f.readline())
+    assert record["files_changed"] == ["a.py"]
+    assert record["model"] == "qwen3.5:122b"
+
+
+def test_cli_hook_respects_string_false_config(tmp_path):
+    context = FakeContext(messages=[{"role": "user", "content": "hi"}])
+    agent = FakeAgent()
+    cli_mod._export_corpus_session(_corpus_config(tmp_path, enabled="false"),
+                                   context, agent, error=None)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_cli_hook_never_raises_on_bad_agent(tmp_path):
+    # Defensive: a totally malformed agent must not crash teardown.
+    context = FakeContext(messages=[{"role": "user", "content": "hi"}])
+    cli_mod._export_corpus_session(_corpus_config(tmp_path), context, object(),
+                                   error=None)
