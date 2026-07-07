@@ -230,6 +230,33 @@ Also folded in (small, no approval ceremony needed):
   system-prompt ordering (static text first, volatile context last) to maximize
   vLLM prefix-cache hits → faster time-to-first-token on every turn.
 
+### Phase 5 — Daily-driver depth (added 2026-07-07, approved)
+
+Post-Phase-4 round from real usage friction + program learnings:
+
+- **Custom subagent definitions.** `.spark/agents/<name>.md` (and
+  `~/.spark/agents/` global): YAML frontmatter (description, tools allowlist,
+  model/utility routing hint) + body = system prompt. Loaded into
+  dispatch_agent as additional agent_types; listed in a lean index like skills.
+- **True conversation rewind.** Per-turn context snapshots (bounded ring,
+  e.g. last 10 turns) → `/rewind` gains a real "conversation" option
+  (restores messages + todo state; files stay — pair with checkpoint for both).
+- **Path-scoped write permissions.** `permissions.write_roots: [paths]`
+  config — writes allowed under any listed root (plus cwd + temp, as now).
+  Closes the deferred $HOME-sibling-repo friction without reopening
+  write-anywhere.
+- **Worktree isolation for implementer dispatches.** Optional
+  `dispatch_agent(agent_type="implementer", isolated=true)` → git worktree
+  under `.spark/worktrees/`, auto-removed if unchanged; summary reports the
+  worktree path + diffstat for lead review/merge.
+- **Hooks formalization.** Document + harden the existing hook plumbing;
+  ship two example recipes (ruff-fix-on-write, pytest-on-commit); hook
+  failures never block the loop (report-only).
+- **`/doctor`.** One command: engine reachable + alias contract intact,
+  config drift (context_window vs server), RAG :8010 reachability, utility
+  model status, MCP servers up, editor detection, version/branch of the
+  install. Green/yellow/red table.
+
 ## Non-goals (explicit)
 
 - No cloud/account features (Artifacts, web, teleport, GitHub app).
