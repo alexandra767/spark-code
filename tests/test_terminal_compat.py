@@ -13,12 +13,18 @@ live in spark_code/ui/input.py, right above `terminal_supports_cpr`):
   + a CPR-support signal to (use_toolbar, use_inline).
 """
 
+from prompt_toolkit.renderer import CPR_Support
+
 from spark_code.ui.input import (
     build_status_segments,
+    cpr_confirmed_supported,
     create_session,
     format_status_line,
+    renderer_cpr_support,
     resolve_statusline_mode,
     terminal_supports_cpr,
+    toolbar_mode_segments,
+    toolbar_status_segments,
 )
 
 
@@ -131,6 +137,182 @@ class TestFormatStatusLine:
         assert format_status_line([]) == ""
 
 
+class TestToolbarGoldens:
+    """Review fix (one-source unification): the toolbar's two lines must be
+    BYTE-IDENTICAL to what the pre-refactor cli.py closures produced. Every
+    expected list below was captured by EXECUTING the original closure code
+    (copied verbatim, state injected) before the refactor — not transcribed
+    by hand. If a golden fails, the toolbar's on-screen appearance changed;
+    that is a visual regression, not a test to update casually.
+    """
+
+    def test_status_line_golden_full_state(self):
+        # model+provider, 3 turns, speed, cost, ctx 42% (green)
+        got = toolbar_status_segments(
+            model_name="qwen3.5:122b",
+            provider_name="llm",
+            turns=3,
+            speed_str="12.3 tok/s",
+            cost_str="$0.0042",
+            context_pct=42.0,
+            context_style="class:bottom-toolbar.context-green",
+        )
+        assert got == [
+            ("class:bottom-toolbar.team", "  qwen3.5:122b (llm)"),
+            ("class:bottom-toolbar.info", "  "),
+            ("class:bottom-toolbar.info", "3 turns"),
+            ("class:bottom-toolbar.info", "  12.3 tok/s"),
+            ("class:bottom-toolbar.info", "  $0.0042"),
+            ("class:bottom-toolbar.context-green", "          ctx 42%"),
+        ]
+
+    def test_status_line_golden_sparse_state_token_fallback(self):
+        # model without provider, 0 turns (emits the EMPTY info segment the
+        # original closure emitted, not nothing), no stats, no ctx% but a raw
+        # token count → the "N tokens" fallback segment.
+        got = toolbar_status_segments(
+            model_name="coder",
+            turns=0,
+            context_pct=None,
+            context_tokens=8389,
+        )
+        assert got == [
+            ("class:bottom-toolbar.team", "  coder"),
+            ("class:bottom-toolbar.info", "  "),
+            ("class:bottom-toolbar.info", ""),
+            ("class:bottom-toolbar.context", "    8,389 tokens"),
+        ]
+
+    def test_status_line_golden_no_model_red_ctx(self):
+        got = toolbar_status_segments(
+            turns=1,
+            context_pct=14.0,
+            context_style="class:bottom-toolbar.context-red",
+        )
+        assert got == [
+            ("class:bottom-toolbar.info", "1 turns"),
+            ("class:bottom-toolbar.context-red", "          ctx 14%"),
+        ]
+
+    def test_mode_line_golden_ask_no_team(self):
+        got = toolbar_mode_segments("ask")
+        assert got == [
+            ("class:bottom-toolbar.mode", "  ⏵⏵ "),
+            ("class:bottom-toolbar.mode-text", "ask mode on"),
+            ("class:bottom-toolbar.info", "  ·  "),
+            ("class:bottom-toolbar.info", "shift+tab to switch"),
+        ]
+
+    def test_mode_line_golden_plan_with_team(self):
+        got = toolbar_mode_segments("plan", team_active=2, team_total=3)
+        assert got == [
+            ("class:bottom-toolbar.mode", "  ⏵⏵ "),
+            ("class:bottom-toolbar.mode-text", "plan mode on"),
+            ("class:bottom-toolbar.info", "  ·  "),
+            ("class:bottom-toolbar.info", "shift+tab to switch"),
+            ("class:bottom-toolbar.info", "  ·  "),
+            ("class:bottom-toolbar.team", "ctrl+t "),
+            ("class:bottom-toolbar.team-text", "team (2/3)"),
+        ]
+
+    def test_mode_line_golden_trust_no_team(self):
+        got = toolbar_mode_segments("trust")
+        assert got == [
+            ("class:bottom-toolbar.mode", "  ⏵⏵ "),
+            ("class:bottom-toolbar.mode-text", "trust mode on"),
+            ("class:bottom-toolbar.info", "  ·  "),
+            ("class:bottom-toolbar.info", "shift+tab to switch"),
+        ]
+
+    def test_inline_flavor_unchanged_by_the_knob_extension(self):
+        # The knob defaults must keep the inline fallback's rendering exactly
+        # as shipped (same assertion as test_full_line_combines_everything_
+        # in_order, restated here as the refactor's other half of the
+        # safety net).
+        segments = build_status_segments(
+            "auto",
+            model_name="qwen3.5:122b",
+            provider_name="llm",
+            turns=3,
+            context_pct=26.0,
+        )
+        assert format_status_line(segments) == (
+            "qwen3.5:122b (llm)  ⏵⏵ auto mode  ·  3 turns  ·  ctx 26%"
+        )
+
+
+class _FakeRenderer:
+    def __init__(self, support):
+        self.cpr_support = support
+
+
+class _FakeApp:
+    def __init__(self, renderer):
+        self.renderer = renderer
+
+
+class _FakeSession:
+    def __init__(self, support):
+        self.app = _FakeApp(_FakeRenderer(support))
+
+
+class TestRendererCprSupport:
+    """Review fix (fast-turn CPR race): the inline decision must consult the
+    renderer's LIVE cpr_support enum, because prompt_toolkit's 2s CPR timer
+    is a background task of the prompt Application — a sub-2s turn cancels
+    it, the neutered callback never fires, and the latch alone would never
+    flip in exactly the fast scripted non-CPR pty this task targets.
+    """
+
+    def test_supported_maps_to_true(self):
+        assert renderer_cpr_support(_FakeSession(CPR_Support.SUPPORTED)) is True
+
+    def test_not_supported_maps_to_false(self):
+        assert renderer_cpr_support(_FakeSession(CPR_Support.NOT_SUPPORTED)) is False
+
+    def test_unknown_maps_to_none(self):
+        assert renderer_cpr_support(_FakeSession(CPR_Support.UNKNOWN)) is None
+
+    def test_unreadable_session_maps_to_none_not_a_crash(self):
+        assert renderer_cpr_support(object()) is None
+
+    def test_fresh_real_session_is_readable(self, tmp_path):
+        # Integration sanity: a real, never-run PromptSession's renderer state
+        # is readable through the helper. Under pytest (captured stdout, not
+        # a tty) prompt_toolkit resolves NOT_SUPPORTED at construction; in
+        # exotic capture setups it could still be UNKNOWN — either way it
+        # must never read as "supported" before any prompt has run.
+        session = create_session(history_file=str(tmp_path / "hist"))
+        assert renderer_cpr_support(session) in (False, None)
+
+
+class TestCprConfirmedSupported:
+    def test_unknown_is_pessimistically_unsupported(self):
+        # The review's core rule: print inline while UNKNOWN — brief cosmetic
+        # duplication in good terminals beats invisible status in bad ones.
+        assert cpr_confirmed_supported(None, latched_unsupported=False) is False
+
+    def test_live_supported_and_no_latch_is_supported(self):
+        assert cpr_confirmed_supported(True, latched_unsupported=False) is True
+
+    def test_latch_wins_even_over_live_supported(self):
+        # The neutered-callback flag stays authoritative as a secondary latch.
+        assert cpr_confirmed_supported(True, latched_unsupported=True) is False
+
+    def test_live_not_supported_is_unsupported(self):
+        assert cpr_confirmed_supported(False, latched_unsupported=False) is False
+
+    def test_auto_routes_inline_while_unknown(self):
+        # End-to-end decision for the exact race scenario: auto mode, fast
+        # turns, timer cancelled → live UNKNOWN → inline must print.
+        confirmed = cpr_confirmed_supported(None, latched_unsupported=False)
+        assert resolve_statusline_mode("auto", confirmed) == (False, True)
+
+    def test_auto_skips_inline_once_supported_observed(self):
+        confirmed = cpr_confirmed_supported(True, latched_unsupported=False)
+        assert resolve_statusline_mode("auto", confirmed) == (True, False)
+
+
 class TestResolveStatuslineMode:
     def test_off_is_always_neither(self):
         assert resolve_statusline_mode("off", cpr_supported=True) == (False, False)
@@ -184,7 +366,33 @@ class TestCreateSessionStatuslineWiring:
         # Under pytest, stdout is captured (not a real tty), so the pre-flight
         # heuristic says CPR is unlikely — "auto" should skip attaching the
         # (guaranteed-useless) toolbar rather than silently no-op forever.
+        # FRAGILITY NOTE (review): this depends on pytest's stdout capture NOT
+        # being a tty. Running with -s/--capture=no in a real terminal makes
+        # sys.stdout a tty again and would flip this assertion. If that ever
+        # becomes a supported workflow, switch this to the deterministic
+        # injected form used by test_auto_consumes_passed_cpr_state below.
         session = create_session(history_file=str(tmp_path / "hist"))
+        assert session.bottom_toolbar is None
+
+    def test_auto_consumes_passed_cpr_state(self, tmp_path):
+        # Review minor: create_session must consume the caller's cpr_state
+        # for the initial attachment decision instead of redundantly
+        # re-running terminal_supports_cpr() itself. Under pytest the
+        # heuristic says False (no tty) — so a passed {"supported": True}
+        # attaching the toolbar proves the passed state won, deterministically.
+        session = create_session(
+            history_file=str(tmp_path / "hist"),
+            statusline="auto",
+            cpr_state={"supported": True},
+        )
+        assert session.bottom_toolbar is not None
+
+    def test_auto_with_passed_unsupported_cpr_state_skips_toolbar(self, tmp_path):
+        session = create_session(
+            history_file=str(tmp_path / "hist"),
+            statusline="auto",
+            cpr_state={"supported": False},
+        )
         assert session.bottom_toolbar is None
 
     def test_cpr_not_supported_callback_is_neutered_and_updates_cpr_state(

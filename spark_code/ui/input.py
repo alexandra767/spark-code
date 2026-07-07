@@ -452,34 +452,179 @@ def resolve_statusline_mode(configured: str, cpr_supported: bool) -> tuple[bool,
 
 
 def build_status_segments(
-    mode: str,
+    mode: str | None,
     *,
     model_name: str = "",
     provider_name: str = "",
     turns: int = 0,
     context_pct: float | None = None,
     context_style: str = "class:bottom-toolbar.context",
+    context_tokens: int | None = None,
+    model_prefix: str = "",
+    mode_prefix: str = "⏵⏵ ",
+    mode_suffix: str = " mode",
+    turns_prefix: str = "  ·  ",
+    emit_empty_turns: bool = False,
+    context_prefix: str = "  ·  ",
+    extra_segments: list[tuple[str, str]] | None = None,
 ) -> list[tuple[str, str]]:
-    """Pure function: the shared "mode + ctx%" status content — the single
-    source both the inline fallback (this task) renders as plain text and
-    that a future toolbar refactor could source from. Every input is a plain
-    value the caller already computed (``context.estimate_tokens()``,
+    """Pure function: THE single source of status-segment content, shared by
+    the inline non-CPR fallback (knob defaults) and the bottom toolbar's two
+    lines (via the ``toolbar_status_segments``/``toolbar_mode_segments``
+    wrappers below — review fix: previously the cli.py toolbar closures
+    duplicated this logic with slightly different formatting). Every input is
+    a plain value the caller already computed (``context.estimate_tokens()``,
     ``permissions.mode``, the pct-to-style mapping) — no Context/session
     objects, no I/O — so this is directly unit-testable without constructing
     any prompt_toolkit or Spark session state.
+
+    Segment order is fixed: model → mode → turns → extra_segments → context.
+    Presentation knobs (all default to the inline fallback's rendering):
+
+    - ``mode=None`` omits the mode segments entirely (toolbar line 1).
+    - ``model_prefix``/``mode_prefix``/``mode_suffix`` — leading pad and the
+      " mode" vs " mode on" suffix difference.
+    - ``turns_prefix`` + ``emit_empty_turns`` — toolbar line 1 emits an
+      EMPTY info segment when turns == 0 (and no separator before the
+      count); the inline flavor omits the segment and separates with "  ·  ".
+    - ``context_prefix`` — "  ·  " inline vs the toolbar's 10-space gutter.
+    - ``context_tokens`` — raw-count fallback segment when no percentage is
+      computable (toolbar line 1 only).
+    - ``extra_segments`` — pre-formatted (style, text) pairs appended between
+      turns and context: speed/cost on line 1, the shift+tab hint and team
+      status on line 2.
     """
     parts: list[tuple[str, str]] = []
     if model_name:
-        label = model_name if not provider_name else f"{model_name} ({provider_name})"
+        label = f"{model_prefix}{model_name}"
+        if provider_name:
+            label += f" ({provider_name})"
         parts.append(("class:bottom-toolbar.team", label))
         parts.append(("class:bottom-toolbar.info", "  "))
-    parts.append(("class:bottom-toolbar.mode", "⏵⏵ "))
-    parts.append(("class:bottom-toolbar.mode-text", f"{mode} mode"))
+    if mode is not None:
+        parts.append(("class:bottom-toolbar.mode", mode_prefix))
+        parts.append(("class:bottom-toolbar.mode-text", f"{mode}{mode_suffix}"))
     if turns > 0:
-        parts.append(("class:bottom-toolbar.info", f"  ·  {turns} turns"))
+        parts.append(("class:bottom-toolbar.info", f"{turns_prefix}{turns} turns"))
+    elif emit_empty_turns:
+        parts.append(("class:bottom-toolbar.info", ""))
+    if extra_segments:
+        parts.extend(extra_segments)
     if context_pct is not None:
-        parts.append((context_style, f"  ·  ctx {int(context_pct)}%"))
+        parts.append((context_style, f"{context_prefix}ctx {int(context_pct)}%"))
+    elif context_tokens:
+        parts.append(
+            ("class:bottom-toolbar.context", f"    {context_tokens:,} tokens")
+        )
     return parts
+
+
+def toolbar_status_segments(
+    *,
+    model_name: str = "",
+    provider_name: str = "",
+    turns: int = 0,
+    speed_str: str = "",
+    cost_str: str = "",
+    context_pct: float | None = None,
+    context_style: str = "class:bottom-toolbar.context",
+    context_tokens: int | None = None,
+) -> list[tuple[str, str]]:
+    """Toolbar line 1 (model · turns · speed · cost · ctx%) — the exact
+    rendering cli.py's ``status_callback`` closure produced before the
+    one-source refactor, golden-tested byte-identical in
+    tests/test_terminal_compat.py::TestToolbarGoldens.
+    """
+    extra: list[tuple[str, str]] = []
+    if speed_str:
+        extra.append(("class:bottom-toolbar.info", f"  {speed_str}"))
+    if cost_str:
+        extra.append(("class:bottom-toolbar.info", f"  {cost_str}"))
+    return build_status_segments(
+        None,
+        model_name=model_name,
+        provider_name=provider_name,
+        turns=turns,
+        context_pct=context_pct,
+        context_style=context_style,
+        context_tokens=context_tokens,
+        model_prefix="  ",
+        turns_prefix="",
+        emit_empty_turns=True,
+        context_prefix=" " * 10,
+        extra_segments=extra,
+    )
+
+
+def toolbar_mode_segments(
+    display_mode: str,
+    *,
+    team_active: int = 0,
+    team_total: int = 0,
+) -> list[tuple[str, str]]:
+    """Toolbar line 2 (⏵⏵ mode on · shift+tab to switch [· ctrl+t team]) —
+    the exact rendering cli.py's ``mode_callback`` closure produced before
+    the one-source refactor, golden-tested byte-identical in
+    tests/test_terminal_compat.py::TestToolbarGoldens.
+    """
+    extra: list[tuple[str, str]] = [
+        ("class:bottom-toolbar.info", "  ·  "),
+        ("class:bottom-toolbar.info", "shift+tab to switch"),
+    ]
+    if team_total:
+        extra.append(("class:bottom-toolbar.info", "  ·  "))
+        extra.append(("class:bottom-toolbar.team", "ctrl+t "))
+        extra.append(
+            ("class:bottom-toolbar.team-text", f"team ({team_active}/{team_total})")
+        )
+    return build_status_segments(
+        display_mode,
+        mode_prefix="  ⏵⏵ ",
+        mode_suffix=" mode on",
+        extra_segments=extra,
+    )
+
+
+def renderer_cpr_support(session) -> bool | None:
+    """Live read of prompt_toolkit's runtime CPR verdict for this session's
+    renderer (review fix for the fast-turn race): ``True`` once a CPR
+    response has actually been observed (``CPR_Support.SUPPORTED``),
+    ``False`` once prompt_toolkit concluded no answer is coming
+    (``NOT_SUPPORTED`` — its 2s timer fired, or ``responds_to_cpr`` was
+    already False at construction), ``None`` while still ``UNKNOWN``.
+
+    UNKNOWN is not a transient startup blip to ignore: the 2s CPR timer is a
+    background task of the prompt Application, so a prompt submitted in
+    under 2 seconds cancels it — in a fast scripted non-CPR pty the verdict
+    can stay UNKNOWN forever and the neutered-callback latch never fires.
+    The inline-status decision therefore treats UNKNOWN pessimistically
+    (see ``cpr_confirmed_supported``). Any read failure also maps to None.
+    """
+    try:
+        from prompt_toolkit.renderer import CPR_Support
+
+        support = session.app.renderer.cpr_support
+        if support == CPR_Support.SUPPORTED:
+            return True
+        if support == CPR_Support.NOT_SUPPORTED:
+            return False
+        return None
+    except Exception:
+        return None
+
+
+def cpr_confirmed_supported(live: bool | None, latched_unsupported: bool) -> bool:
+    """Pessimistic merge for the inline-status decision (review fix): CPR
+    counts as supported ONLY once positively observed (``live is True``) and
+    the neutered-callback latch never fired. UNKNOWN (None) is treated as
+    unsupported — a brief cosmetic status duplication in good terminals
+    during the first fast turns beats an invisible status surface in bad
+    ones. The latch stays authoritative as a secondary signal even against a
+    live SUPPORTED reading.
+    """
+    if latched_unsupported:
+        return False
+    return live is True
 
 
 def format_status_line(segments: list[tuple[str, str]]) -> str:
@@ -623,7 +768,15 @@ def create_session(
     if os.environ.get("SPARK_NO_CPR") == "1":
         os.environ.setdefault("PROMPT_TOOLKIT_NO_CPR", "1")
 
-    use_toolbar, _ = resolve_statusline_mode(statusline, terminal_supports_cpr())
+    # Initial toolbar-attachment decision: consume the caller's cpr_state
+    # (which run_interactive seeds with the pre-flight heuristic) rather
+    # than redundantly re-running the heuristic here (review minor); fall
+    # back to running it ourselves only when no state was passed.
+    if cpr_state is not None and "supported" in cpr_state:
+        cpr_likely = bool(cpr_state["supported"])
+    else:
+        cpr_likely = terminal_supports_cpr()
+    use_toolbar, _ = resolve_statusline_mode(statusline, cpr_likely)
 
     session = PromptSession(
         message=[("class:prompt", "> ")],

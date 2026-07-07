@@ -69,10 +69,14 @@ from .ui.hotkeys import TeamStatusMonitor
 from .ui.input import (
     RESERVED_COMMAND_NAMES,
     build_status_segments,
+    cpr_confirmed_supported,
     create_session,
     format_status_line,
+    renderer_cpr_support,
     resolve_statusline_mode,
     terminal_supports_cpr,
+    toolbar_mode_segments,
+    toolbar_status_segments,
 )
 from .ui.theme import get_theme
 from .watcher import FileWatcher
@@ -2635,53 +2639,48 @@ async def run_interactive(config: dict, resume_session: str = "",
         else:
             console.print(f"  [#ebcb8b]Could not load session: {resume_session}[/#ebcb8b]")
 
-    # Callbacks for the prompt_toolkit footer (always visible below input)
-    def status_callback():
-        """Line 1: model + turns + context %."""
+    # Callbacks for the prompt_toolkit footer (always visible below input).
+    # One-source refactor (Task 3 review): the formatting for both toolbar
+    # lines now lives in ui/input.py's toolbar_status_segments /
+    # toolbar_mode_segments (thin wrappers over build_status_segments, the
+    # same source the inline non-CPR fallback renders from), golden-tested
+    # byte-identical to the closures they replaced. These closures only
+    # gather live state.
+    def _display_mode() -> str:
+        """The mode name shown to the user — plan wins over the underlying
+        permission mode while plan mode is active. Single copy (review fix:
+        previously duplicated verbatim in mode_callback, mode_switch and the
+        inline status fallback)."""
+        return "plan" if plan_state.active else permissions.mode
+
+    def _context_pct_and_style() -> tuple[float | None, str]:
+        """Context-left percentage + its color style — server-reported usage
+        (real tokenizer count) when the model has reported it, falling back
+        to the char-based estimate otherwise (context.context_left handles
+        both, and a zero/missing window safely). Colored by how much room is
+        left so a near-full context is visible before it 400s. None when no
+        percentage is computable (callers then show a raw count or nothing).
+        """
         tokens = context.estimate_tokens()
-        turns = context.turn_count
         max_tok = context.max_tokens
-
-        parts = []
-        # Show current model name
-        model_name = get(config, "model", "name", default="")
-        provider_name = get(config, "model", "provider", default="")
-        if model_name:
-            label = f"  {model_name}"
-            if provider_name:
-                label += f" ({provider_name})"
-            parts.append(("class:bottom-toolbar.team", label))
-            parts.append(("class:bottom-toolbar.info", "  "))
-
-        if turns > 0:
-            parts.append(("class:bottom-toolbar.info", f"{turns} turns"))
-        else:
-            parts.append(("class:bottom-toolbar.info", ""))
-
-        # Tokens/sec and cost — right after turns
-        if session_stats:
-            speed_str = session_stats.format_speed()
-            if speed_str:
-                parts.append(("class:bottom-toolbar.info", f"  {speed_str}"))
-
-            cost_str = session_stats.format_cost()
-            if cost_str:
-                parts.append(("class:bottom-toolbar.info", f"  {cost_str}"))
-
-        # Context percentage (right side) — server-reported usage (real
-        # tokenizer count) when the model has reported it, falling back to
-        # the char-based estimate otherwise (context.context_left handles
-        # both, and a zero/missing window safely). Colored by how much room
-        # is left so a near-full context is visible before it 400s.
         if max_tok > 0 and tokens > 0:
             pct = context.context_left(max_tok) * 100
-            spacer = " " * 10
-            style = _context_pct_style(pct)
-            parts.append((style, f"{spacer}ctx {int(pct)}%"))
-        elif tokens > 0:
-            parts.append(("class:bottom-toolbar.context", f"    {tokens:,} tokens"))
+            return pct, _context_pct_style(pct)
+        return None, "class:bottom-toolbar.context"
 
-        return parts
+    def status_callback():
+        """Line 1: model + turns + speed/cost + context %."""
+        context_pct, context_style = _context_pct_and_style()
+        return toolbar_status_segments(
+            model_name=get(config, "model", "name", default=""),
+            provider_name=get(config, "model", "provider", default=""),
+            turns=context.turn_count,
+            speed_str=session_stats.format_speed() if session_stats else "",
+            cost_str=session_stats.format_cost() if session_stats else "",
+            context_pct=context_pct,
+            context_style=context_style,
+            context_tokens=context.estimate_tokens(),
+        )
 
     def mode_switch():
         """Cycle modes: ask → auto → plan → ask (Shift+Tab).
@@ -2695,30 +2694,17 @@ async def run_interactive(config: dict, resume_session: str = "",
         entering plan drops permissions to "auto" (reads free, writes blocked by
         the plan gate). Persist the non-plan mode into config so it survives.
         """
-        current = "plan" if plan_state.active else permissions.mode
-        next_mode = cycle_mode(current, plan_state, permissions)
+        next_mode = cycle_mode(_display_mode(), plan_state, permissions)
         if next_mode != "plan":
             config["permissions"]["mode"] = next_mode
 
     def mode_callback():
         """Line 2: ⏵⏵ mode on · shift+tab to switch · ctrl+t team."""
-        if plan_state.active:
-            display_mode = "plan"
-        else:
-            display_mode = permissions.mode
-        parts = [
-            ("class:bottom-toolbar.mode", "  ⏵⏵ "),
-            ("class:bottom-toolbar.mode-text", f"{display_mode} mode on"),
-            ("class:bottom-toolbar.info", "  ·  "),
-            ("class:bottom-toolbar.info", "shift+tab to switch"),
-        ]
-        if team_manager.workers:
-            active = team_manager.active_count
-            total = len(team_manager.workers)
-            parts.append(("class:bottom-toolbar.info", "  ·  "))
-            parts.append(("class:bottom-toolbar.team", "ctrl+t "))
-            parts.append(("class:bottom-toolbar.team-text", f"team ({active}/{total})"))
-        return parts
+        return toolbar_mode_segments(
+            _display_mode(),
+            team_active=team_manager.active_count,
+            team_total=len(team_manager.workers),
+        )
 
     def team_callback():
         """Line 3+: live worker status (only shown when workers exist)."""
@@ -2846,36 +2832,44 @@ async def run_interactive(config: dict, resume_session: str = "",
     )
 
     def _inline_status_text() -> str:
-        """The one-line "mode + ctx%" fallback shown above the prompt when
-        the toolbar isn't rendering (ui.statusline: inline, or auto once CPR
-        is confirmed unsupported) — built from build_status_segments, the
-        same pure segment source the toolbar's own callbacks conceptually
-        mirror, per this task's "one source" requirement."""
-        tokens = context.estimate_tokens()
-        max_tok = context.max_tokens
-        turns = context.turn_count
-        model_name = get(config, "model", "name", default="")
-        provider_name = get(config, "model", "provider", default="")
-        mode = "plan" if plan_state.active else permissions.mode
-
-        context_pct = None
-        context_style = "class:bottom-toolbar.context"
-        if max_tok > 0 and tokens > 0:
-            context_pct = context.context_left(max_tok) * 100
-            context_style = _context_pct_style(context_pct)
-
+        """The one-line "mode + ctx%" fallback printed after each turn when
+        the toolbar isn't rendering (ui.statusline: inline, or auto while CPR
+        is not positively confirmed) — built from build_status_segments, the
+        SAME source the toolbar lines render through (via the toolbar_*
+        wrappers), per this task's "one source" requirement."""
+        context_pct, context_style = _context_pct_and_style()
         segments = build_status_segments(
-            mode,
-            model_name=model_name,
-            provider_name=provider_name,
-            turns=turns,
+            _display_mode(),
+            model_name=get(config, "model", "name", default=""),
+            provider_name=get(config, "model", "provider", default=""),
+            turns=context.turn_count,
             context_pct=context_pct,
             context_style=context_style,
         )
         return format_status_line(segments)
 
     def _should_show_inline_status() -> bool:
-        _, use_inline = resolve_statusline_mode(statusline_mode, cpr_state["supported"])
+        """Route ui.statusline through the LIVE CPR verdict (review fix).
+
+        The renderer's cpr_support enum is the primary signal: prompt_
+        toolkit's 2s CPR timer is a background task of the prompt
+        Application, so a sub-2s turn cancels it before it can conclude —
+        the neutered-callback latch alone would never flip in a fast
+        scripted non-CPR pty (the exact target scenario). Pessimistic rule:
+        inline prints while the verdict is NOT_SUPPORTED **or still
+        UNKNOWN**; it stops only once SUPPORTED has actually been observed.
+        The cpr_state latch (pre-flight heuristic + neutered callback)
+        stays authoritative as a secondary signal.
+        """
+        live = renderer_cpr_support(session)
+        if live is False:
+            # A definitive NOT_SUPPORTED verdict — keep the shared latch in
+            # sync (same latch the neutered warning callback flips).
+            cpr_state["supported"] = False
+        confirmed = cpr_confirmed_supported(
+            live, latched_unsupported=cpr_state["supported"] is False
+        )
+        _, use_inline = resolve_statusline_mode(statusline_mode, confirmed)
         return use_inline
 
     # Notification sound config
@@ -2954,6 +2948,17 @@ async def run_interactive(config: dict, resume_session: str = "",
             return ""
         finally:
             _signal.signal(_signal.SIGINT, prev_handler)
+            # Inline status fallback (Phase 3 Task 3, review fix): printed
+            # once after each COMPLETED turn (this finally runs for normal,
+            # interrupted and failed generations alike — every _run_with_
+            # notify call site is a turn) rather than at the top of the
+            # input loop, so blank-line/slash-command iterations don't
+            # re-print it. Ordering vs patch_stdout (Task 2) is trivially
+            # safe: no prompt is being rendered at this moment — the line
+            # lands in scrollback between the turn's output and the next
+            # prompt redraw.
+            if _should_show_inline_status():
+                console.print(f"[dim]{_esc(_inline_status_text())}[/dim]")
 
     # Handle --continue prompt (send first prompt automatically)
     if continue_prompt:
@@ -2971,17 +2976,6 @@ async def run_interactive(config: dict, resume_session: str = "",
 
     try:
         while True:
-            # Non-CPR fallback (Phase 3 Task 3): printed BEFORE the prompt is
-            # drawn (not concurrently with it), so this is a plain, permanent
-            # console line landing in scrollback ahead of the next prompt —
-            # not the patch_stdout "draw above an active prompt" mechanism
-            # (Task 2), which is unrelated here since nothing is mid-render
-            # yet. Runs once per loop iteration, i.e. once per completed turn
-            # (plus once before the very first prompt) — matching "after each
-            # turn" without needing to touch every agent.run() call site.
-            if _should_show_inline_status():
-                console.print(f"[dim]{_esc(_inline_status_text())}[/dim]")
-
             try:
                 user_input = await asyncio.get_event_loop().run_in_executor(
                     None,
