@@ -143,6 +143,17 @@ def test_enabled_for_empty_list_disables_everything():
     assert enabled_for(config, "labels") is False
 
 
+def test_enabled_for_malformed_use_for_warns_and_defaults_enabled(caplog):
+    """A non-list routing.use_for (config typo) warns — like a non-dict
+    utility_model does — then falls back to enabled-for-all rather than
+    silently disabling routing."""
+    config = {"routing": {"use_for": "compaction"}}  # a bare string, not a list
+    with caplog.at_level("WARNING"):
+        assert enabled_for(config, "compaction") is True
+        assert enabled_for(config, "review") is True
+    assert any("routing.use_for is not a list" in r.message for r in caplog.records)
+
+
 def test_resolve_utility_for_none_utility_stays_none():
     config = {"routing": {"use_for": ["compaction", "review", "labels"]}}
     assert resolve_utility_for(config, "compaction", None) is None

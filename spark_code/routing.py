@@ -106,6 +106,9 @@ def enabled_for(config: dict, consumer: str) -> bool:
     if use_for is None:
         return True
     if not isinstance(use_for, (list, tuple, set)):
+        logger.warning(
+            "routing.use_for is not a list (got %s) — treating as enabled "
+            "for all consumers", type(use_for).__name__)
         return True
     return consumer in use_for
 
@@ -159,10 +162,17 @@ async def call_with_fallback(
     operation failure, not a routing concern, and propagates to the caller
     exactly as it would without any utility model configured.
     """
-    if utility is None:
+    # ONE selection point: reuse route_or_fallback (the single place callers
+    # decide utility-vs-primary) rather than re-deriving the choice inline —
+    # this codebase has a history of two-copies-drift bugs, so the "prefer
+    # utility, else primary" rule lives in exactly one function.
+    chosen = route_or_fallback(utility, primary)
+    if chosen is primary:
+        # No utility configured (or it resolved to the primary) — nothing to
+        # fall back from; a failure here is the primary's and must propagate.
         return await call(primary)
     try:
-        result = await call(utility)
+        result = await call(chosen)
     except Exception:
         logger.warning(
             "utility model call raised — falling back to primary", exc_info=True)
