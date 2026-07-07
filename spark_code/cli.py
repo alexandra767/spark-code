@@ -573,7 +573,9 @@ def _context_pct_style(pct: float) -> str:
     return "class:bottom-toolbar.context-red"
 
 
-def build_tools(todo_list: TodoList | None = None) -> ToolRegistry:
+def build_tools(todo_list: TodoList | None = None, model=None,
+                config: dict | None = None,
+                permissions: "PermissionManager | None" = None) -> ToolRegistry:
     """Register all built-in tools.
 
     ``todo_list`` is the session-scoped live checklist backing ``todo_write``.
@@ -581,6 +583,13 @@ def build_tools(todo_list: TodoList | None = None) -> ToolRegistry:
     alongside the Context) pass their own instance; otherwise a fresh, empty
     one is created here — either way state is never persisted across
     sessions.
+
+    ``model``/``config`` (and optionally ``permissions``) enable the
+    ``dispatch_agent`` tool: only registered when a model AND config are
+    supplied. Sub-agents build their tool registry from a plain ``build_tools()``
+    (no model) so it structurally CANNOT contain ``dispatch_agent`` — that is
+    the depth guard against nesting. ``permissions`` is read live at dispatch
+    time so a mid-session mode change (Shift+Tab) is inherited by sub-agents.
     """
     registry = ToolRegistry()
     registry.register(ReadFileTool())
@@ -594,6 +603,10 @@ def build_tools(todo_list: TodoList | None = None) -> ToolRegistry:
     registry.register(WebFetchTool())
     registry.register(RagSearchTool())
     registry.register(TodoWriteTool(todo_list if todo_list is not None else TodoList()))
+    if model is not None and config is not None:
+        from .dispatch import DispatchAgentTool
+        registry.register(DispatchAgentTool(
+            model=model, config=config, permissions=permissions))
     return registry
 
 
@@ -2408,17 +2421,20 @@ async def run_interactive(config: dict, resume_session: str = "",
         platform_prompt=platform_prompt,
         provider_prompt=provider_prompt,
     )
+    # Build permissions BEFORE tools so dispatch_agent can read the lead's
+    # live mode (Shift+Tab changes .mode in place → sub-agents inherit it).
+    permissions = PermissionManager(
+        mode=get(config, "permissions", "mode", default="ask"),
+        always_allow=get(config, "permissions", "always_allow", default=[]),
+    )
     todo_list = TodoList()
-    tools = build_tools(todo_list=todo_list)
+    tools = build_tools(todo_list=todo_list, model=model, config=config,
+                        permissions=permissions)
 
     # Register MCP tools
     for mcp_tool in mcp_tools:
         tools.register(mcp_tool)
 
-    permissions = PermissionManager(
-        mode=get(config, "permissions", "mode", default="ask"),
-        always_allow=get(config, "permissions", "always_allow", default=[]),
-    )
     # Progress tracking for toolbar
     current_tool = {"name": "", "detail": ""}
 
@@ -3692,10 +3708,11 @@ async def _one_shot(config: dict, prompt: str):
     # hardcoding "auto", so `spark --trust "do X"` doesn't still prompt.
     agentic = config.get("_agentic", False)
     context = Context(system_prompt=AGENTIC_PROMPT if agentic else SYSTEM_PROMPT)
-    todo_list = TodoList()
-    tools = build_tools(todo_list=todo_list)
     permissions = PermissionManager(
         mode=get(config, "permissions", "mode", default="auto"))
+    todo_list = TodoList()
+    tools = build_tools(todo_list=todo_list, model=model, config=config,
+                        permissions=permissions)
     agent = Agent(model, context, tools, permissions, console,
                   result_budgets=get(config, "tools", "result_budgets", default=None))
 
