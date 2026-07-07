@@ -50,9 +50,14 @@ from .skills.base import _FRONTMATTER_RE
 logger = logging.getLogger(__name__)
 
 # Reserved — a custom def may not redefine one of the built-in agent types
-# (dispatch.py.AGENT_TYPES). Duplicated here as a plain tuple (not imported)
-# to avoid a cli.py<->dispatch.py<->agents_registry import cycle; the two are
-# guarded to stay in sync by test_custom_agents.py.
+# (dispatch.AGENT_TYPES). Duplicated here as plain tuples (not imported) to
+# avoid a cli.py<->dispatch.py<->agents_registry import cycle. These two must
+# stay byte-for-byte equal to their dispatch.py counterparts (AGENT_TYPES and
+# _READ_ONLY_TYPES) — the drift guards
+# test_custom_agents.test_builtin_agent_types_tuple_matches_dispatch /
+# test_read_only_base_types_tuple_matches_dispatch fail loudly if they ever
+# diverge (e.g. a 4th built-in type added there but not mirrored here, which
+# would silently disable the reserved-name guard for that new type).
 _BUILTIN_AGENT_TYPES = ("explore", "reviewer", "implementer")
 _READ_ONLY_BASE_TYPES = ("explore", "reviewer")
 _VALID_MODEL_HINTS = ("primary", "utility")

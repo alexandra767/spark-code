@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from spark_code import dispatch
+from spark_code import agents_registry, dispatch
 from spark_code.agent import Agent
 from spark_code.agents_registry import AgentDef, build_agent_index, load_agent_defs
 from spark_code.context import Context
@@ -81,6 +81,26 @@ def _reset_dispatch_semaphore():
     dispatch._reset_semaphore()
     yield
     dispatch._reset_semaphore()
+
+
+# ---------------------------------------------------------------------------
+# Drift guards — the built-in-agent-type tuples are DUPLICATED in
+# agents_registry.py (as plain tuples, to avoid a cli<->dispatch<->registry
+# import cycle) rather than imported from dispatch.py. These two tests are
+# the "guarded to stay in sync" the agents_registry constants' comment
+# promises: if a future 4th built-in agent type is added to dispatch's
+# canonical tuples without mirroring it in agents_registry, the reserved-name
+# guard (which keys off _BUILTIN_AGENT_TYPES) would silently fail to protect
+# the new type — a custom def could then shadow it. These fail loudly first.
+# ---------------------------------------------------------------------------
+
+
+def test_builtin_agent_types_tuple_matches_dispatch():
+    assert agents_registry._BUILTIN_AGENT_TYPES == dispatch.AGENT_TYPES
+
+
+def test_read_only_base_types_tuple_matches_dispatch():
+    assert agents_registry._READ_ONLY_BASE_TYPES == dispatch._READ_ONLY_TYPES
 
 
 # ---------------------------------------------------------------------------
