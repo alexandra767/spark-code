@@ -218,6 +218,27 @@ async def test_one_shot_auto_mode_write_denied_not_prompted(scripted_model,
     assert not (tmp_path / "hello.txt").exists()
 
 
+async def test_one_shot_exit_0_on_final_answer_at_round_cap(scripted_model,
+                                                            capsys):
+    # A final answer given ON the last allowed round is a completion, not a
+    # cap-out: exit 0. (Regression: rounds increments at loop top, so the
+    # post-loop `rounds >= MAX_TOOL_ROUNDS` check alone can't tell
+    # loop-exhausted from answered-on-last-round.)
+    scripted_model.rounds = [
+        [
+            {"type": "text", "content": "answered immediately"},
+            {"type": "done", "usage": {}},
+        ],
+    ]
+    code = await _one_shot({"permissions": {"mode": "trust"}}, "hi",
+                           output="json", max_rounds=1)
+    obj = _parse_single_json_line(capsys)
+    assert code == 0
+    assert obj["error"] is None
+    assert obj["result"] == "answered immediately"
+    assert obj["rounds"] == 1
+
+
 async def test_one_shot_text_mode_prints_no_json(scripted_model, capsys):
     scripted_model.rounds = [
         [
@@ -231,3 +252,50 @@ async def test_one_shot_text_mode_prints_no_json(scripted_model, capsys):
     assert code == 0
     assert "plain answer" in out
     assert not out.lstrip().startswith("{")  # no JSON contract in text mode
+
+
+# ---------------------------------------------------------------------------
+# Legacy -p advisory: -p value that names a configured provider gets a
+# one-line stderr note (stdout/JSON/exit code untouched — the prompt runs).
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def cli_runner_env(monkeypatch):
+    """CliRunner harness for main(): fake config with an 'llm' provider and a
+    stubbed _one_shot so nothing hits the network."""
+    from click.testing import CliRunner
+
+    calls = {}
+
+    def _fake_load_config(project_dir=None, provider=None):
+        return {"providers": {"llm": {"endpoint": "http://x"}},
+                "permissions": {"mode": "auto"},
+                "model": {"endpoint": "http://x", "name": "m"}}
+
+    async def _stub_one_shot(config, prompt, output="text", max_rounds=None):
+        calls["prompt"] = prompt
+        calls["output"] = output
+        return 0
+
+    monkeypatch.setattr(cli_mod, "load_config", _fake_load_config)
+    monkeypatch.setattr(cli_mod, "_one_shot", _stub_one_shot)
+    return CliRunner(), calls
+
+
+def test_legacy_provider_p_prints_stderr_note(cli_runner_env):
+    runner, calls = cli_runner_env
+    result = runner.invoke(cli_mod.main, ["-p", "llm", "--output", "json"])
+    assert result.exit_code == 0
+    assert "-p is now the prompt flag" in result.stderr
+    assert "--provider" in result.stderr
+    assert "-p is now the prompt flag" not in result.stdout  # stdout stays pure
+    assert calls["prompt"] == "llm"  # behavior unchanged: the prompt still runs
+
+
+def test_normal_prompt_gets_no_stderr_note(cli_runner_env):
+    runner, calls = cli_runner_env
+    result = runner.invoke(cli_mod.main, ["-p", "fix the failing tests"])
+    assert result.exit_code == 0
+    assert "-p is now the prompt flag" not in result.stderr
+    assert calls["prompt"] == "fix the failing tests"

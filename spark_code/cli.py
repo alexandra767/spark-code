@@ -3922,6 +3922,16 @@ def main(endpoint, model_name, provider, prompt_flag, trust, auto_mode, yolo,
     # Load config with provider selection
     config = load_config(os.getcwd(), provider=provider)
 
+    # Legacy-usage advisory: -p was --provider's short flag until Phase 4, so
+    # `spark -p llm` used to select a provider. If the -p value exactly names
+    # a configured provider, someone almost certainly meant the old flag —
+    # note it on STDERR only (stdout/JSON purity and exit code untouched; the
+    # value still runs as the prompt).
+    if prompt_flag and prompt_flag in (config.get("providers") or {}):
+        click.echo(
+            "note: -p is now the prompt flag (Claude Code parity); "
+            "for provider selection use --provider <name>", err=True)
+
     # CLI overrides
     if endpoint:
         config["model"]["endpoint"] = endpoint
@@ -4019,7 +4029,10 @@ async def _one_shot(config: dict, prompt: str, output: str = "text",
     def _on_tool_start(tool_name, args):
         # Bash tool invocations only — files_changed already comes from
         # agent._verify_written_paths (Phase 2), so this is the one piece
-        # the agent doesn't already expose (per the task brief).
+        # the agent doesn't already expose (per the task brief). Records
+        # only commands that actually RAN: on_tool_start fires AFTER the
+        # permission check in agent._execute_single_tool, so a denied bash
+        # call never reaches this hook.
         if tool_name == "bash":
             cmd = args.get("command", "")
             if cmd:

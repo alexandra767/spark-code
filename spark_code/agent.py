@@ -293,6 +293,12 @@ class Agent:
         self._last_rounds: int = 0
         self._hit_max_rounds: bool = False
         self._last_stream_error: str | None = None
+        # True once the model ends the turn with a real final answer (the
+        # no-tool-calls break). Distinguishes answered-on-the-last-round from
+        # loop-exhausted: rounds increments at the top of the loop, so the
+        # post-loop `rounds >= MAX_TOOL_ROUNDS` check alone would misreport a
+        # valid final answer given exactly on the cap round as a cap-out.
+        self._final_answer_given: bool = False
         # 80B-friendly skills (Task 8): the registry used to expand a model
         # FINAL answer that is solely a "/<skill-name> [args]" line. None
         # (one-shot mode, sub-agents) → feature silently off, same pattern as
@@ -549,6 +555,7 @@ class Agent:
         self._last_rounds = 0
         self._hit_max_rounds = False
         self._last_stream_error = None
+        self._final_answer_given = False
 
         while rounds < self.MAX_TOOL_ROUNDS:
             rounds += 1
@@ -727,6 +734,7 @@ class Agent:
                     self._verify_nudged = True
                     self._verify_nudge_pending = True
                     continue
+                self._final_answer_given = True
                 break
 
             # Process tool calls — keep any narration the model produced
@@ -777,7 +785,10 @@ class Agent:
 
             # Continue loop — model will process tool results
 
-        if rounds >= self.MAX_TOOL_ROUNDS:
+        # Cap-out is only a cap-out when the loop was EXHAUSTED — a final
+        # answer given exactly on the last allowed round is a normal
+        # completion (no warning, no checkpoint, exit 0 in headless).
+        if rounds >= self.MAX_TOOL_ROUNDS and not self._final_answer_given:
             self._hit_max_rounds = True
             render_warning(self.console, "Reached maximum tool rounds")
             try:
