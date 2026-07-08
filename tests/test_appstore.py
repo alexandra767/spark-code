@@ -185,6 +185,36 @@ async def test_get_submission_state_build_fetch_raises_ascerror_is_swallowed(tmp
     }
 
 
+# --- FIX 2 (pin): get_submission_state must never send `sort` on the
+# app→appStoreVersions relationship (ASC rejects it as PARAMETER_ERROR.ILLEGAL).
+# The other fakes above substring-match "appStoreVersions?limit=1", which would
+# still pass even if a "&sort=..." suffix were reintroduced — this test captures
+# the actual path and asserts "sort=" is absent from it.
+
+async def test_get_submission_state_never_sends_sort_param(tmp_path, monkeypatch):
+    _write_config(tmp_path)
+    c = AscClient(config_dir=str(tmp_path))
+    captured = []
+
+    async def fake_get(path):
+        captured.append(path)
+        if "appStoreVersions?limit=1" in path:
+            return {"data": [{
+                "id": "V1",
+                "attributes": {"appStoreState": "PREPARE_FOR_SUBMISSION", "versionString": "1.0"},
+            }]}
+        if path.endswith("/build"):
+            return {"data": None}
+        raise AssertionError(f"unexpected path: {path}")
+
+    monkeypatch.setattr(c, "get", fake_get)
+    await c.get_submission_state("APP1")
+
+    versions_paths = [p for p in captured if "appStoreVersions?limit=1" in p]
+    assert versions_paths, "expected a call to the appStoreVersions list endpoint"
+    assert "sort=" not in versions_paths[0]
+
+
 # --- readiness checklist ---
 
 async def test_readiness_flags_missing_build(tmp_path, monkeypatch):
@@ -284,3 +314,70 @@ async def test_readiness_screenshot_check_ascerror_is_failsafe(tmp_path, monkeyp
     assert shot_check["ok"] is False
     assert "Could not verify screenshots" in shot_check["hint"]
     assert shot_check in blockers(checks)
+
+
+# --- FIX 1: readiness() must gate on appStoreState, not just build/encryption/
+# screenshots — an already-live (READY_FOR_SALE) version has none of those
+# problems but is NOT submittable. Fail-safe: unknown/None/non-editable state
+# must always resolve to ok=False, never ok=True. ---
+
+async def test_readiness_ready_for_sale_is_blocker_even_with_valid_build_and_screenshots(tmp_path, monkeypatch):
+    """The exact live-GigLedger case: a READY_FOR_SALE version with a fully
+    valid build and uploaded screenshots must still be reported as NOT ready,
+    because the version itself isn't in an editable/submittable state."""
+    _write_config(tmp_path)
+    from spark_code.appstore import AscClient, blockers, readiness
+    c = AscClient(config_dir=str(tmp_path))
+    async def fake_state(app_id):
+        return {"version_id": "V", "version": "1.3.22", "state": "READY_FOR_SALE",
+                "build_id": "B", "build_number": "42", "build_processing_state": "VALID"}
+    monkeypatch.setattr(c, "get_submission_state", fake_state)
+    async def fake_get(path):
+        if path == "/v1/builds/B":
+            return {"data": {"attributes": {"usesNonExemptEncryption": False}}}
+        if path == "/v1/apps/APP":
+            return {"data": {"attributes": {"primaryLocale": "en-US"}}}
+        if path.endswith("/appStoreVersionLocalizations"):
+            return {"data": [{"id": "LOC1", "attributes": {"locale": "en-US"}}]}
+        if path.endswith("/appScreenshotSets"):
+            return {"data": [{"id": "SET1"}]}
+        if path.endswith("/appScreenshots"):
+            return {"data": [{"id": "SHOT1"}]}
+        raise AssertionError(f"unexpected path: {path}")
+    monkeypatch.setattr(c, "get", fake_get)
+    checks = await readiness(c, "APP")
+    state_check = next(x for x in checks if x["check"] == "Version in a submittable state")
+    assert state_check["ok"] is False
+    assert "READY_FOR_SALE" in state_check["hint"]
+    assert state_check in blockers(checks)
+    # confirm the check is first in the list, per the brief
+    assert checks[0]["check"] == "Version in a submittable state"
+
+
+async def test_readiness_none_state_is_failsafe_blocker(tmp_path, monkeypatch):
+    """An unknown/None appStoreState must never be treated as submittable."""
+    _write_config(tmp_path)
+    from spark_code.appstore import AscClient, blockers, readiness
+    c = AscClient(config_dir=str(tmp_path))
+    async def fake_state(app_id):
+        return {"version_id": "V", "version": "1.0", "state": None,
+                "build_id": "B", "build_number": "42", "build_processing_state": "VALID"}
+    monkeypatch.setattr(c, "get_submission_state", fake_state)
+    async def fake_get(path):
+        if path == "/v1/builds/B":
+            return {"data": {"attributes": {"usesNonExemptEncryption": False}}}
+        if path == "/v1/apps/APP":
+            return {"data": {"attributes": {"primaryLocale": "en-US"}}}
+        if path.endswith("/appStoreVersionLocalizations"):
+            return {"data": [{"id": "LOC1", "attributes": {"locale": "en-US"}}]}
+        if path.endswith("/appScreenshotSets"):
+            return {"data": [{"id": "SET1"}]}
+        if path.endswith("/appScreenshots"):
+            return {"data": [{"id": "SHOT1"}]}
+        raise AssertionError(f"unexpected path: {path}")
+    monkeypatch.setattr(c, "get", fake_get)
+    checks = await readiness(c, "APP")
+    state_check = next(x for x in checks if x["check"] == "Version in a submittable state")
+    assert state_check["ok"] is False
+    assert "unknown" in state_check["hint"]
+    assert state_check in blockers(checks)

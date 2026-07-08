@@ -11,6 +11,12 @@ import jwt as pyjwt
 
 API = "https://api.appstoreconnect.apple.com"
 
+# ASC appStoreState values from which a version can be submitted for review.
+EDITABLE_STATES = frozenset({
+    "PREPARE_FOR_SUBMISSION", "DEVELOPER_REJECTED", "REJECTED",
+    "METADATA_REJECTED", "INVALID_BINARY",
+})
+
 class AscError(Exception):
     pass
 
@@ -176,10 +182,23 @@ async def readiness(client: "AscClient", app_id: str) -> list[dict]:
     except Exception as e:
         hint = f"Could not verify submission state: {e}"
         return [
+            {"check": "Version in a submittable state", "ok": False, "hint": hint},
             {"check": "Build attached & processed", "ok": False, "hint": hint},
             {"check": "Export-compliance / encryption flag set", "ok": False, "hint": hint},
             {"check": "Screenshots present", "ok": False, "hint": hint},
         ]
+
+    try:
+        state = st["state"]
+        state_ok = state in EDITABLE_STATES
+        checks.append({"check": "Version in a submittable state",
+                       "ok": state_ok,
+                       "hint": "" if state_ok else
+                       f"Version state is {state or 'unknown'} — not editable/submittable "
+                       "(need a version in Prepare for Submission)."})
+    except Exception as e:
+        checks.append({"check": "Version in a submittable state", "ok": False,
+                       "hint": f"Could not verify version state: {e}"})
 
     try:
         build_ok = bool(st["build_id"]) and st["build_processing_state"] == "VALID"
