@@ -1,4 +1,7 @@
-from spark_code.tools.android_control import AndroidControlTool, _elements, _find
+from spark_code.tools.android_control import AndroidControlTool, _elements, _find, _resolve_package
+
+INSTALLED = ["com.android.settings", "com.gigledger.android.debug",
+             "com.boonpoint.android.debug", "com.sec.android.app.launcher"]
 
 SAMPLE_XML = (
     '<?xml version="1.0"?><hierarchy>'
@@ -21,6 +24,60 @@ def _patch(monkeypatch, cmds):
 
 def _issued_input(cmds):
     return [a for a in cmds if "input" in a]
+
+
+def _patch_launch(monkeypatch, cmds, monkey_out="Events injected: 1"):
+    async def fake_run(argv):
+        cmds.append(argv)
+        if "packages" in argv:
+            return 0, "".join(f"package:{p}\n" for p in INSTALLED), ""
+        if "monkey" in argv:
+            return 0, monkey_out, ""
+        return 0, "", ""
+    monkeypatch.setattr("spark_code.tools.android_control._run", fake_run)
+    monkeypatch.setattr("spark_code.tools.android_control._resolve_adb", lambda: "/adb")
+
+
+def _monkey_cmds(cmds):
+    return [a for a in cmds if "monkey" in a]
+
+
+def test_resolve_package_fuzzy_and_debug_preference():
+    # segment match + only-debug-installed → picks the debug build
+    assert _resolve_package(INSTALLED, "gigledger")[0] == "com.gigledger.android.debug"
+    assert _resolve_package(INSTALLED, "boonpoint")[0] == "com.boonpoint.android.debug"
+    # exact package id wins outright
+    assert _resolve_package(INSTALLED, "com.android.settings")[0] == "com.android.settings"
+    # prefer .debug when both a base and its .debug variant match
+    both = ["com.gigledger.android", "com.gigledger.android.debug"]
+    assert _resolve_package(both, "gigledger")[0] == "com.gigledger.android.debug"
+    # no match
+    assert _resolve_package(INSTALLED, "spotify") == (None, [])
+
+
+async def test_launch_opens_immediately_without_confirm(monkeypatch):
+    cmds = []
+    _patch_launch(monkeypatch, cmds)
+    out = await AndroidControlTool().execute(action="launch", app="gigledger")
+    assert "opened" in out.lower() and "com.gigledger.android.debug" in out
+    assert "confirm" not in out.lower()  # launch does NOT require the gate
+    mk = _monkey_cmds(cmds)
+    assert mk and "com.gigledger.android.debug" in mk[0] and "LAUNCHER" in " ".join(mk[0])
+
+
+async def test_launch_unknown_app_launches_nothing(monkeypatch):
+    cmds = []
+    _patch_launch(monkeypatch, cmds)
+    out = await AndroidControlTool().execute(action="launch", app="spotify")
+    assert "no installed app matching" in out.lower()
+    assert _monkey_cmds(cmds) == []  # nothing launched
+
+
+async def test_launch_no_launchable_activity_reported(monkeypatch):
+    cmds = []
+    _patch_launch(monkeypatch, cmds, monkey_out="** No activities found to run, monkey aborted.")
+    out = await AndroidControlTool().execute(action="launch", app="settings")
+    assert "couldn't launch" in out.lower()
 
 
 def test_elements_and_find_compute_center():

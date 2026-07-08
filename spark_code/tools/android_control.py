@@ -48,6 +48,36 @@ async def _run(argv):
     return proc.returncode, out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
 
 
+async def _installed_packages(base) -> tuple[list[str] | None, str | None]:
+    rc, out, err = await _run(base + ["shell", "pm", "list", "packages"])
+    if rc != 0:
+        return None, (err.strip() or "could not list packages")
+    pkgs = [ln[len("package:"):].strip() for ln in out.splitlines()
+            if ln.startswith("package:")]
+    return pkgs, None
+
+
+def _resolve_package(pkgs, query) -> tuple[str | None, list[str]]:
+    """Fuzzy-match an app name/package against installed packages → (best, alternatives).
+
+    Exact package id wins outright. Otherwise substring-match, ranked: a package
+    whose SEGMENT equals the query first (e.g. 'gigledger' in com.gigledger.android),
+    then prefer the `.debug` variant (this is a dev/test phone), then shortest.
+    """
+    q = (query or "").strip().lower()
+    if not q:
+        return None, []
+    for p in pkgs:
+        if p.lower() == q:
+            return p, []
+    matches = [p for p in pkgs if q in p.lower()]
+    if not matches:
+        return None, []
+    matches.sort(key=lambda p: (q not in p.lower().split("."),
+                                not p.lower().endswith(".debug"), len(p)))
+    return matches[0], matches[1:]
+
+
 async def _dump_ui(base) -> tuple[str | None, str | None]:
     rc, _o, err = await _run(base + ["shell", "uiautomator", "dump", "/sdcard/spark_ui.xml"])
     if rc != 0:
@@ -98,14 +128,17 @@ class AndroidControlTool(Tool):
     @property
     def description(self) -> str:
         return ("Control a connected Android phone. action='find' lists tappable on-screen elements "
-                "(read-only). action='tap'/'type'/'swipe'/'key' ACT on the phone and require confirm='yes' "
-                "(nothing happens without it). tap: target (element text) or x,y. type: text. swipe: "
-                "direction up/down/left/right. key: back/home/enter/recent/delete. This is your REAL phone.")
+                "(read-only). action='launch' opens an app by name (app='gigledger') — resolves the "
+                "installed package, launches immediately, no confirm needed. action='tap'/'type'/'swipe'/'key' "
+                "ACT on the phone and require confirm='yes' (nothing happens without it). tap: target "
+                "(element text) or x,y. type: text. swipe: direction up/down/left/right. key: "
+                "back/home/enter/recent/delete. This is your REAL phone.")
 
     @property
     def parameters(self) -> dict:
         return {"type": "object", "properties": {
-            "action": {"type": "string", "description": "find | tap | type | swipe | key"},
+            "action": {"type": "string", "description": "find | launch | tap | type | swipe | key"},
+            "app": {"type": "string", "description": "For launch: app name or package (e.g. 'gigledger')"},
             "target": {"type": "string", "description": "For tap: visible text of the element to tap"},
             "text": {"type": "string", "description": "For type: the text to enter"},
             "x": {"type": "integer", "description": "For tap: explicit x coordinate (with y)"},
@@ -124,9 +157,9 @@ class AndroidControlTool(Tool):
     def requires_permission(self) -> bool:
         return True
 
-    async def execute(self, action: str = "", target: str = "", text: str = "", x=None, y=None,
-                      direction: str = "", key: str = "", confirm: str = "", device: str = "",
-                      **kwargs) -> str:
+    async def execute(self, action: str = "", app: str = "", target: str = "", text: str = "",
+                      x=None, y=None, direction: str = "", key: str = "", confirm: str = "",
+                      device: str = "", **kwargs) -> str:
         adb = _resolve_adb()
         if not adb:
             return "Error: adb not found. Install Android platform-tools or set ANDROID_HOME."
@@ -144,8 +177,28 @@ class AndroidControlTool(Tool):
                      for e in els[:40]]
             return "Tappable elements on screen (• = clickable):\n" + "\n".join(lines)
 
+        # launch: open an app by name. Low-risk (just foregrounds it) → launches
+        # immediately, NOT behind the confirm gate (unlike tap/type/swipe/key).
+        if act in ("launch", "open", "start"):
+            query = (app or target or text or "").strip()
+            if not query:
+                return "launch needs 'app' (an app name like 'gigledger' or a full package id)."
+            pkgs, err = await _installed_packages(base)
+            if err:
+                return f"Could not list installed apps: {err}. Is the phone connected?"
+            pkg, alts = _resolve_package(pkgs, query)
+            if not pkg:
+                return (f"No installed app matching '{query}'. "
+                        f"Run action='find', or pass the full package id as app=.")
+            rc, out, err = await _run(base + ["shell", "monkey", "-p", pkg,
+                                              "-c", "android.intent.category.LAUNCHER", "1"])
+            if rc != 0 or "No activities found" in out or "aborted" in out.lower():
+                return f"Couldn't launch {pkg}: {(err.strip() or out.strip()) or 'no launchable activity'}."
+            note = f" (other matches: {', '.join(alts[:3])})" if alts else ""
+            return f"✅ Opened {pkg}.{note}"
+
         if act not in _ACTING:
-            return "action must be one of: find, tap, type, swipe, key."
+            return "action must be one of: find, launch, tap, type, swipe, key."
 
         # Resolve the exact command + a human-readable summary of what it WILL do.
         if act == "tap":
