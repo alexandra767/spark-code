@@ -65,6 +65,24 @@ async def test_type_gated(monkeypatch):
     assert any("text" in a and "hi" in a for a in _issued_input(cmds))
 
 
+async def test_swipe_gated(monkeypatch):
+    cmds = []
+    _patch(monkeypatch, cmds)
+    assert "confirm" in (await AndroidControlTool().execute(action="swipe", direction="up")).lower()
+    assert _issued_input(cmds) == []  # the gate: no swipe reached the phone
+    await AndroidControlTool().execute(action="swipe", direction="up", confirm="yes")
+    assert any("swipe" in a for a in _issued_input(cmds))
+
+
+async def test_type_multiword_is_escaped_for_device_shell(monkeypatch):
+    cmds = []
+    _patch(monkeypatch, cmds)
+    await AndroidControlTool().execute(action="type", text="hello world", confirm="yes")
+    typed = _issued_input(cmds)[0]
+    # the device shell re-parses argv, so spaces must be %s or only "hello" types
+    assert "hello%sworld" in typed and "hello world" not in typed
+
+
 async def test_key_gated(monkeypatch):
     cmds = []
     _patch(monkeypatch, cmds)

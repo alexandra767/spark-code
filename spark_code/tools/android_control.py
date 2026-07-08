@@ -27,6 +27,20 @@ _KEYS = {"back": "KEYCODE_BACK", "home": "KEYCODE_HOME", "enter": "KEYCODE_ENTER
 _BOUNDS = re.compile(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]")
 
 
+def _escape_adb_text(text: str) -> str:
+    """`adb shell input text` is re-parsed by the DEVICE shell: spaces must be
+    %s and shell metacharacters escaped, or multi-word/special text is mangled."""
+    out = []
+    for ch in text:
+        if ch == " ":
+            out.append("%s")
+        elif ch in "\\\"'`$&|;<>()!*?[]{}~#":
+            out.append("\\" + ch)
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 async def _run(argv):
     proc = await asyncio.create_subprocess_exec(
         *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
@@ -152,7 +166,7 @@ class AndroidControlTool(Tool):
         elif act == "type":
             if not text:
                 return "type needs 'text'."
-            cmd = base + ["shell", "input", "text", text]
+            cmd = base + ["shell", "input", "text", _escape_adb_text(text)]
             what = f"type {text!r}"
         elif act == "swipe":
             dirs = {"up": (540, 1500, 540, 500), "down": (540, 500, 540, 1500),
