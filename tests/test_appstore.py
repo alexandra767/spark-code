@@ -210,11 +210,77 @@ async def test_readiness_all_ok(tmp_path, monkeypatch):
                 "build_id": "B", "build_number": "42", "build_processing_state": "VALID"}
     monkeypatch.setattr(c, "get_submission_state", fake_state)
     async def fake_get(path):
-        if path.endswith("/builds/B"):
+        if path == "/v1/builds/B":
             return {"data": {"attributes": {"usesNonExemptEncryption": False}}}
-        if "appScreenshotSets" in path:
-            return {"data": [{"id": "s1"}]}
-        return {"data": {}}
+        if path == "/v1/apps/APP":
+            return {"data": {"attributes": {"primaryLocale": "en-US"}}}
+        # own branch: the localizations LIST endpoint, distinct from the
+        # per-localization appScreenshotSets branch and the per-set
+        # appScreenshots branch below — exercises the real call sequence
+        # instead of a coincidental substring match.
+        if path.endswith("/appStoreVersionLocalizations"):
+            return {"data": [{"id": "LOC1", "attributes": {"locale": "en-US"}}]}
+        if path.endswith("/appScreenshotSets"):
+            return {"data": [{"id": "SET1"}]}
+        if path.endswith("/appScreenshots"):
+            return {"data": [{"id": "SHOT1"}]}
+        raise AssertionError(f"unexpected path: {path}")
     monkeypatch.setattr(c, "get", fake_get)
     checks = await readiness(c, "APP")
     assert not blockers(checks)
+
+
+async def test_readiness_screenshot_set_empty_is_blocker(tmp_path, monkeypatch):
+    """The exact false-ready case: an appScreenshotSet container exists (e.g.
+    mid-upload, or created-but-empty) but holds zero actual screenshot images.
+    `bool(sets)` alone would wrongly read this as ok=True — the check must
+    look one level deeper and catch it as a blocker."""
+    _write_config(tmp_path)
+    from spark_code.appstore import AscClient, blockers, readiness
+    c = AscClient(config_dir=str(tmp_path))
+    async def fake_state(app_id):
+        return {"version_id": "V", "version": "1.0", "state": "PREPARE_FOR_SUBMISSION",
+                "build_id": "B", "build_number": "42", "build_processing_state": "VALID"}
+    monkeypatch.setattr(c, "get_submission_state", fake_state)
+    async def fake_get(path):
+        if path == "/v1/builds/B":
+            return {"data": {"attributes": {"usesNonExemptEncryption": False}}}
+        if path == "/v1/apps/APP":
+            return {"data": {"attributes": {"primaryLocale": "en-US"}}}
+        if path.endswith("/appStoreVersionLocalizations"):
+            return {"data": [{"id": "LOC1", "attributes": {"locale": "en-US"}}]}
+        if path.endswith("/appScreenshotSets"):
+            return {"data": [{"id": "SET1"}]}  # set exists...
+        if path.endswith("/appScreenshots"):
+            return {"data": []}  # ...but holds zero screenshots
+        raise AssertionError(f"unexpected path: {path}")
+    monkeypatch.setattr(c, "get", fake_get)
+    checks = await readiness(c, "APP")
+    shot_check = next(x for x in checks if x["check"] == "Screenshots present")
+    assert shot_check["ok"] is False
+    assert shot_check in blockers(checks)
+
+
+async def test_readiness_screenshot_check_ascerror_is_failsafe(tmp_path, monkeypatch):
+    """A GET failing mid-way through the screenshot check must degrade that
+    single check to ok=False with an explanatory hint — never crash the whole
+    checklist, and never silently report ok=True."""
+    _write_config(tmp_path)
+    from spark_code.appstore import AscClient, blockers, readiness
+    c = AscClient(config_dir=str(tmp_path))
+    async def fake_state(app_id):
+        return {"version_id": "V", "version": "1.0", "state": "PREPARE_FOR_SUBMISSION",
+                "build_id": "B", "build_number": "42", "build_processing_state": "VALID"}
+    monkeypatch.setattr(c, "get_submission_state", fake_state)
+    async def fake_get(path):
+        if path == "/v1/builds/B":
+            return {"data": {"attributes": {"usesNonExemptEncryption": False}}}
+        if path == "/v1/apps/APP":
+            raise AscError("ASC GET /v1/apps/APP → 500: server error")
+        raise AssertionError(f"unexpected path: {path}")
+    monkeypatch.setattr(c, "get", fake_get)
+    checks = await readiness(c, "APP")
+    shot_check = next(x for x in checks if x["check"] == "Screenshots present")
+    assert shot_check["ok"] is False
+    assert "Could not verify screenshots" in shot_check["hint"]
+    assert shot_check in blockers(checks)

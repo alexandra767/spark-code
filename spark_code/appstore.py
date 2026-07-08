@@ -114,29 +114,95 @@ class AscClient:
                 "build_processing_state": build_state}
 
 
+async def _primary_locale_screenshot_check(client: "AscClient", app_id: str, version_id: str) -> tuple[bool, str]:
+    """Verify at least one actual screenshot image exists for the app's primary locale.
+
+    Fails safe: any missing/unexpected data resolves to ok=False with a hint,
+    never a silent ok=True. Falls back to the first localization only if none
+    matches the primary locale, noting that explicitly in the hint.
+    """
+    app_data = (await client.get(f"/v1/apps/{app_id}")).get("data") or {}
+    primary_locale = (app_data.get("attributes") or {}).get("primaryLocale")
+
+    locs = (await client.get(
+        f"/v1/appStoreVersions/{version_id}/appStoreVersionLocalizations")).get("data") or []
+    if not locs:
+        return False, "No App Store version localizations found — add a localization and upload screenshots."
+
+    loc = None
+    if primary_locale:
+        loc = next((L for L in locs if (L.get("attributes") or {}).get("locale") == primary_locale), None)
+
+    fallback_note = ""
+    if loc is None:
+        loc = locs[0]
+        fallback_locale = (loc.get("attributes") or {}).get("locale", loc.get("id"))
+        if primary_locale:
+            fallback_note = (f" Note: no localization matched primary locale '{primary_locale}'; "
+                              f"checked '{fallback_locale}' instead.")
+        else:
+            fallback_note = (" Note: could not determine primary locale; "
+                              f"checked '{fallback_locale}' instead.")
+
+    loc_id = loc["id"]
+    locale_label = (loc.get("attributes") or {}).get("locale", loc_id)
+
+    sets = (await client.get(
+        f"/v1/appStoreVersionLocalizations/{loc_id}/appScreenshotSets")).get("data") or []
+    if not sets:
+        return False, (f"No screenshot sets found for locale {locale_label} — "
+                        f"upload screenshots in App Store Connect.{fallback_note}")
+
+    for s in sets:
+        shots = (await client.get(
+            f"/v1/appScreenshotSets/{s['id']}/appScreenshots")).get("data") or []
+        if len(shots) > 0:
+            return True, fallback_note.strip()
+
+    return False, (f"No uploaded screenshots found for primary locale {locale_label} — "
+                    f"upload them in App Store Connect.{fallback_note}")
+
+
 async def readiness(client: "AscClient", app_id: str) -> list[dict]:
-    st = await client.get_submission_state(app_id)
     checks: list[dict] = []
-    build_ok = bool(st["build_id"]) and st["build_processing_state"] == "VALID"
-    checks.append({"check": "Build attached & processed",
-                   "ok": build_ok,
-                   "hint": "" if build_ok else "Attach a build with processingState=VALID"})
-    enc_ok = False
-    if st["build_id"]:
-        bd = (await client.get(f"/v1/builds/{st['build_id']}")).get("data", {})
-        enc_ok = bd.get("attributes", {}).get("usesNonExemptEncryption") is not None
-    checks.append({"check": "Export-compliance / encryption flag set",
-                   "ok": enc_ok, "hint": "" if enc_ok else "Set usesNonExemptEncryption on the build"})
-    shots = (await client.get(
-        f"/v1/appStoreVersions/{st['version_id']}/appStoreVersionLocalizations"
-        "?include=appScreenshotSets")).get("data", [])
-    shot_ok = False
-    if shots:
-        sets = (await client.get(
-            f"/v1/appStoreVersionLocalizations/{shots[0]['id']}/appScreenshotSets")).get("data", [])
-        shot_ok = bool(sets)
-    checks.append({"check": "Screenshots present",
-                   "ok": shot_ok, "hint": "" if shot_ok else "Upload required screenshots"})
+
+    try:
+        st = await client.get_submission_state(app_id)
+    except Exception as e:
+        hint = f"Could not verify submission state: {e}"
+        return [
+            {"check": "Build attached & processed", "ok": False, "hint": hint},
+            {"check": "Export-compliance / encryption flag set", "ok": False, "hint": hint},
+            {"check": "Screenshots present", "ok": False, "hint": hint},
+        ]
+
+    try:
+        build_ok = bool(st["build_id"]) and st["build_processing_state"] == "VALID"
+        checks.append({"check": "Build attached & processed",
+                       "ok": build_ok,
+                       "hint": "" if build_ok else "Attach a build with processingState=VALID"})
+    except Exception as e:
+        checks.append({"check": "Build attached & processed", "ok": False,
+                       "hint": f"Could not verify build: {e}"})
+
+    try:
+        enc_ok = False
+        if st["build_id"]:
+            bd = (await client.get(f"/v1/builds/{st['build_id']}")).get("data", {})
+            enc_ok = bd.get("attributes", {}).get("usesNonExemptEncryption") is not None
+        checks.append({"check": "Export-compliance / encryption flag set",
+                       "ok": enc_ok, "hint": "" if enc_ok else "Set usesNonExemptEncryption on the build"})
+    except Exception as e:
+        checks.append({"check": "Export-compliance / encryption flag set", "ok": False,
+                       "hint": f"Could not verify encryption flag: {e}"})
+
+    try:
+        shot_ok, shot_hint = await _primary_locale_screenshot_check(client, app_id, st["version_id"])
+        checks.append({"check": "Screenshots present", "ok": shot_ok, "hint": shot_hint})
+    except Exception as e:
+        checks.append({"check": "Screenshots present", "ok": False,
+                       "hint": f"Could not verify screenshots: {e}"})
+
     return checks
 
 
