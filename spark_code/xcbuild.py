@@ -52,7 +52,10 @@ def parse_altool_json(stdout) -> tuple[bool, list[str]]:
 
 def read_archive_props(archive_path) -> dict:
     p = Path(archive_path) / "Info.plist"
-    data = plistlib.loads(p.read_bytes())
+    try:
+        data = plistlib.loads(p.read_bytes())
+    except (OSError, plistlib.InvalidFileException, ValueError) as e:
+        raise XcBuildError(f"could not read archive Info.plist: {e}") from e
     props = data.get("ApplicationProperties", {})
     return {"bundle_id": props.get("CFBundleIdentifier"),
             "marketing_version": props.get("CFBundleShortVersionString"),

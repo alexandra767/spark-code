@@ -92,13 +92,13 @@ class AppStoreBuildUploadTool(Tool):
                 if rc != 0:
                     return f"Export failed (rc {rc}). Last output:\n{out[-1500:]}"
                 # The real xcodebuild -exportArchive writes the .ipa into `exp`
-                # as a side effect of the (real) subprocess; find it if present.
-                # Fall back to the conventional <scheme>.ipa path otherwise —
-                # this keeps the pipeline moving under a monkeypatched run_step
-                # (unit tests never touch the filesystem) while still picking
-                # up the actual exported file name in real runs.
+                # as a side effect of the (real) subprocess; find it. If export
+                # reported success (rc 0) but produced no .ipa, that's a real
+                # failure — don't mask it behind a downstream validate error.
                 ipas = list(Path(exp).glob("*.ipa"))
-                ipa = str(ipas[0]) if ipas else str(Path(exp) / f"{scheme}.ipa")
+                if not ipas:
+                    return "Export produced no .ipa (export succeeded but no .ipa found)."
+                ipa = str(ipas[0])
                 props = read_archive_props(arch)
                 # 3. validate (creates no build)
                 c = AscClient()

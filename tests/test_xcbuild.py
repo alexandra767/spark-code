@@ -63,6 +63,11 @@ def test_read_archive_props(tmp_path):
     props = read_archive_props(str(arch))
     assert props == {"bundle_id": "com.x.App", "marketing_version": "1.2.3", "build_number": "42"}
 
+def test_read_archive_props_missing_archive_raises_xcbuilderror(tmp_path):
+    missing = tmp_path / "NoSuchArchive.xcarchive"
+    with pytest.raises(XcBuildError):
+        read_archive_props(str(missing))
+
 async def test_run_step_captures_output_and_rc():
     rc, out = await run_step(["/bin/sh", "-c", "echo hello; exit 3"])
     assert rc == 3 and "hello" in out

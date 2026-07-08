@@ -1,7 +1,9 @@
+from pathlib import Path
+
 from spark_code.tools.appstore_build_upload import AppStoreBuildUploadTool
 
 
-def _patch(monkeypatch, *, validate_ok=True, existing_build=False, steps=None):
+def _patch(monkeypatch, *, validate_ok=True, existing_build=False, steps=None, create_ipa=True):
     # record which pipeline steps ran, in order
     async def fake_run_step(argv, cwd=None, timeout=1800.0):
         if steps is not None:
@@ -9,6 +11,10 @@ def _patch(monkeypatch, *, validate_ok=True, existing_build=False, steps=None):
                 steps.append("archive")
             elif "-exportArchive" in argv:
                 steps.append("export")
+                if create_ipa:
+                    ep = argv[argv.index("-exportPath") + 1]
+                    Path(ep).mkdir(parents=True, exist_ok=True)
+                    (Path(ep) / "App.ipa").touch()
             elif "--validate-app" in argv:
                 steps.append("validate")
             elif "--upload-app" in argv:
@@ -69,3 +75,11 @@ async def test_headless_refuses_without_confirm(monkeypatch):
     _patch(monkeypatch, steps=steps)
     out = await AppStoreBuildUploadTool(interactive=False).execute(project="/p/App.xcodeproj", scheme="App")
     assert "upload" not in steps and "confirm=" in out
+
+
+async def test_export_with_no_ipa_stops_before_validate(monkeypatch):
+    steps = []
+    _patch(monkeypatch, steps=steps, create_ipa=False)
+    out = await AppStoreBuildUploadTool().execute(project="/p/App.xcodeproj", scheme="App", confirm="upload")
+    assert steps == ["archive", "export"]  # validate/upload must NOT run
+    assert "no .ipa" in out.lower()
