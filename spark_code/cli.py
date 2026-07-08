@@ -696,6 +696,9 @@ def build_tools(todo_list: TodoList | None = None, model=None,
     session (``run_interactive``, ``interactive=True``) may proceed given an
     explicit ``confirm="submit"``. Defaults to ``True`` so sub-agents built
     from a bare ``build_tools()`` (no caller override) keep today's behavior.
+    ``AppStoreBuildUploadTool`` (build-upload task) receives the same
+    ``interactive`` flag for the identical reason, gating its own outward
+    step (``altool --upload-app``) on ``confirm="upload"``.
     """
     registry = ToolRegistry()
     registry.register(ReadFileTool())
@@ -731,6 +734,8 @@ def build_tools(todo_list: TodoList | None = None, model=None,
     registry.register(AppStoreStatusTool())
     from .tools.appstore_submit import AppStoreSubmitTool
     registry.register(AppStoreSubmitTool(interactive=interactive))
+    from .tools.appstore_build_upload import AppStoreBuildUploadTool
+    registry.register(AppStoreBuildUploadTool(interactive=interactive))
     # Phase 4 Task 3: always registered (no startup network call — see
     # codesearch.py) unless the user explicitly disabled it; away from the
     # RAG host it just returns a friendly unavailable message per-query.
