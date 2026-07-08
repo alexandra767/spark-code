@@ -1,7 +1,7 @@
 ---
 name: web-driver
 description: Drives a real web browser to read pages and fill out forms. Use for any task that needs navigating, clicking, typing, or submitting web forms.
-base_type: implementer
+type: implementer
 provider: gemini-pro
 tools: playwright__browser_navigate, playwright__browser_snapshot, playwright__browser_click, playwright__browser_type, playwright__browser_fill_form, playwright__browser_take_screenshot, playwright__browser_press_key, playwright__browser_wait_for, playwright__browser_navigate_back
 ---
