@@ -79,7 +79,10 @@ class AppStoreSubmitTool(Tool):
             sub = (await c.post("/v1/reviewSubmissions", {"data": {"type": "reviewSubmissions",
                 "attributes": {"platform": "IOS"},
                 "relationships": {"app": {"data": {"type": "apps", "id": app_id}}}}})).get("data", {})
-            sid = sub["id"]
+            sid = sub.get("id")
+            if not sid:
+                return ("App Store Connect error: submission was created but returned no id — "
+                        "check App Store Connect; nothing was finalized.")
             await c.post("/v1/reviewSubmissionItems", {"data": {"type": "reviewSubmissionItems",
                 "relationships": {
                     "reviewSubmission": {"data": {"type": "reviewSubmissions", "id": sid}},
