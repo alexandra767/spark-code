@@ -55,3 +55,42 @@ async def test_ios_no_device_clean_message(monkeypatch):
     monkeypatch.setattr("spark_code.tools.ios_screenshot.describe_image", fake_desc)
     out = await IosScreenshotTool().execute()
     assert "device" in out.lower() and called["d"] is False
+
+
+async def test_ios_network_and_udid_build_argv(monkeypatch):
+    monkeypatch.setattr("spark_code.tools.ios_screenshot.which", lambda n: "/idevicescreenshot")
+    seen = {}
+
+    async def fake_exec(*a, **k):
+        seen["argv"] = a
+        from pathlib import Path as _P
+        _P(a[-1]).write_bytes(b"PNGDATA")  # last arg is the output path
+        return _Proc(0, b"", b"")
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+
+    async def fake_desc(path, prompt=None, **k):
+        return "home screen with icons"
+    monkeypatch.setattr("spark_code.tools.ios_screenshot.describe_image", fake_desc)
+
+    out = await IosScreenshotTool().execute(network=True, udid="ABC123")
+    assert "-n" in seen["argv"] and "-u" in seen["argv"] and "ABC123" in seen["argv"]
+    assert "home screen" in out
+
+
+async def test_ios_usb_default_omits_network_flag(monkeypatch):
+    monkeypatch.setattr("spark_code.tools.ios_screenshot.which", lambda n: "/idevicescreenshot")
+    seen = {}
+
+    async def fake_exec(*a, **k):
+        seen["argv"] = a
+        from pathlib import Path as _P
+        _P(a[-1]).write_bytes(b"PNGDATA")
+        return _Proc(0, b"", b"")
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+
+    async def fake_desc(path, prompt=None, **k):
+        return "x"
+    monkeypatch.setattr("spark_code.tools.ios_screenshot.describe_image", fake_desc)
+
+    await IosScreenshotTool().execute()
+    assert "-n" not in seen["argv"] and "-u" not in seen["argv"]

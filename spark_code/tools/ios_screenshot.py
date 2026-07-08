@@ -31,12 +31,16 @@ class IosScreenshotTool(Tool):
     @property
     def description(self) -> str:
         return ("Capture a screenshot from a paired, trusted real iPhone (via idevicescreenshot) and "
-                 "return a Gemini text description of the screen. Optional: prompt (what to look for).")
+                 "return a Gemini text description of the screen. Works over USB (default) or, with "
+                 "network=true, over Wi-Fi (needs an initial USB pairing + Wi-Fi sync enabled). "
+                 "Optional: prompt (what to look for), network (Wi-Fi), udid (target a specific device).")
 
     @property
     def parameters(self) -> dict:
         return {"type": "object", "properties": {
-            "prompt": {"type": "string", "description": "What to look for / ask about the screen"}}}
+            "prompt": {"type": "string", "description": "What to look for / ask about the screen"},
+            "network": {"type": "boolean", "description": "Capture over Wi-Fi instead of USB (default false)"},
+            "udid": {"type": "string", "description": "Target a specific device by UDID (omit if only one)"}}}
 
     @property
     def is_read_only(self) -> bool:
@@ -46,14 +50,19 @@ class IosScreenshotTool(Tool):
     def requires_permission(self) -> bool:
         return False
 
-    async def execute(self, prompt: str = "", **kwargs) -> str:
+    async def execute(self, prompt: str = "", network=False, udid: str = "", **kwargs) -> str:
         if not which("idevicescreenshot"):
             return ("Error: idevicescreenshot not installed "
                     "(brew install libimobiledevice) — needed for real-iPhone capture.")
+        # `network` may arrive as a real bool or a "true"/"false" string.
+        wifi = str(network).strip().lower() in ("true", "1", "yes", "on")
         path = tempfile.NamedTemporaryFile(suffix=".png", delete=False).name
+        argv = (["idevicescreenshot"]
+                + (["-n"] if wifi else [])
+                + (["-u", udid] if udid else [])
+                + [path])
         proc = await asyncio.create_subprocess_exec(
-            "idevicescreenshot", path,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         out, err = await proc.communicate()
         if proc.returncode != 0 or not os.path.exists(path) or os.path.getsize(path) == 0:
             try:
@@ -61,8 +70,11 @@ class IosScreenshotTool(Tool):
             except OSError:
                 pass
             detail = (err.decode("utf-8", "replace").strip() or "no output")[:300]
-            return (f"No iPhone captured — {detail}. "
-                    f"Pair the iPhone and trust this Mac (unlock the phone), then retry.")
+            hint = ("Pair the iPhone over USB and trust this Mac (unlock the phone). For Wi-Fi "
+                    "(network=true), also enable Wi-Fi sync and keep the phone on this network. "
+                    "idevicescreenshot also needs a mounted Developer Disk Image (connect the phone "
+                    "to Xcode once).")
+            return f"No iPhone captured — {detail}. {hint}"
         try:
             desc = await describe_image(path, prompt or None)
         except VisionError as e:
