@@ -644,6 +644,31 @@ def _context_pct_style(pct: float) -> str:
     return "class:bottom-toolbar.context-red"
 
 
+def _agent_only_servers(config) -> set:
+    """MCP servers marked ``agent_only: true`` in config. Their tools are still
+    threaded to sub-agents (via DispatchAgentTool), but NOT registered on the
+    main model — so the main model can't call them directly. This exists for
+    the browser: a page snapshot is huge, and driving the browser from the
+    local 32K-context model floods and overflows it, so only the Gemini
+    web-driver sub-agent gets the playwright tools."""
+    servers = get(config, "mcp_servers", default={}) or {}
+    return {name for name, conf in servers.items()
+            if isinstance(conf, dict) and conf.get("agent_only")}
+
+
+def _register_mcp_tools(registry, mcp_tools, config) -> int:
+    """Register MCP tools on the main registry, skipping agent-only servers.
+    Returns the number skipped (still available to sub-agents via dispatch)."""
+    agent_only = _agent_only_servers(config)
+    skipped = 0
+    for t in mcp_tools:
+        if getattr(t, "server_name", None) in agent_only:
+            skipped += 1
+            continue
+        registry.register(t)
+    return skipped
+
+
 def build_tools(todo_list: TodoList | None = None, model=None,
                 config: dict | None = None,
                 permissions: "PermissionManager | None" = None,
@@ -2932,9 +2957,10 @@ async def run_interactive(config: dict, resume_session: str = "",
                         utility_model=resolve_utility_for(config, "dispatch", utility_model),
                         mcp_tools=mcp_tools, interactive=True)
 
-    # Register MCP tools
-    for mcp_tool in mcp_tools:
-        tools.register(mcp_tool)
+    # Register MCP tools on the main model — but skip agent-only servers (e.g.
+    # the browser), whose tools go only to sub-agents so their huge outputs
+    # never flood the local model's context.
+    _register_mcp_tools(tools, mcp_tools, config)
 
     # Progress tracking for toolbar
     current_tool = {"name": "", "detail": ""}
@@ -4484,10 +4510,10 @@ async def _one_shot(config: dict, prompt: str, output: str = "text",
                             utility_model=resolve_utility_for(config, "dispatch", utility_model),
                             mcp_tools=mcp_tools, interactive=False)
         # Register MCP tools directly on the lead's own registry too (mirrors
-        # run_interactive ~2872-2873) so the top-level headless agent can call
-        # them itself, not only a dispatched sub-agent.
-        for mcp_tool in mcp_tools:
-            tools.register(mcp_tool)
+        # run_interactive) so the top-level headless agent can call them itself,
+        # not only a dispatched sub-agent — except agent-only servers (e.g. the
+        # browser), which stay sub-agent-only to protect the local context.
+        _register_mcp_tools(tools, mcp_tools, config)
         # Verification habit (Task 6) — see run_interactive for the full rationale.
         test_command = detect_test_command(os.getcwd(), load_instructions(os.getcwd()).text)
 

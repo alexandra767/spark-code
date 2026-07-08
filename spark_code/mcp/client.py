@@ -137,6 +137,11 @@ class MCPTool(Tool):
         return self._name
 
     @property
+    def server_name(self) -> str:
+        """The MCP server this tool came from (used to scope agent-only servers)."""
+        return self._server_name
+
+    @property
     def description(self) -> str:
         return f"[{self._server_name}] {self._description}"
 
