@@ -61,3 +61,14 @@ def test_no_files_returns_empty(tmp_path, monkeypatch):
     got = load_instructions(str(tmp_path / "empty"))
     assert got.text == ""
     assert got.sources == []
+
+
+def test_global_spark_md_loads_from_any_cwd(tmp_path, monkeypatch):
+    # ~/.spark/SPARK.md is Spark-Code's global context — loads regardless of cwd,
+    # and does NOT require a ~/.claude/CLAUDE.md.
+    monkeypatch.setattr(os.path, "expanduser", lambda p: p.replace("~", str(tmp_path / "home")))
+    _write(tmp_path, "home/.spark/SPARK.md", "DGX SPARK KNOWLEDGE")
+    (tmp_path / "work").mkdir()
+    got = load_instructions(str(tmp_path / "work"))
+    assert "DGX SPARK KNOWLEDGE" in got.text
+    assert "~/.spark/SPARK.md" in got.sources

@@ -1,8 +1,10 @@
 """Unified project-instruction loading: SPARK.md + CLAUDE.md hierarchy.
 
-Precedence (first = highest): SPARK.md, project CLAUDE.md (nearest ancestor),
+Precedence (first = highest): project SPARK.md, project CLAUDE.md (nearest
+ancestor), ~/.spark/SPARK.md (global Spark-Code context, loads from any cwd),
 ~/.claude/CLAUDE.md. Mirrors Claude Code's CLAUDE.md discovery so the same
-repos work in both tools.
+repos work in both tools; ~/.spark/SPARK.md is the Spark-Code-only global
+equivalent (doesn't touch Claude Code's ~/.claude/CLAUDE.md).
 """
 
 from __future__ import annotations
@@ -57,6 +59,11 @@ def load_instructions(cwd: str) -> Instructions:
         candidates.append(("SPARK.md", None))
 
     candidates.append(("CLAUDE.md", _find_project_claude_md(cwd)))
+    # Global Spark-Code context — loads from ANY cwd (like ~/.claude/CLAUDE.md)
+    # but Spark-Code-only, so it never bloats Claude Code's global instructions.
+    global_spark = os.path.expanduser(os.path.join("~", ".spark", "SPARK.md"))
+    candidates.append(("~/.spark/SPARK.md",
+                       global_spark if os.path.isfile(global_spark) else None))
     global_path = os.path.expanduser(os.path.join("~", ".claude", "CLAUDE.md"))
     candidates.append(("~/.claude/CLAUDE.md",
                        global_path if os.path.isfile(global_path) else None))
