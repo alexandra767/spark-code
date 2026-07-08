@@ -86,3 +86,17 @@ async def test_headless_refuses_without_confirm(monkeypatch, tmp_path):
     _patch(monkeypatch, tmp_path, steps=steps)
     out = await PlayPublishTool(interactive=False).execute(project=str(tmp_path), package="com.x", track="internal")
     assert "commit" not in steps and "confirm=" in out
+
+
+async def test_non_playerror_post_create_still_deletes_edit(monkeypatch, tmp_path):
+    # a NON-PlayError raised after the edit is created must still discard it (no orphan) and never commit
+    steps = []
+    _patch(monkeypatch, tmp_path, steps=steps)
+
+    async def boom_upload(self, pkg, eid, aab):
+        steps.append("upload")
+        raise ValueError("bad response shape")
+    monkeypatch.setattr("spark_code.play.PlayClient.upload_bundle", boom_upload)
+    out = await PlayPublishTool().execute(project=str(tmp_path), package="com.x", track="internal", confirm="publish")
+    assert "commit" not in steps and "delete" in steps
+    assert "bad response shape" in out

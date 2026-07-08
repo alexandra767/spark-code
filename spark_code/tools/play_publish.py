@@ -103,9 +103,12 @@ class PlayPublishTool(Tool):
                 return summary + tail
             await c.commit_edit(package, edit_id)
             return f"✅ Released version code {vc} to the {track} track for {package}."
-        except PlayError as e:
+        except Exception as e:
+            # ANY post-create failure (PlayError, a transport error, a bad
+            # response, a file-read error) must discard the edit so no orphaned
+            # uncommitted edit is left behind. commit is never reached here.
             try:
                 await c.delete_edit(package, edit_id)
-            except PlayError:
+            except Exception:
                 pass
             return f"Google Play error (nothing published, edit discarded): {e}"
