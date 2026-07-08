@@ -83,7 +83,10 @@ class PlayClient:
         finally:
             try:
                 await self.delete(f"/applications/{package}/edits/{eid}")
-            except PlayError:
+            except Exception:
+                # Best-effort cleanup: a transient network error here must never
+                # mask a read error, nor turn a good read into a raised exception
+                # (the uncommitted edit auto-expires on Play's side).
                 pass
         out = []
         for t in data.get("tracks", []):
