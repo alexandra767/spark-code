@@ -766,8 +766,10 @@ def build_tools(todo_list: TodoList | None = None, model=None,
     # costs nothing and needs no host-capability probe here.
     from .tools.android_screenshot import AndroidScreenshotTool
     from .tools.ios_screenshot import IosScreenshotTool
+    from .tools.watch_phone import WatchPhoneTool
     registry.register(AndroidScreenshotTool())
     registry.register(IosScreenshotTool())
+    registry.register(WatchPhoneTool())
     if model is not None and config is not None:
         from .dispatch import DispatchAgentTool
         registry.register(DispatchAgentTool(
