@@ -11,6 +11,7 @@ import jwt as pyjwt
 
 API = "https://androidpublisher.googleapis.com/androidpublisher/v3"
 SCOPE = "https://www.googleapis.com/auth/androidpublisher"
+TESTING_TRACKS = frozenset({"internal", "alpha", "beta"})
 _DEFAULT_SA_CANDIDATES = [
     str(Path.home() / ".playconsole" / "service-account.json"),
     str(Path.home() / "CodingProjects" / "revdash" / "secrets" / "play-rtdn-sa.json"),
@@ -96,3 +97,32 @@ class PlayClient:
                         "version_name": rel.get("name"),
                         "version_codes": rel.get("versionCodes") or []})
         return out
+
+    async def create_edit(self, package: str) -> str:
+        return (await self.post(f"/applications/{package}/edits", {}))["id"]
+
+    async def delete_edit(self, package: str, edit_id: str) -> None:
+        await self.delete(f"/applications/{package}/edits/{edit_id}")
+
+    async def upload_bundle(self, package: str, edit_id: str, aab_path: str) -> int:
+        tok = await self._token()
+        url = ("https://androidpublisher.googleapis.com/upload/androidpublisher/v3/"
+               f"applications/{package}/edits/{edit_id}/bundles?uploadType=media")
+        data = Path(aab_path).read_bytes()
+        async with httpx.AsyncClient(timeout=600.0) as c:
+            r = await c.post(url, headers={"Authorization": f"Bearer {tok}",
+                                           "Content-Type": "application/octet-stream"}, content=data)
+        if r.status_code >= 400:
+            raise PlayError(f"Play bundle upload → {r.status_code}: {r.text[:300]}")
+        return int(r.json()["versionCode"])
+
+    async def assign_track(self, package: str, edit_id: str, track: str, version_code: int) -> None:
+        body = {"track": track,
+                "releases": [{"versionCodes": [str(version_code)], "status": "completed"}]}
+        await self._req("PUT", f"/applications/{package}/edits/{edit_id}/tracks/{track}", body)
+
+    async def validate_edit(self, package: str, edit_id: str) -> dict:
+        return await self.post(f"/applications/{package}/edits/{edit_id}:validate", {})
+
+    async def commit_edit(self, package: str, edit_id: str) -> dict:
+        return await self.post(f"/applications/{package}/edits/{edit_id}:commit", {})
