@@ -757,6 +757,17 @@ def build_tools(todo_list: TodoList | None = None, model=None,
     if platform.system() == "Darwin" and shutil.which("xcrun"):
         from .tools.simulator import SimulatorScreenshotTool
         registry.register(SimulatorScreenshotTool(model=model))
+    # Phase (phone-screenshot vision): real-device screen capture, described
+    # via Gemini vision (spark_code.vision.describe_image) rather than fed
+    # directly to the primary model. Unlike SimulatorScreenshotTool above,
+    # these are NOT gated on macOS/Xcode — adb works cross-platform and both
+    # tools degrade to a clean "no device/binary" message on their own when
+    # the underlying tool isn't present, so registering them unconditionally
+    # costs nothing and needs no host-capability probe here.
+    from .tools.android_screenshot import AndroidScreenshotTool
+    from .tools.ios_screenshot import IosScreenshotTool
+    registry.register(AndroidScreenshotTool())
+    registry.register(IosScreenshotTool())
     if model is not None and config is not None:
         from .dispatch import DispatchAgentTool
         registry.register(DispatchAgentTool(
