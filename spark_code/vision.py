@@ -23,8 +23,12 @@ class VisionError(Exception):
     pass
 
 
-async def describe_image(image_path, prompt=None, provider_name="gemini-pro", config=None) -> str:
+async def describe_image(image_path, prompt=None, provider_name=None, config=None) -> str:
     cfg = config or load_config()
+    if provider_name is None:
+        # Configurable cost knob: set `model.vision_provider` (e.g. "gemini" for
+        # cheap/fast flash, "gemini-pro" for detailed). Defaults to gemini-pro.
+        provider_name = (cfg.get("model", {}) or {}).get("vision_provider") or "gemini-pro"
     pconf = (cfg.get("providers", {}) or {}).get(provider_name)
     if not pconf:
         raise VisionError(f"vision provider '{provider_name}' is not configured in ~/.spark/config.yaml")

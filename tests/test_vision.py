@@ -75,3 +75,26 @@ async def test_empty_description_raises(tmp_path, monkeypatch):
     monkeypatch.setattr("spark_code.vision.ModelClient", FakeClient)
     with pytest.raises(VisionError):
         await describe_image(str(img), config=CFG)
+
+
+async def test_describe_image_honors_config_vision_provider(tmp_path, monkeypatch):
+    # cost knob: model.vision_provider picks the model (e.g. cheap flash) when
+    # the caller doesn't pass one explicitly.
+    img = tmp_path / "s.png"
+    img.write_bytes(b"x")
+    cfg = {"model": {"vision_provider": "gemini"},
+           "providers": {"gemini": {"endpoint": "e", "model": "flash", "api_key": "k"}}}
+    seen = {}
+
+    class FakeClient:
+        def __init__(self, **kw):
+            seen["provider"] = kw.get("provider")
+
+        async def chat(self, messages, tools=None, stream=True):
+            yield {"type": "text", "content": "ok"}
+
+        async def close(self):
+            pass
+    monkeypatch.setattr("spark_code.vision.ModelClient", FakeClient)
+    await describe_image(str(img), config=cfg)
+    assert seen["provider"] == "gemini"
