@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+from urllib.parse import quote
 
 from ..appstore import AscClient, AscError
 from ..xcbuild import (
@@ -83,14 +84,14 @@ class AppStoreBuildUploadTool(Tool):
                 exp = str(Path(td) / "export")
                 opts = str(Path(td) / "ExportOptions.plist")
                 # 1. archive
-                rc, out = await run_step(archive_argv(project, scheme, arch, is_ws))
+                rc, out, err = await run_step(archive_argv(project, scheme, arch, is_ws))
                 if rc != 0:
-                    return f"Archive failed (rc {rc}). Last output:\n{out[-1500:]}"
+                    return f"Archive failed (rc {rc}). Last output:\n{(out + err)[-1500:]}"
                 # 2. export
                 write_default_export_options(opts)
-                rc, out = await run_step(export_argv(arch, exp, opts))
+                rc, out, err = await run_step(export_argv(arch, exp, opts))
                 if rc != 0:
-                    return f"Export failed (rc {rc}). Last output:\n{out[-1500:]}"
+                    return f"Export failed (rc {rc}). Last output:\n{(out + err)[-1500:]}"
                 # The real xcodebuild -exportArchive writes the .ipa into `exp`
                 # as a side effect of the (real) subprocess; find it. If export
                 # reported success (rc 0) but produced no .ipa, that's a real
@@ -102,17 +103,19 @@ class AppStoreBuildUploadTool(Tool):
                 props = read_archive_props(arch)
                 # 3. validate (creates no build)
                 c = AscClient()
-                key_id = c._config().get("key_id")
-                issuer_id = c._config().get("issuer_id")
-                rc, out = await run_step(altool_argv("validate", ipa, key_id, issuer_id))
+                cfg = c._config()
+                key_id = c._cfg_val(cfg, "key_id")
+                issuer_id = c._cfg_val(cfg, "issuer_id")
+                rc, out, err = await run_step(altool_argv("validate", ipa, key_id, issuer_id))
                 ok, errs = parse_altool_json(out)
                 if rc != 0 or not ok:
-                    return "Validation failed:\n" + "\n".join(f"  - {e}" for e in (errs or [f"rc {rc}"]))
+                    detail = errs or [err.strip()[-400:] or f"rc {rc}"]
+                    return "Validation failed:\n" + "\n".join(f"  - {e}" for e in detail)
                 # 4. collision check
                 app_id = await c.resolve_app(props["bundle_id"])
-                q = (f"/v1/builds?filter[app]={app_id}"
-                     f"&filter[preReleaseVersion.version]={props['marketing_version']}"
-                     f"&filter[version]={props['build_number']}")
+                q = (f"/v1/builds?filter[app]={quote(app_id, safe='')}"
+                     f"&filter[preReleaseVersion.version]={quote(props['marketing_version'] or '', safe='')}"
+                     f"&filter[version]={quote(props['build_number'] or '', safe='')}")
                 existing = (await c.get(q)).get("data", [])
                 if existing:
                     return (f"Build {props['build_number']} for {props['marketing_version']} already "
@@ -128,10 +131,11 @@ class AppStoreBuildUploadTool(Tool):
                         return summary + "\n\nHeadless: refusing. Re-invoke with confirm=\"upload\" to upload."
                     return summary + "\n\nThis uploads a real build to Apple. Re-invoke with confirm=\"upload\"."
                 # 6. upload (the one outward step)
-                rc, out = await run_step(altool_argv("upload", ipa, key_id, issuer_id))
+                rc, out, err = await run_step(altool_argv("upload", ipa, key_id, issuer_id))
                 ok, errs = parse_altool_json(out)
                 if rc != 0 or not ok:
-                    return "Upload failed:\n" + "\n".join(f"  - {e}" for e in (errs or [f"rc {rc}"]))
+                    detail = errs or [err.strip()[-400:] or f"rc {rc}"]
+                    return "Upload failed:\n" + "\n".join(f"  - {e}" for e in detail)
                 return (f"✅ Uploaded {props['bundle_id']} {props['marketing_version']} "
                         f"(build {props['build_number']}). It will take a few minutes to process — "
                         f"run appstore_status to watch it reach VALID, then appstore_submit when ready.")

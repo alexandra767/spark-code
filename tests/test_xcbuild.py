@@ -54,6 +54,22 @@ def test_parse_altool_json_success_and_errors():
         okn, errsn = parse_altool_json(blob)
         assert okn is False and errsn
 
+
+def test_parse_altool_json_surfaces_userinfo_reason():
+    import json as _json
+    blob = _json.dumps({"product-errors": [{
+        "message": "The provided entity includes an attribute with a value that has already been used",
+        "user-info": {
+            "NSLocalizedFailureReason": "The bundle version must be higher than the previously uploaded version: '8'.",
+            "detail": "The bundle version must be higher than the previously uploaded version."}}]})
+    ok, errs = parse_altool_json(blob)
+    assert ok is False and len(errs) == 1
+    assert "bundle version must be higher" in errs[0]  # actionable reason surfaced, not just generic message
+
+def test_parse_altool_json_generic_message_without_userinfo():
+    ok, errs = parse_altool_json('{"product-errors":[{"message":"Validation failed"}]}')
+    assert ok is False and errs == ["Validation failed"]
+
 def test_read_archive_props(tmp_path):
     arch = tmp_path / "A.xcarchive"
     arch.mkdir()
@@ -69,8 +85,9 @@ def test_read_archive_props_missing_archive_raises_xcbuilderror(tmp_path):
         read_archive_props(str(missing))
 
 async def test_run_step_captures_output_and_rc():
-    rc, out = await run_step(["/bin/sh", "-c", "echo hello; exit 3"])
+    rc, out, err = await run_step(["/bin/sh", "-c", "echo hello; echo oops >&2; exit 3"])
     assert rc == 3 and "hello" in out
+    assert "oops" in err and "oops" not in out  # streams captured separately
 
 async def test_run_step_timeout_raises():
     with pytest.raises(XcBuildError):

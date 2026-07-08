@@ -19,7 +19,7 @@ def _patch(monkeypatch, *, validate_ok=True, existing_build=False, steps=None, c
                 steps.append("validate")
             elif "--upload-app" in argv:
                 steps.append("upload")
-        return 0, "{}"
+        return 0, "{}", ""
 
     def fake_parse(out):
         return (validate_ok, [] if validate_ok else ["bad binary"])

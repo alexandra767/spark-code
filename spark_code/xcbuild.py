@@ -46,8 +46,22 @@ def parse_altool_json(stdout) -> tuple[bool, list[str]]:
         return False, ["Unexpected altool output (not a JSON object)"]
     errs = data.get("product-errors") or []
     if errs:
-        return False, [e.get("message", str(e)) if isinstance(e, dict) else str(e) for e in errs]
+        return False, [_err_message(e) for e in errs]
     return True, []
+
+
+def _err_message(e) -> str:
+    """Best actionable message for one altool product-error. altool's top-level
+    `message` is often generic ("Validation failed"); the specific, fixable
+    reason lives in `user-info` (NSLocalizedFailureReason / detail)."""
+    if not isinstance(e, dict):
+        return str(e)
+    ui = e.get("user-info") or {}
+    reason = ui.get("NSLocalizedFailureReason") or ui.get("detail")
+    msg = e.get("message") or ui.get("NSLocalizedDescription") or "Unknown error"
+    if reason and reason != msg:
+        return f"{msg} — {reason}"
+    return msg
 
 
 def read_archive_props(archive_path) -> dict:
@@ -62,14 +76,20 @@ def read_archive_props(archive_path) -> dict:
             "build_number": props.get("CFBundleVersion")}
 
 
-async def run_step(argv, cwd=None, timeout=1800.0) -> tuple[int, str]:
+async def run_step(argv, cwd=None, timeout=1800.0) -> tuple[int, str, str]:
+    """Run a subprocess to completion. Returns (returncode, stdout, stderr).
+
+    stdout and stderr are captured SEPARATELY (not merged): `altool
+    --output-format json` writes its JSON result to stdout and human
+    progress/errors to stderr, so a merged stream would corrupt the JSON parse.
+    """
     proc = await asyncio.create_subprocess_exec(
         *argv, cwd=cwd,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     try:
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
         proc.kill()
         await proc.wait()
         raise XcBuildError(f"step timed out after {timeout}s: {' '.join(map(str, argv[:3]))} …")
-    return proc.returncode, out.decode("utf-8", "replace")
+    return proc.returncode, out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
