@@ -651,7 +651,8 @@ def build_tools(todo_list: TodoList | None = None, model=None,
                 console: Console | None = None,
                 agent_defs: dict | None = None,
                 utility_model=None,
-                mcp_tools=None) -> ToolRegistry:
+                mcp_tools=None,
+                interactive: bool = True) -> ToolRegistry:
     """Register all built-in tools.
 
     ``todo_list`` is the session-scoped live checklist backing ``todo_write``.
@@ -687,6 +688,14 @@ def build_tools(todo_list: TodoList | None = None, model=None,
     registry never registers MCP tools directly; the caller (``run_interactive``
     / ``_one_shot``) still registers them onto its own top-level registry
     itself, exactly as before this parameter existed.
+
+    ``interactive`` (App Store submission task) is threaded into
+    ``AppStoreSubmitTool`` so a headless run (``_one_shot``, ``interactive=
+    False``) additionally refuses to submit for review even when asked to —
+    it can only ever produce the no-op summary — while the interactive
+    session (``run_interactive``, ``interactive=True``) may proceed given an
+    explicit ``confirm="submit"``. Defaults to ``True`` so sub-agents built
+    from a bare ``build_tools()`` (no caller override) keep today's behavior.
     """
     registry = ToolRegistry()
     registry.register(ReadFileTool())
@@ -720,6 +729,8 @@ def build_tools(todo_list: TodoList | None = None, model=None,
     registry.register(RagSearchTool())
     from .tools.appstore_status import AppStoreStatusTool
     registry.register(AppStoreStatusTool())
+    from .tools.appstore_submit import AppStoreSubmitTool
+    registry.register(AppStoreSubmitTool(interactive=interactive))
     # Phase 4 Task 3: always registered (no startup network call — see
     # codesearch.py) unless the user explicitly disabled it; away from the
     # RAG host it just returns a friendly unavailable message per-query.
@@ -2879,7 +2890,7 @@ async def run_interactive(config: dict, resume_session: str = "",
                         permissions=permissions, plan_state=plan_state,
                         console=console, agent_defs=agent_defs,
                         utility_model=resolve_utility_for(config, "dispatch", utility_model),
-                        mcp_tools=mcp_tools)
+                        mcp_tools=mcp_tools, interactive=True)
 
     # Register MCP tools
     for mcp_tool in mcp_tools:
@@ -4424,7 +4435,7 @@ async def _one_shot(config: dict, prompt: str, output: str = "text",
         tools = build_tools(todo_list=todo_list, model=model, config=config,
                             permissions=permissions, agent_defs=agent_defs,
                             utility_model=resolve_utility_for(config, "dispatch", utility_model),
-                            mcp_tools=mcp_tools)
+                            mcp_tools=mcp_tools, interactive=False)
         # Register MCP tools directly on the lead's own registry too (mirrors
         # run_interactive ~2872-2873) so the top-level headless agent can call
         # them itself, not only a dispatched sub-agent.
