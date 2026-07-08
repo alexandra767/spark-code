@@ -49,6 +49,10 @@ def test_parse_altool_json_success_and_errors():
     assert ok is False and errs == ["bad binary"]
     ok2, errs2 = parse_altool_json("not json")
     assert ok2 is False and errs2
+    # non-dict top-level JSON must not crash — fails safe
+    for blob in ("[]", "null", '"oops"'):
+        okn, errsn = parse_altool_json(blob)
+        assert okn is False and errsn
 
 def test_read_archive_props(tmp_path):
     arch = tmp_path / "A.xcarchive"

@@ -42,6 +42,8 @@ def parse_altool_json(stdout) -> tuple[bool, list[str]]:
         data = json.loads(stdout)
     except (json.JSONDecodeError, TypeError):
         return False, ["Could not parse altool output"]
+    if not isinstance(data, dict):
+        return False, ["Unexpected altool output (not a JSON object)"]
     errs = data.get("product-errors") or []
     if errs:
         return False, [e.get("message", str(e)) if isinstance(e, dict) else str(e) for e in errs]
