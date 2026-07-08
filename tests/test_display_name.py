@@ -51,6 +51,20 @@ def test_banner_shows_display_name_and_hides_alias():
     assert "qwen3.5:122b" not in out  # the alias never appears
 
 
+def test_status_bar_precedence_prefers_display_name():
+    # The bottom status bar (cli status_callback) passes
+    # `display_name or name` to toolbar_status_segments — the same precedence
+    # used for /model and /benchmark. Verify the toolbar renders that name and
+    # never the wire alias.
+    from spark_code.ui.input import toolbar_status_segments
+    cfg = resolve_provider(_cfg("Qwen3-Coder-Next"))["model"]
+    shown = cfg.get("display_name") or cfg.get("name")
+    assert shown == "Qwen3-Coder-Next"
+    segs = toolbar_status_segments(model_name=shown, provider_name="llm", turns=3)
+    text = "".join(t for _s, t in segs)
+    assert "Qwen3-Coder-Next" in text and "qwen3.5:122b" not in text
+
+
 def test_banner_without_display_name_keeps_served_as():
     cfg = resolve_provider(_cfg())  # no display_name
     out = _banner_text(cfg, real_model_name="Qwen3-Coder-Next-int4-AutoRound")

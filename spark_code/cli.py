@@ -1214,8 +1214,12 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
             # Show current model info. Use the name resolved once at startup
             # (avoids a blocking 2s HTTP call on the event loop every /model).
             config_name = get(config, "model", "name")
+            display_name = get(config, "model", "display_name", default="")
             real_name = getattr(model, "real_model_name", "") or None
-            if real_name and real_name != config_name:
+            if display_name:
+                console.print(f"Model: {display_name}")
+                console.print(f"Wire id: {config_name} [#4c566a](sent to the server)[/#4c566a]")
+            elif real_name and real_name != config_name:
                 console.print(f"Model: {real_name}")
                 console.print(f"Served as: {config_name} [#4c566a](alias)[/#4c566a]")
             else:
@@ -3073,7 +3077,8 @@ async def run_interactive(config: dict, resume_session: str = "",
         """Line 1: model + turns + speed/cost + context %."""
         context_pct, context_style = _context_pct_and_style()
         return toolbar_status_segments(
-            model_name=get(config, "model", "name", default=""),
+            model_name=(get(config, "model", "display_name", default="")
+                        or get(config, "model", "name", default="")),
             provider_name=get(config, "model", "provider", default=""),
             turns=context.turn_count,
             speed_str=session_stats.format_speed() if session_stats else "",
@@ -3585,7 +3590,7 @@ async def run_interactive(config: dict, resume_session: str = "",
                     console.print(f"  [#88c0d0]Total time:[/#88c0d0] [#d8dee9]{total_time:.2f}s[/#d8dee9]")
                     console.print(f"  [#88c0d0]Output:[/#88c0d0] [#d8dee9]~{int(est_tokens)} tokens ({total_chars} chars)[/#d8dee9]")
                     console.print(f"  [#88c0d0]Speed:[/#88c0d0] [#a3be8c]{tps:.1f} tokens/sec[/#a3be8c]")
-                    console.print(f"  [#88c0d0]Model:[/#88c0d0] [#d8dee9]{_esc(str(get(config, 'model', 'name')))}[/#d8dee9]")
+                    console.print(f"  [#88c0d0]Model:[/#88c0d0] [#d8dee9]{_esc(str(get(config, 'model', 'display_name', default='') or get(config, 'model', 'name')))}[/#d8dee9]")
 
                 elif result == "__BENCHMARK__":
                     import time as _btime
