@@ -71,6 +71,12 @@ class PlayPublishTool(Tool):
         if track not in TESTING_TRACKS:
             return (f"Refusing: track '{track}' is not allowed. This tool only releases to "
                     f"testing tracks ({', '.join(sorted(TESTING_TRACKS))}) — production is out of scope.")
+        # Fail fast on a missing/invalid Play service account BEFORE the
+        # multi-minute gradle build (resolving the SA is cheap).
+        try:
+            c = PlayClient()
+        except PlayError as e:
+            return f"Google Play error: {e}"
         # 1. build the signed AAB
         try:
             rc, out, err = await run_step(["./gradlew", f"{module}:bundleRelease"], cwd=project)
@@ -84,7 +90,6 @@ class PlayPublishTool(Tool):
             return "Build succeeded but no .aab was found under build/outputs/bundle/release/."
         aab = str(aabs[0])
         # 2. drive the edit; any pre-commit failure deletes it (nothing published)
-        c = PlayClient()
         try:
             edit_id = await c.create_edit(package)
         except PlayError as e:
