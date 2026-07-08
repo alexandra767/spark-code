@@ -164,28 +164,41 @@ async def test_screenshot_reports_success_but_writes_no_file(monkeypatch):
     assert "no image" in result.lower()
 
 
-async def test_non_vision_model_saves_file_and_returns_text_message(monkeypatch):
+async def test_non_vision_model_describes_via_gemini_and_displays(monkeypatch):
+    # Text-only primary now goes through Gemini + inline display (unified with
+    # the phone screenshot tools), not a useless "no vision" placeholder.
+    from spark_code.vision import DISPLAY_IMAGE_SENTINEL
     monkeypatch.setattr("spark_code.tools.simulator.subprocess.run", _happy_run())
+
+    async def fake_desc(path, prompt=None, **k):
+        fake_desc.path = path
+        return "A SwiftUI list with three rows."
+    monkeypatch.setattr("spark_code.vision.describe_image", fake_desc)
+
     tool = SimulatorScreenshotTool(model=FakeModel(False))
     result = await tool.execute()
 
-    assert result.startswith("current model has no vision; screenshot saved to ")
-    saved_path = result.split("screenshot saved to ", 1)[1]
-    assert os.path.exists(saved_path)
-    with open(saved_path, "rb") as f:
-        assert f.read() == FAKE_PNG_BYTES
+    assert "SwiftUI list" in result and DISPLAY_IMAGE_SENTINEL in result
+    saved_path = result.split(DISPLAY_IMAGE_SENTINEL, 1)[1].strip()
+    assert os.path.exists(saved_path) and saved_path == fake_desc.path
     os.remove(saved_path)
 
 
 async def test_no_model_at_all_treated_as_non_vision(monkeypatch):
-    """Sub-agent tool registries pass model=None — must degrade gracefully,
-    never raise on the getattr(self.model, "supports_vision", False) check."""
+    """Sub-agent tool registries pass model=None — must degrade gracefully
+    (getattr(self.model, "supports_vision", False) is False) and use Gemini."""
+    from spark_code.vision import DISPLAY_IMAGE_SENTINEL
     monkeypatch.setattr("spark_code.tools.simulator.subprocess.run", _happy_run())
+
+    async def fake_desc(path, prompt=None, **k):
+        return "home screen"
+    monkeypatch.setattr("spark_code.vision.describe_image", fake_desc)
+
     tool = SimulatorScreenshotTool(model=None)
     result = await tool.execute()
 
-    assert result.startswith("current model has no vision; screenshot saved to ")
-    os.remove(result.split("screenshot saved to ", 1)[1])
+    assert DISPLAY_IMAGE_SENTINEL in result
+    os.remove(result.split(DISPLAY_IMAGE_SENTINEL, 1)[1].strip())
 
 
 async def test_vision_model_sentinel_and_png_readback(monkeypatch):

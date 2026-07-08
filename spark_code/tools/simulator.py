@@ -107,7 +107,15 @@ class SimulatorScreenshotTool(Tool):
             return "Error: screenshot command reported success but produced no image"
 
         if not getattr(self.model, "supports_vision", False):
-            return f"current model has no vision; screenshot saved to {tmp_path}"
+            # Text-only primary: use Gemini as the eyes and show the image
+            # inline — unified with android_screenshot/ios_screenshot instead of
+            # handing the model an unusable "saved to <path>" placeholder.
+            from ..vision import DISPLAY_IMAGE_SENTINEL, VisionError, describe_image
+            try:
+                desc = await describe_image(tmp_path)
+            except VisionError as e:
+                return f"iOS Simulator screenshot saved to {tmp_path} (vision failed: {e})"
+            return f"📱 iOS Simulator — Gemini sees:\n{desc}{DISPLAY_IMAGE_SENTINEL}{tmp_path}"
 
         return f"{SCREENSHOT_SENTINEL_PREFIX}{tmp_path}"
 
