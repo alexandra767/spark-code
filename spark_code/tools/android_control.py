@@ -127,7 +127,9 @@ class AndroidControlTool(Tool):
 
     @property
     def description(self) -> str:
-        return ("Control a connected Android phone. "
+        return ("Control a connected ANDROID phone (via adb). ANDROID ONLY — if the user says "
+                "iPhone / iPad / iOS, do NOT use this tool: use ios_launch to open an app or "
+                "ios_screenshot to view the screen. "
                 "TO OPEN/LAUNCH/START AN APP (e.g. 'open gigledger', 'open boonpoint'): use "
                 "action='launch' with app=<name> in ONE call. It launches the app directly and "
                 "immediately — do NOT take a screenshot first, do NOT press home, do NOT use "

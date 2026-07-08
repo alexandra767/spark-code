@@ -49,8 +49,9 @@ class AndroidScreenshotTool(Tool):
 
     @property
     def description(self) -> str:
-        return ("Capture a screenshot from a connected Android device (USB debugging) and return "
-                 "a Gemini-generated text description of what's on screen. Optional: device (serial), "
+        return ("Capture a screenshot from a connected ANDROID device (USB debugging) and return "
+                 "a Gemini-generated text description of what's on screen. ANDROID ONLY — for an "
+                 "iPhone/iPad use ios_screenshot instead. Optional: device (serial), "
                  "prompt (what to look for).")
 
     @property

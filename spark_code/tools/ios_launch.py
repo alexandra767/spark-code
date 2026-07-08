@@ -107,11 +107,12 @@ class IosLaunchTool(Tool):
 
     @property
     def description(self) -> str:
-        return ("Open/launch an app on a connected REAL iPhone/iPad (NOT the Simulator). "
-                "app = app name or bundle id (e.g. 'dometic', 'gigledger'). Brings it to the "
-                "foreground on the physical device via Apple devicectl (USB or Wi-Fi, iOS 17+). "
-                "This is how you OPEN an app on iOS. It only LAUNCHES — it cannot tap/type/scroll; "
-                "use ios_screenshot to see the screen afterward.")
+        return ("Open/launch an app on the user's REAL iPhone or iPad (iOS). USE THIS whenever the "
+                "user says iPhone / iPad / iOS and wants to open an app — do NOT use android_control "
+                "(that's the Android phone) and NOT the Simulator. app = app name or bundle id (e.g. "
+                "'dometic', 'gigledger'). Brings it to the foreground on the physical device via Apple "
+                "devicectl (USB or Wi-Fi, iOS 17+). It only LAUNCHES — it cannot tap/type/scroll; use "
+                "ios_screenshot to see the screen afterward.")
 
     @property
     def parameters(self) -> dict:
