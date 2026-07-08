@@ -5,8 +5,6 @@ a sub-agent to run on a configured provider (e.g. "gemini-pro") instead of
 the lead's model.
 """
 
-from pathlib import Path
-import pytest
 from spark_code.agents_registry import _parse_agent_def
 
 
