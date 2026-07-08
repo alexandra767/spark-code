@@ -26,6 +26,7 @@ wrapper around it.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import secrets
 import subprocess
@@ -34,10 +35,13 @@ from rich.console import Console
 
 from .agent import Agent, _truncate_result
 from .agents_registry import AgentDef
-from .config import get, resolve_write_roots
+from .config import get, load_keys, resolve_provider_key, resolve_write_roots
 from .context import Context
+from .model import ModelClient
 from .permissions import PermissionManager
 from .tools.base import Tool, ToolRegistry
+
+logger = logging.getLogger(__name__)
 
 # Sub-agent transcripts get the tight 8K head+tail budget (also declared in
 # agent.TOOL_RESULT_BUDGETS so the LEAD truncates the returned summary the same
@@ -377,6 +381,45 @@ def _build_custom_registry(agent_def: AgentDef,
     return sub
 
 
+def _resolve_subagent_model(custom, model, utility_model, config):
+    """Pick the ModelClient a custom sub-agent runs on.
+
+    Returns ``(chosen_model, owns_client)``. ``owns_client=True`` means the
+    CALLER must close ``chosen_model`` after the run — it was built here,
+    unlike the caller-managed lead ``model`` / ``utility_model``.
+
+    ``custom.provider`` (Phase 6 Task 1) takes priority when set and names a
+    provider present in ``config["providers"]``: a brand-new ``ModelClient``
+    is built for it (mirrors ``cli.py``'s ``_model_factory``). An unknown or
+    missing provider name falls back to the lead's primary ``model`` — this
+    must never raise, so a bad/typo'd provider name in a ``.spark/agents/*.md``
+    def degrades gracefully instead of crashing dispatch. With no provider,
+    behavior is unchanged from before this feature: ``model_hint == "utility"``
+    routes to ``utility_model``, everything else uses the lead ``model``.
+    """
+    if custom is not None and getattr(custom, "provider", None):
+        name = custom.provider
+        pconf = (config.get("providers", {}) or {}).get(name)
+        if not pconf:
+            logger.warning("agent '%s': unknown provider '%s' — using primary model",
+                           custom.name, name)
+            return model, False
+        client = ModelClient(
+            endpoint=pconf.get("endpoint", "http://localhost:11434"),
+            model=pconf.get("model", "unknown"),
+            temperature=pconf.get("temperature", 0.7),
+            max_tokens=pconf.get("max_tokens", 8192),
+            api_key=resolve_provider_key(name, pconf, load_keys()),
+            provider=name,
+            timeout=float(pconf.get("timeout", 300)),
+            supports_vision=bool(pconf.get("vision", False)),
+        )
+        return client, True
+    if custom is not None and custom.model_hint == "utility" and utility_model is not None:
+        return utility_model, False
+    return model, False
+
+
 async def run_subagent(model, prompt: str, agent_type: str, config: dict,
                        lead_mode: str,
                        agent_defs: dict[str, AgentDef] | None = None,
@@ -436,12 +479,13 @@ async def run_subagent(model, prompt: str, agent_type: str, config: dict,
         if custom is not None:
             registry = _build_custom_registry(custom)
             system_prompt = _SUBAGENT_BASE_PROMPT + "\n\n" + custom.system_prompt
-            chosen_model = (utility_model if custom.model_hint == "utility"
-                            and utility_model is not None else model)
+            chosen_model, _owns_subagent_model = _resolve_subagent_model(
+                custom, model, utility_model, config)
         else:
             registry = _build_subagent_registry(agent_type)
             system_prompt = _SUBAGENT_BASE_PROMPT + _SUBAGENT_TYPE_PROMPTS[agent_type]
             chosen_model = model
+            _owns_subagent_model = False
 
         semaphore = _get_semaphore(config)
         async with semaphore:
@@ -496,6 +540,18 @@ async def run_subagent(model, prompt: str, agent_type: str, config: dict,
                 if worktree_path is not None:
                     await _remove_worktree(repo_root, worktree_path, force=True)
                 raise
+            finally:
+                # Only a provider-built client is ours to close (owns_client
+                # is True only from _resolve_subagent_model's provider path)
+                # — the lead's shared model and utility_model are
+                # caller-managed and must NEVER be closed here. Runs on both
+                # the success and the crash path above, so a provider client
+                # is never leaked even when sub_agent.run() raises.
+                if _owns_subagent_model:
+                    try:
+                        await chosen_model.close()
+                    except Exception:
+                        pass
     except Exception as e:  # noqa: BLE001 — must never escape into the lead loop
         return f"[dispatch_agent error] {type(e).__name__}: {e}"
 
