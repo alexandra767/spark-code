@@ -78,6 +78,10 @@ class AgentDef:
     # non-bypassable property (see module docstring + dispatch.py).
     base_type: str = "explore"
     source: str = "project"
+    # Phase 6 Task 1: Optional configured provider name to run this sub-agent on
+    # (e.g. "gemini-pro"). None => use the lead's model (or utility per model_hint).
+    # Validated at dispatch time against config["providers"], not here.
+    provider: str | None = None
 
     @property
     def is_read_only(self) -> bool:
@@ -160,6 +164,10 @@ def _parse_agent_def(path: Path, source: str) -> AgentDef | None:
             path, model_hint, ", ".join(_VALID_MODEL_HINTS))
         model_hint = None
 
+    # Phase 6 Task 1: parse optional provider field
+    raw_provider = meta.get("provider")
+    provider = raw_provider.strip() if isinstance(raw_provider, str) and raw_provider.strip() else None
+
     description = meta.get("description", "") or ""
     if not isinstance(description, str):
         description = str(description)
@@ -172,6 +180,7 @@ def _parse_agent_def(path: Path, source: str) -> AgentDef | None:
         model_hint=model_hint,
         base_type=base_type,
         source=source,
+        provider=provider,
     )
 
 
