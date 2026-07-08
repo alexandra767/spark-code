@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
+from urllib.parse import quote
 
 import httpx
 import jwt as pyjwt
@@ -28,24 +29,34 @@ class AscClient:
             self._cfg = json.loads(p.read_text())
         return self._cfg
 
+    @staticmethod
+    def _cfg_val(cfg: dict, key: str) -> str:
+        try:
+            return cfg[key]
+        except KeyError:
+            raise AscError(f"ASC config missing '{key}'") from None
+
     def _private_key(self) -> bytes:
         cfg = self._config()
-        kf = Path(cfg["key_file"]).expanduser()
-        for cand in (kf, self._dir / cfg["key_file"], self._dir / "private_keys" / cfg["key_file"]):
+        key_file = self._cfg_val(cfg, "key_file")
+        kf = Path(key_file).expanduser()
+        for cand in (kf, self._dir / key_file, self._dir / "private_keys" / key_file):
             if cand.exists():
                 return cand.read_bytes()
-        raise AscError(f"ASC private key not found: {cfg['key_file']}")
+        raise AscError(f"ASC private key not found: {key_file}")
 
     def _token(self) -> str:
         now = time.time()
         if self._tok and now < self._tok_exp - 60:
             return self._tok
         cfg = self._config()
+        issuer_id = self._cfg_val(cfg, "issuer_id")
+        key_id = self._cfg_val(cfg, "key_id")
         iat = int(now)
         self._tok = pyjwt.encode(
-            {"iss": cfg["issuer_id"], "iat": iat, "exp": iat + 1200, "aud": "appstoreconnect-v1"},
+            {"iss": issuer_id, "iat": iat, "exp": iat + 1200, "aud": "appstoreconnect-v1"},
             self._private_key(), algorithm="ES256",
-            headers={"kid": cfg["key_id"], "typ": "JWT"})
+            headers={"kid": key_id, "typ": "JWT"})
         self._tok_exp = iat + 1200
         return self._tok
 
@@ -69,9 +80,10 @@ class AscClient:
         return await self._req("PATCH", path, body)
 
     async def resolve_app(self, identifier: str) -> str:
-        data = (await self.get(f"/v1/apps?filter[bundleId]={identifier}&limit=2")).get("data", [])
+        enc = quote(identifier, safe="")
+        data = (await self.get(f"/v1/apps?filter[bundleId]={enc}&limit=2")).get("data", [])
         if not data:
-            data = (await self.get(f"/v1/apps?filter[name]={identifier}&limit=2")).get("data", [])
+            data = (await self.get(f"/v1/apps?filter[name]={enc}&limit=2")).get("data", [])
         if not data:
             raise AscError(f"No app found for '{identifier}'")
         if len(data) > 1:
