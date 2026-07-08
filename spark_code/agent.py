@@ -31,12 +31,14 @@ from .ui.input import RESERVED_COMMAND_NAMES
 from .ui.output import (
     StreamingRenderer,
     render_error,
+    render_image_inline,
     render_tool_call,
     render_tool_denied,
     render_tool_error,
     render_tool_result,
     render_warning,
 )
+from .vision import DISPLAY_IMAGE_SENTINEL
 
 if TYPE_CHECKING:
     from .hooks import HookManager
@@ -347,6 +349,10 @@ class Agent:
         # tool-result run and corrupt the transcript. Each entry is
         # (text, image_b64, mime).
         self._pending_image_injections: list[tuple[str, str, str]] = []
+        # Screenshot PNGs to DISPLAY inline in the terminal (iTerm2) after the
+        # round, then delete. Separate from _pending_image_injections (which
+        # feeds a vision-capable MODEL) — these are purely for the human's eyes.
+        self._pending_display_images: list[str] = []
         self.console = console or Console()
         # Resolved host editor (Phase 3 Task 4 — "cursor"/"code"/"xed", or
         # None). Threaded into render_tool_call so rendered file paths get
@@ -652,6 +658,7 @@ class Agent:
         # Defensive: images buffer per-round and always flush in-round, but
         # reset here too so the "always flushed" invariant is guaranteed.
         self._pending_image_injections = []
+        self._pending_display_images = []
 
         while rounds < self.MAX_TOOL_ROUNDS:
             rounds += 1
@@ -895,6 +902,10 @@ class Agent:
                     render_tool_result(self.console, result, tool_name=tc["name"],
                                       **self._todo_render_kwargs(tc["name"]))
 
+            # Render any captured screenshots INLINE now — after the tool-result
+            # text is on screen, so the picture lands under its description.
+            self._flush_display_images()
+
             # Continue loop — model will process tool results
 
         # Cap-out is only a cap-out when the loop was EXHAUSTED — a final
@@ -959,6 +970,16 @@ class Agent:
         possibly-multiple images embedded anywhere in an MCP tool's result
         text (unlike simulator_screenshot's single whole-string sentinel).
         """
+        if DISPLAY_IMAGE_SENTINEL in result:
+            # A capture tool asked to DISPLAY its PNG inline. Buffer the path(s)
+            # for _flush_display_images and strip them so the MODEL only sees the
+            # description, never a filesystem path.
+            parts = result.split(DISPLAY_IMAGE_SENTINEL)
+            result = parts[0]
+            for p in parts[1:]:
+                p = p.strip()
+                if p:
+                    self._pending_display_images.append(p)
         if tc["name"] == "simulator_screenshot" and result.startswith(
                 SCREENSHOT_SENTINEL_PREFIX):
             path = result[len(SCREENSHOT_SENTINEL_PREFIX):]
@@ -1059,6 +1080,30 @@ class Agent:
         except OSError:
             pass
 
+    def _flush_display_images(self):
+        """Render buffered capture PNGs inline in the terminal (iTerm2), then
+        delete them. Purely for the human's eyes — the model never sees these
+        (the path was already stripped from the tool result in
+        _store_tool_result). Rendered-inline PNGs are deleted; on a non-iTerm2
+        terminal the file is kept and a "saved to <path>" note points at it."""
+        paths = self._pending_display_images
+        self._pending_display_images = []
+        for path in paths:
+            try:
+                shown = render_image_inline(self.console, path)
+                if not shown:
+                    self.console.print(Text(f"  🖼  screenshot saved to {path}", style="#8899aa"))
+            except Exception:
+                pass
+            else:
+                # rendered inline → safe to remove; non-iTerm2 keeps it (the
+                # note points the user at it), so only delete when shown.
+                if shown:
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+
     def _flush_pending_images(self):
         """Emit any buffered screenshot image turns, AFTER the round's full
         tool-result run is recorded.
@@ -1081,6 +1126,7 @@ class Agent:
         for text, image_b64, mime in self._pending_image_injections:
             self.context.add_user_with_image(text, image_b64, mime)
         self._pending_image_injections = []
+        self._pending_display_images = []
 
     async def _run_hooks_safe(self, event: str, context: dict) -> None:
         """Run hooks for an event without ever letting a hook — a failing

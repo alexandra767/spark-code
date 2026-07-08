@@ -17,7 +17,7 @@ import tempfile
 from pathlib import Path
 from shutil import which
 
-from ..vision import VisionError, describe_image
+from ..vision import DISPLAY_IMAGE_SENTINEL, VisionError, describe_image
 from .base import Tool
 
 
@@ -79,18 +79,16 @@ class AndroidScreenshotTool(Tool):
             detail = (err.decode("utf-8", "replace").strip() or "no output")[:300]
             return (f"No Android device captured — {detail}. "
                     f"Enable USB debugging and plug in the phone (check `adb devices`).")
-        path = None
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            f.write(out)
+            path = f.name
         try:
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-                f.write(out)
-                path = f.name
             desc = await describe_image(path, prompt or None)
         except VisionError as e:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
             return f"Captured the screen but vision failed: {e}"
-        finally:
-            if path:
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass
-        return f"📱 Android screenshot — Gemini sees:\n{desc}"
+        # Keep the PNG for inline display; the agent's flush renders + deletes it.
+        return f"📱 Android screenshot — Gemini sees:\n{desc}{DISPLAY_IMAGE_SENTINEL}{path}"

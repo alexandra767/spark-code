@@ -13,6 +13,11 @@ DEFAULT_VISION_PROMPT = (
     "text, UI elements, buttons, layout, current state, and anything notable. Be "
     "thorough and literal.")
 
+# Appended by capture tools to signal the terminal should DISPLAY this image
+# inline (see agent._store_tool_result / _flush_display_images). The path is
+# stripped from the model-facing text — the model only ever sees the description.
+DISPLAY_IMAGE_SENTINEL = "\n__SPARK_DISPLAY_IMAGE__:"
+
 
 class VisionError(Exception):
     pass

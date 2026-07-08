@@ -354,6 +354,45 @@ def render_tool_result(console: Console, result: str, tool_name: str = "",
         console.print(Text(f"  {_CONNECTOR} ... ({remaining} more lines)", style=_C_DIM))
 
 
+def _is_iterm() -> bool:
+    import os
+    term = (os.environ.get("LC_TERMINAL", "") + os.environ.get("TERM_PROGRAM", "")).lower()
+    return "iterm" in term
+
+
+def render_image_inline(console: Console, image_path: str) -> bool:
+    """Render a PNG inline in the terminal via iTerm2's image protocol (OSC 1337).
+
+    Written raw to the console's file (bypassing Rich markup, which would mangle
+    the escape). Returns True if the inline escape was emitted; False if the
+    terminal isn't iTerm2 or the file can't be read — the caller should then
+    print a "saved to <path>" fallback instead.
+    """
+    import base64
+    import os
+    if not _is_iterm():
+        return False
+    try:
+        with open(image_path, "rb") as f:
+            data = f.read()
+    except OSError:
+        return False
+    if not data:
+        return False
+    name_b64 = base64.b64encode(os.path.basename(image_path).encode()).decode("ascii")
+    payload = base64.b64encode(data).decode("ascii")
+    seq = (f"\033]1337;File=inline=1;size={len(data)};name={name_b64};"
+           f"width=auto;preserveAspectRatio=1:{payload}\a")
+    try:
+        console.file.write("  ")
+        console.file.write(seq)
+        console.file.write("\n")
+        console.file.flush()
+    except Exception:
+        return False
+    return True
+
+
 def render_tool_error(console: Console, name: str, message: str):
     console.print(Text(f"  {_CONNECTOR} {message}", style=_C_RED))
 

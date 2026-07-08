@@ -29,7 +29,7 @@ import tempfile
 
 import httpx
 
-from ..vision import VisionError, describe_image
+from ..vision import DISPLAY_IMAGE_SENTINEL, VisionError, describe_image
 from .base import Tool
 
 TUNNELD_URL = "http://127.0.0.1:49151/"
@@ -103,10 +103,10 @@ class IosScreenshotTool(Tool):
         try:
             desc = await describe_image(path, prompt or None)
         except VisionError as e:
-            return f"Captured the screen but vision failed: {e}"
-        finally:
             self._cleanup(path)
-        return f"📱 iPhone screenshot — Gemini sees:\n{desc}"
+            return f"Captured the screen but vision failed: {e}"
+        # Keep the PNG for inline display; the agent's flush renders + deletes it.
+        return f"📱 iPhone screenshot — Gemini sees:\n{desc}{DISPLAY_IMAGE_SENTINEL}{path}"
 
     @staticmethod
     def _cleanup(path) -> None:
