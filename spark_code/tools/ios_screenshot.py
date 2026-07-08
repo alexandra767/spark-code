@@ -48,7 +48,9 @@ class IosScreenshotTool(Tool):
     def description(self) -> str:
         return ("Capture a screenshot from a paired, trusted real iPhone (iOS 17+, via pymobiledevice3 "
                 "over a running tunneld) and return a Gemini text description of the screen. Works over "
-                "USB or Wi-Fi (same network). Optional: prompt (what to look for), udid.")
+                "USB or Wi-Fi (same network). VIEW-ONLY: this only LOOKS at the screen — it cannot tap, "
+                "type, or open apps. To OPEN an app on the iPhone use ios_launch. Optional: prompt "
+                "(what to look for), udid.")
 
     @property
     def parameters(self) -> dict:

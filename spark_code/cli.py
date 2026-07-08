@@ -772,6 +772,8 @@ def build_tools(todo_list: TodoList | None = None, model=None,
     registry.register(WatchPhoneTool())
     from .tools.android_control import AndroidControlTool
     registry.register(AndroidControlTool())
+    from .tools.ios_launch import IosLaunchTool
+    registry.register(IosLaunchTool())
     if model is not None and config is not None:
         from .dispatch import DispatchAgentTool
         registry.register(DispatchAgentTool(
