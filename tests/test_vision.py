@@ -50,6 +50,20 @@ async def test_unreadable_image_raises(tmp_path):
     with pytest.raises(VisionError):
         await describe_image(str(tmp_path / "nope.png"), config=CFG)
 
+async def test_api_error_surfaces_real_cause(tmp_path, monkeypatch):
+    img = tmp_path / "s.png"
+    img.write_bytes(b"x")
+    class FakeClient:
+        def __init__(self, **kw): pass
+        async def chat(self, messages, tools=None, stream=True):
+            yield {"type": "error", "content": "API error (429): rate limit exceeded"}
+        async def close(self): pass
+    monkeypatch.setattr("spark_code.vision.ModelClient", FakeClient)
+    with pytest.raises(VisionError) as ei:
+        await describe_image(str(img), config=CFG)
+    assert "429" in str(ei.value) and "rate limit" in str(ei.value)
+
+
 async def test_empty_description_raises(tmp_path, monkeypatch):
     img = tmp_path / "s.png"
     img.write_bytes(b"x")

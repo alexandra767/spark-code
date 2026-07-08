@@ -41,12 +41,18 @@ async def describe_image(image_path, prompt=None, provider_name="gemini-pro", co
         {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}}]}]
     text = ""
     try:
+        err_detail = ""
         async for chunk in client.chat(messages, stream=False):
             if chunk.get("type") == "text":
                 text += chunk.get("content", "")
+            elif chunk.get("type") == "error":
+                # chat() yields (never raises) an error chunk on API failure;
+                # capture it so a bad key / rate limit / oversized image surfaces
+                # the real cause instead of a generic "no description".
+                err_detail = chunk.get("content", "")
     finally:
         await client.close()
     text = text.strip()
     if not text:
-        raise VisionError("vision provider returned no description")
+        raise VisionError(err_detail or "vision provider returned no description")
     return text
