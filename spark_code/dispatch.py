@@ -424,7 +424,8 @@ async def run_subagent(model, prompt: str, agent_type: str, config: dict,
                        lead_mode: str,
                        agent_defs: dict[str, AgentDef] | None = None,
                        utility_model=None,
-                       isolated: bool = False) -> str:
+                       isolated: bool = False,
+                       mcp_tools: list[Tool] | None = None) -> str:
     """Run a sub-agent to completion in a fresh context and return its report.
 
     Shares the lead's ``model`` (same engine handles concurrent requests) but
@@ -442,6 +443,17 @@ async def run_subagent(model, prompt: str, agent_type: str, config: dict,
     lead's ``model`` only when the matched def's ``model_hint == "utility"``
     (Phase 4 Task 2 dual-model routing); every other path is unaffected and
     behaves exactly as before this feature existed.
+
+    ``mcp_tools`` (browser/MCP bugfix) are the LEAD's already-connected MCP
+    tool instances (e.g. Playwright browser control) — there is one browser,
+    so unlike local tools these are SHARED with the sub-agent rather than
+    rebuilt fresh. When non-empty, a base registry is assembled from a fresh
+    ``build_tools()`` (still fresh local-tool instances — no state leak) plus
+    these shared MCP tools, and that becomes the base BOTH
+    ``_build_subagent_registry`` and ``_build_custom_registry`` filter from —
+    the only way an MCP tool (or a custom def's ``tools:`` allowlist naming
+    one) can ever reach a sub-agent's registry. Empty/``None`` (the default)
+    keeps behavior byte-identical to before this parameter existed.
 
     ``isolated`` (Phase 5 Task 8) is opt-in and applies ONLY to the literal
     built-in ``agent_type == "implementer"`` (never a custom def, even one
@@ -476,13 +488,24 @@ async def run_subagent(model, prompt: str, agent_type: str, config: dict,
     repo_root = worktree_path = None
     isolation_note = ""
     try:
+        # Only construct a base registry (and pay a fresh build_tools() cost)
+        # when there are MCP tools to thread through — the common no-MCP
+        # case falls straight back to each helper's own build_tools()
+        # default, unchanged from before this parameter existed.
+        base_reg = None
+        if mcp_tools:
+            from .cli import build_tools
+            base_reg = build_tools()
+            for t in mcp_tools:
+                base_reg.register(t)
+
         if custom is not None:
-            registry = _build_custom_registry(custom)
+            registry = _build_custom_registry(custom, base_registry=base_reg)
             system_prompt = _SUBAGENT_BASE_PROMPT + "\n\n" + custom.system_prompt
             chosen_model, _owns_subagent_model = _resolve_subagent_model(
                 custom, model, utility_model, config)
         else:
-            registry = _build_subagent_registry(agent_type)
+            registry = _build_subagent_registry(agent_type, base_registry=base_reg)
             system_prompt = _SUBAGENT_BASE_PROMPT + _SUBAGENT_TYPE_PROMPTS[agent_type]
             chosen_model = model
             _owns_subagent_model = False
@@ -626,7 +649,8 @@ class DispatchAgentTool(Tool):
                  lead_mode: str | None = None,
                  get_lead_mode=None,
                  agent_defs: dict[str, AgentDef] | None = None,
-                 utility_model=None):
+                 utility_model=None,
+                 mcp_tools=None):
         self._model = model
         self._config = config or {}
         # Lead-mode resolution, most-specific first: an explicit getter, then a
@@ -644,6 +668,12 @@ class DispatchAgentTool(Tool):
         # whose model_hint == "utility" (see run_subagent) — every built-in
         # dispatch and every def without that hint ignores this entirely.
         self._utility_model = utility_model
+        # Browser/MCP bugfix: the lead's already-connected MCP tool instances
+        # (e.g. Playwright browser control) — threaded into run_subagent so a
+        # sub-agent's registry can actually contain them (see run_subagent's
+        # docstring). Empty/None when the lead has no MCP servers connected —
+        # every existing dispatch is byte-for-byte unaffected.
+        self._mcp_tools = list(mcp_tools or [])
 
     @property
     def description(self) -> str:
@@ -732,4 +762,4 @@ class DispatchAgentTool(Tool):
             self._model, prompt, agent_type, self._config,
             self._resolve_lead_mode(),
             agent_defs=self._agent_defs, utility_model=self._utility_model,
-            isolated=bool(isolated))
+            isolated=bool(isolated), mcp_tools=self._mcp_tools)

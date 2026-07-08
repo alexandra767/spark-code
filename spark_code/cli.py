@@ -650,7 +650,8 @@ def build_tools(todo_list: TodoList | None = None, model=None,
                 plan_state: "PlanState | None" = None,
                 console: Console | None = None,
                 agent_defs: dict | None = None,
-                utility_model=None) -> ToolRegistry:
+                utility_model=None,
+                mcp_tools=None) -> ToolRegistry:
     """Register all built-in tools.
 
     ``todo_list`` is the session-scoped live checklist backing ``todo_write``.
@@ -678,6 +679,14 @@ def build_tools(todo_list: TodoList | None = None, model=None,
     (``None``/``{}``) leaves dispatch_agent's schema exactly as it was before
     this feature existed. ``utility_model`` (Phase 4 Task 2) is likewise only
     consulted for a custom def whose ``model_hint == "utility"``.
+
+    ``mcp_tools`` (browser/MCP bugfix) are the caller's already-connected MCP
+    tool instances (e.g. Playwright browser control) — threaded only into
+    ``DispatchAgentTool`` so a sub-agent it later dispatches can actually see
+    them (see ``dispatch.run_subagent``'s docstring). This function's OWN
+    registry never registers MCP tools directly; the caller (``run_interactive``
+    / ``_one_shot``) still registers them onto its own top-level registry
+    itself, exactly as before this parameter existed.
     """
     registry = ToolRegistry()
     registry.register(ReadFileTool())
@@ -730,7 +739,8 @@ def build_tools(todo_list: TodoList | None = None, model=None,
         from .dispatch import DispatchAgentTool
         registry.register(DispatchAgentTool(
             model=model, config=config, permissions=permissions,
-            agent_defs=agent_defs, utility_model=utility_model))
+            agent_defs=agent_defs, utility_model=utility_model,
+            mcp_tools=mcp_tools))
     if plan_state is not None:
         from .plan_mode import ExitPlanModeTool
         registry.register(ExitPlanModeTool(
@@ -2866,7 +2876,8 @@ async def run_interactive(config: dict, resume_session: str = "",
     tools = build_tools(todo_list=todo_list, model=model, config=config,
                         permissions=permissions, plan_state=plan_state,
                         console=console, agent_defs=agent_defs,
-                        utility_model=resolve_utility_for(config, "dispatch", utility_model))
+                        utility_model=resolve_utility_for(config, "dispatch", utility_model),
+                        mcp_tools=mcp_tools)
 
     # Register MCP tools
     for mcp_tool in mcp_tools:
@@ -4392,97 +4403,121 @@ async def _one_shot(config: dict, prompt: str, output: str = "text",
     # same reordering rationale as run_interactive) so DispatchAgentTool can
     # route a model_hint=="utility" custom def to it.
     utility_model = get_utility_client(config)
-    tools = build_tools(todo_list=todo_list, model=model, config=config,
-                        permissions=permissions, agent_defs=agent_defs,
-                        utility_model=resolve_utility_for(config, "dispatch", utility_model))
-    # Verification habit (Task 6) — see run_interactive for the full rationale.
-    test_command = detect_test_command(os.getcwd(), load_instructions(os.getcwd()).text)
 
-    stats = SessionStats()
-    commands_run: list[str] = []
+    # Initialize MCP (browser/MCP bugfix): headless one-shot runs previously
+    # never connected MCP servers at all — only run_interactive did — so e.g.
+    # Playwright browser tools were invisible to `spark -p`/`--print`. Same
+    # config key, same client class, same connect_all/disconnect_all contract
+    # as run_interactive (~2693-2698 / ~4090). Everything from here through
+    # the end of the function is wrapped in a try/finally so disconnect_all
+    # runs on every exit path — including a failure in build_tools/Agent
+    # construction below, not just inside agent.run().
+    mcp_client = MCPClient()
+    mcp_configs = get(config, "mcp_servers", default={})
+    mcp_tools = []
+    if mcp_configs:
+        mcp_tools = await mcp_client.connect_all(mcp_configs)
 
-    def _on_tool_start(tool_name, args):
-        # Bash tool invocations only — files_changed already comes from
-        # agent._verify_written_paths (Phase 2), so this is the one piece
-        # the agent doesn't already expose (per the task brief). Records
-        # only commands that actually RAN: on_tool_start fires AFTER the
-        # permission check in agent._execute_single_tool, so a denied bash
-        # call never reaches this hook.
-        if tool_name == "bash":
-            cmd = args.get("command", "")
-            if cmd:
-                commands_run.append(cmd)
-
-    # Dual-model routing (Phase 4 Task 2) — same pattern as run_interactive:
-    # built above (before build_tools), own lifecycle, use_for-gated for
-    # compaction (the only OTHER routing consumer reachable from a headless
-    # one-shot run — /review and /compact are interactive-only commands).
-    agent = Agent(model, context, tools, permissions, console,
-                  stats=stats, on_tool_start=_on_tool_start,
-                  result_budgets=get(config, "tools", "result_budgets", default=None),
-                  test_command=test_command, editor=_resolve_editor(config),
-                  diff_in_editor=get(config, "ui", "diff_in_editor", default=False),
-                  utility_model=resolve_utility_for(config, "compaction", utility_model),
-                  agent_defs=agent_defs)
-    if max_rounds is not None:
-        # Instance attribute shadows the class constant — same pattern
-        # dispatch.py already uses to give sub-agents their own round cap.
-        agent.MAX_TOOL_ROUNDS = max_rounds
-
-    result_text = ""
-    error: str | None = None
     try:
-        result_text = await agent.run(prompt)
-        # A model/transport error ends the turn without raising (agent.py
-        # renders it and breaks the loop) — surface it as a headless error
-        # too, since it's user-actionable and otherwise invisible in JSON
-        # mode (the render went to a quiet console).
-        error = agent._last_stream_error
-    except Exception as e:
-        error = str(e)
+        tools = build_tools(todo_list=todo_list, model=model, config=config,
+                            permissions=permissions, agent_defs=agent_defs,
+                            utility_model=resolve_utility_for(config, "dispatch", utility_model),
+                            mcp_tools=mcp_tools)
+        # Register MCP tools directly on the lead's own registry too (mirrors
+        # run_interactive ~2872-2873) so the top-level headless agent can call
+        # them itself, not only a dispatched sub-agent.
+        for mcp_tool in mcp_tools:
+            tools.register(mcp_tool)
+        # Verification habit (Task 6) — see run_interactive for the full rationale.
+        test_command = detect_test_command(os.getcwd(), load_instructions(os.getcwd()).text)
+
+        stats = SessionStats()
+        commands_run: list[str] = []
+
+        def _on_tool_start(tool_name, args):
+            # Bash tool invocations only — files_changed already comes from
+            # agent._verify_written_paths (Phase 2), so this is the one piece
+            # the agent doesn't already expose (per the task brief). Records
+            # only commands that actually RAN: on_tool_start fires AFTER the
+            # permission check in agent._execute_single_tool, so a denied bash
+            # call never reaches this hook.
+            if tool_name == "bash":
+                cmd = args.get("command", "")
+                if cmd:
+                    commands_run.append(cmd)
+
+        # Dual-model routing (Phase 4 Task 2) — same pattern as run_interactive:
+        # built above (before build_tools), own lifecycle, use_for-gated for
+        # compaction (the only OTHER routing consumer reachable from a headless
+        # one-shot run — /review and /compact are interactive-only commands).
+        agent = Agent(model, context, tools, permissions, console,
+                      stats=stats, on_tool_start=_on_tool_start,
+                      result_budgets=get(config, "tools", "result_budgets", default=None),
+                      test_command=test_command, editor=_resolve_editor(config),
+                      diff_in_editor=get(config, "ui", "diff_in_editor", default=False),
+                      utility_model=resolve_utility_for(config, "compaction", utility_model),
+                      agent_defs=agent_defs)
+        if max_rounds is not None:
+            # Instance attribute shadows the class constant — same pattern
+            # dispatch.py already uses to give sub-agents their own round cap.
+            agent.MAX_TOOL_ROUNDS = max_rounds
+
+        result_text = ""
+        error: str | None = None
+        try:
+            result_text = await agent.run(prompt)
+            # A model/transport error ends the turn without raising (agent.py
+            # renders it and breaks the loop) — surface it as a headless error
+            # too, since it's user-actionable and otherwise invisible in JSON
+            # mode (the render went to a quiet console).
+            error = agent._last_stream_error
+        except Exception as e:
+            error = str(e)
+        finally:
+            await model.close()
+            if utility_model is not None:
+                try:
+                    await utility_model.close()
+                except Exception:
+                    pass
+            from .editor import cleanup_diff_temp_dirs
+            cleanup_diff_temp_dirs()
+
+        if error is not None:
+            exit_code = 1
+        elif agent._hit_max_rounds:
+            exit_code = 2
+        else:
+            exit_code = 0
+
+        # Session -> training corpus export (Phase 4 Task 6, opt-in, default
+        # OFF). ``error`` is the same headless "error flag" that already drives
+        # exit_code — export_session skips whenever it's set, so only clean
+        # headless completions are ever exported.
+        _export_corpus_session(config, context, agent, error=error)
+
+        if json_mode:
+            from .headless import HeadlessResult, build_headless_json
+            headless_result = HeadlessResult(
+                result=result_text,
+                files_changed=list(agent._verify_written_paths),
+                commands_run=commands_run,
+                tool_calls=stats.total_tool_calls,
+                rounds=agent._last_rounds,
+                input_tokens=stats.input_tokens,
+                output_tokens=stats.output_tokens,
+                error=error,
+            )
+            click.echo(build_headless_json(headless_result))
+        elif error is not None:
+            # Text mode: still surface the error visibly (previously an uncaught
+            # exception here crashed with a raw traceback) rather than exiting
+            # silently with code 1.
+            render_error(console, error)
+
+        return exit_code
     finally:
-        await model.close()
-        if utility_model is not None:
-            try:
-                await utility_model.close()
-            except Exception:
-                pass
-        from .editor import cleanup_diff_temp_dirs
-        cleanup_diff_temp_dirs()
-
-    if error is not None:
-        exit_code = 1
-    elif agent._hit_max_rounds:
-        exit_code = 2
-    else:
-        exit_code = 0
-
-    # Session -> training corpus export (Phase 4 Task 6, opt-in, default
-    # OFF). ``error`` is the same headless "error flag" that already drives
-    # exit_code — export_session skips whenever it's set, so only clean
-    # headless completions are ever exported.
-    _export_corpus_session(config, context, agent, error=error)
-
-    if json_mode:
-        from .headless import HeadlessResult, build_headless_json
-        headless_result = HeadlessResult(
-            result=result_text,
-            files_changed=list(agent._verify_written_paths),
-            commands_run=commands_run,
-            tool_calls=stats.total_tool_calls,
-            rounds=agent._last_rounds,
-            input_tokens=stats.input_tokens,
-            output_tokens=stats.output_tokens,
-            error=error,
-        )
-        click.echo(build_headless_json(headless_result))
-    elif error is not None:
-        # Text mode: still surface the error visibly (previously an uncaught
-        # exception here crashed with a raw traceback) rather than exiting
-        # silently with code 1.
-        render_error(console, error)
-
-    return exit_code
+        await mcp_client.disconnect_all()
 
 
 if __name__ == "__main__":

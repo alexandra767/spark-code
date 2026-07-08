@@ -749,3 +749,176 @@ def test_build_tools_omits_dispatch_without_model():
     from spark_code.cli import build_tools
     registry = build_tools()
     assert "dispatch_agent" not in registry.names()
+
+
+# ---------------------------------------------------------------------------
+# MCP tools threaded into sub-agent registries (browser/MCP bugfix).
+#
+# Whole-branch review finding: `run_subagent` built every sub-agent's tool
+# registry from a bare `build_tools()` (no model/config, so no MCP tools —
+# those only ever got attached to the LEAD's own registry, separately, in
+# cli.py). A custom def's `tools:` allowlist (e.g. web-driver.md naming
+# `playwright__browser_navigate`) therefore intersected against an MCP-less
+# base and came up structurally empty — the sub-agent could never see a
+# browser tool no matter what its frontmatter said. The fix threads the
+# lead's already-connected MCP tool instances through `mcp_tools=` into a
+# seeded `base_registry` passed to `_build_custom_registry`/
+# `_build_subagent_registry`.
+# ---------------------------------------------------------------------------
+
+
+class _FakeMCPTool(Tool):
+    """Minimal stand-in for a real Playwright/browser MCP tool — just enough
+    of ``Tool`` to register and (in the end-to-end test below) actually be
+    called by a sub-agent."""
+
+    name = "playwright__browser_navigate"
+    description = "fake mcp browser-navigate tool"
+    is_read_only = False
+
+    def __init__(self):
+        self.called_with = None
+
+    @property
+    def parameters(self):
+        return {"type": "object", "properties": {"url": {"type": "string"}}}
+
+    async def execute(self, **kwargs):
+        self.called_with = kwargs
+        return "navigated to " + kwargs.get("url", "")
+
+
+def test_custom_def_allowlist_only_sees_mcp_tool_via_base_registry():
+    """Regression guard for the bug AND proof of the fix, both in one test:
+    the exact same custom def yields an EMPTY registry when no MCP-aware
+    base_registry is supplied (today's broken behavior, still reachable
+    whenever mcp_tools is empty/None), and a NON-empty one — containing the
+    named tool — once seeded with it (what run_subagent now does whenever
+    mcp_tools is non-empty)."""
+    from spark_code.agents_registry import AgentDef
+    from spark_code.cli import build_tools
+
+    custom = AgentDef(name="web-driver", description="x",
+                      system_prompt="drive the browser",
+                      base_type="implementer",
+                      tools=["playwright__browser_navigate"])
+
+    # WITHOUT an MCP-aware base — build_tools() never registers MCP tools,
+    # so the tools: allowlist intersects against nothing and comes up empty.
+    empty = dispatch._build_custom_registry(custom)
+    assert empty.names() == []
+
+    # WITH one — mirrors exactly what run_subagent assembles when mcp_tools
+    # is non-empty (a fresh build_tools() plus the shared MCP tool instances).
+    base = build_tools()
+    base.register(_FakeMCPTool())
+    seeded = dispatch._build_custom_registry(custom, base_registry=base)
+    assert len(seeded.all()) >= 1
+    assert "playwright__browser_navigate" in seeded.names()
+
+
+async def test_dispatch_tool_execute_forwards_mcp_tools():
+    """DispatchAgentTool must pass its stored mcp_tools straight through to
+    run_subagent — the plumbing half of the fix (the other half being
+    run_subagent actually using them, covered elsewhere in this file)."""
+    captured = {}
+
+    async def _fake_run(model, prompt, agent_type, config, lead_mode, **kwargs):
+        captured.update(kwargs)
+        return "ok"
+
+    fake_tool = _FakeMCPTool()
+    model = MockModel(_final_text("ok"))
+    tool = dispatch.DispatchAgentTool(model=model, config=_cfg(), lead_mode="auto",
+                                      mcp_tools=[fake_tool])
+    import spark_code.dispatch as d
+    orig = d.run_subagent
+    d.run_subagent = _fake_run
+    try:
+        await tool.execute(prompt="p", agent_type="implementer")
+        assert captured["mcp_tools"] == [fake_tool]
+    finally:
+        d.run_subagent = orig
+
+
+async def test_dispatch_tool_defaults_to_no_mcp_tools():
+    """No mcp_tools passed at construction (the pre-fix call shape, still
+    used by every caller with no MCP servers connected) forwards an empty
+    list — never None/omitted — so run_subagent's `if mcp_tools:` guard is
+    always dealing with a real (possibly empty) list."""
+    captured = {}
+
+    async def _fake_run(model, prompt, agent_type, config, lead_mode, **kwargs):
+        captured.update(kwargs)
+        return "ok"
+
+    model = MockModel(_final_text("ok"))
+    tool = dispatch.DispatchAgentTool(model=model, config=_cfg(), lead_mode="auto")
+    import spark_code.dispatch as d
+    orig = d.run_subagent
+    d.run_subagent = _fake_run
+    try:
+        await tool.execute(prompt="p", agent_type="implementer")
+        assert captured["mcp_tools"] == []
+    finally:
+        d.run_subagent = orig
+
+
+async def test_run_subagent_can_actually_invoke_mcp_tool_end_to_end():
+    """The non-negotiable proof: a sub-agent given mcp_tools must be able to
+    actually CALL an MCP tool — not merely have it listed in a static
+    registry. Scripts the sub-agent's model to call
+    playwright__browser_navigate and asserts the fake tool's execute() body
+    actually ran with the arguments the model chose."""
+    from spark_code.agents_registry import AgentDef
+
+    fake_tool = _FakeMCPTool()
+    custom = AgentDef(name="web-driver", description="x",
+                      system_prompt="drive the browser",
+                      base_type="implementer",
+                      tools=["playwright__browser_navigate"])
+
+    model = MockModel([
+        [{"type": "tool_call", "id": "call_1", "name": "playwright__browser_navigate",
+          "arguments": {"url": "https://example.com"}},
+         {"type": "done", "usage": {}}],
+        [{"type": "text", "content": "navigated"},
+         {"type": "done", "usage": {}}],
+    ])
+
+    result = await dispatch.run_subagent(
+        model, "go to example.com", "web-driver", _cfg(), "trust",
+        agent_defs={"web-driver": custom}, mcp_tools=[fake_tool])
+
+    assert fake_tool.called_with == {"url": "https://example.com"}
+    assert "navigated" in result
+
+
+async def test_run_subagent_without_mcp_tools_cannot_reach_named_tool():
+    """Same def and prompt as above, but with NO mcp_tools passed — the
+    pre-fix shape. The model calling a tool that structurally doesn't exist
+    in the registry must not silently succeed; the sub-agent's own Agent
+    loop reports it as an unknown tool rather than ever reaching
+    _FakeMCPTool.execute()."""
+    from spark_code.agents_registry import AgentDef
+
+    fake_tool = _FakeMCPTool()
+    custom = AgentDef(name="web-driver", description="x",
+                      system_prompt="drive the browser",
+                      base_type="implementer",
+                      tools=["playwright__browser_navigate"])
+
+    model = MockModel([
+        [{"type": "tool_call", "id": "call_1", "name": "playwright__browser_navigate",
+          "arguments": {"url": "https://example.com"}},
+         {"type": "done", "usage": {}}],
+        [{"type": "text", "content": "gave up"},
+         {"type": "done", "usage": {}}],
+    ])
+
+    result = await dispatch.run_subagent(
+        model, "go to example.com", "web-driver", _cfg(), "trust",
+        agent_defs={"web-driver": custom})
+
+    assert fake_tool.called_with is None  # never invoked — not in the registry
+    assert "gave up" in result
