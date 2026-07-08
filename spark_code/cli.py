@@ -738,6 +738,8 @@ def build_tools(todo_list: TodoList | None = None, model=None,
     registry.register(AppStoreSubmitTool(interactive=interactive))
     from .tools.appstore_build_upload import AppStoreBuildUploadTool
     registry.register(AppStoreBuildUploadTool(interactive=interactive))
+    from .tools.play_publish import PlayPublishTool
+    registry.register(PlayPublishTool(interactive=interactive))
     # Phase 4 Task 3: always registered (no startup network call — see
     # codesearch.py) unless the user explicitly disabled it; away from the
     # RAG host it just returns a friendly unavailable message per-query.
