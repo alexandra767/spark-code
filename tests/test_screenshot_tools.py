@@ -39,17 +39,40 @@ async def test_android_captures_and_describes(monkeypatch):
     assert "Start button" in out and seen["prompt"] == "what's on screen?"
     assert AndroidScreenshotTool().is_read_only is True
 
-async def test_ios_captures_and_describes(monkeypatch):
-    # success is judged by the output FILE (pymobiledevice3 can exit 0 + warn on
-    # stderr yet still succeed), not by rc or stderr content.
+def _patch_tunneld(monkeypatch, devices):
+    async def fake(self):
+        return devices
+    monkeypatch.setattr("spark_code.tools.ios_screenshot.IosScreenshotTool._tunneled_devices", fake)
+
+
+async def test_ios_no_tunneld_actionable_message(monkeypatch):
+    _patch_tunneld(monkeypatch, None)  # tunneld unreachable
+    called = {"d": False}
+
+    async def fake_desc(*a, **k):
+        called["d"] = True
+        return "x"
+    monkeypatch.setattr("spark_code.tools.ios_screenshot.describe_image", fake_desc)
+    out = await IosScreenshotTool().execute()
+    assert "tunneld" in out.lower() and called["d"] is False
+
+
+async def test_ios_tunnel_up_no_device(monkeypatch):
+    _patch_tunneld(monkeypatch, {})  # tunneld up, no devices
+    out = await IosScreenshotTool().execute()
+    assert "no device" in out.lower()
+
+
+async def test_ios_captures_via_tunnel_and_describes(monkeypatch):
+    _patch_tunneld(monkeypatch, {"UDID-1": [{"tunnel-address": "fda9::1", "tunnel-port": 5, "interface": "wifi"}]})
     seen = {}
 
     async def fake_exec(*a, **k):
         seen["argv"] = a
-        path = a[a.index("screenshot") + 1]
+        path = a[-1]
         from pathlib import Path as _P
         _P(path).write_bytes(b"\x89PNGrealbytes")
-        return _Proc(0, b"", b"WARNING trying again over tunneld")
+        return _Proc(0, b"", b"")
     monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
 
     async def fake_desc(path, prompt=None, **k):
@@ -59,33 +82,18 @@ async def test_ios_captures_and_describes(monkeypatch):
 
     out = await IosScreenshotTool().execute(prompt="what app?")
     assert "DoorDash" in out and seen["prompt"] == "what app?"
-    assert "pymobiledevice3" in seen["argv"] and "screenshot" in seen["argv"]
+    # goes through --tunnel with the discovered UDID (this is what makes Wi-Fi work)
+    assert "--tunnel" in seen["argv"] and "UDID-1" in seen["argv"]
     assert IosScreenshotTool().is_read_only is True
 
 
-async def test_ios_no_tunnel_actionable_message(monkeypatch):
-    # pymobiledevice3 exits 0 but writes no bytes when the tunnel is down.
-    called = {"d": False}
-
-    async def fake_exec(*a, **k):
-        return _Proc(0, b"", b"ERROR Unable to connect to Tunneld. sudo ... remote tunneld")
-    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
-
-    async def fake_desc(*a, **k):
-        called["d"] = True
-        return "x"
-    monkeypatch.setattr("spark_code.tools.ios_screenshot.describe_image", fake_desc)
-
-    out = await IosScreenshotTool().execute()
-    assert "tunnel" in out.lower() and "tunneld" in out.lower() and called["d"] is False
-
-
-async def test_ios_udid_passed_in_argv(monkeypatch):
+async def test_ios_udid_targets_specific_device(monkeypatch):
+    _patch_tunneld(monkeypatch, {"UDID-1": [{}], "UDID-2": [{}]})
     seen = {}
 
     async def fake_exec(*a, **k):
         seen["argv"] = a
-        path = a[a.index("screenshot") + 1]
+        path = a[-1]
         from pathlib import Path as _P
         _P(path).write_bytes(b"PNG")
         return _Proc(0, b"", b"")
@@ -95,5 +103,11 @@ async def test_ios_udid_passed_in_argv(monkeypatch):
         return "x"
     monkeypatch.setattr("spark_code.tools.ios_screenshot.describe_image", fake_desc)
 
-    await IosScreenshotTool().execute(udid="ABC123")
-    assert "--udid" in seen["argv"] and "ABC123" in seen["argv"]
+    await IosScreenshotTool().execute(udid="UDID-2")
+    assert "--tunnel" in seen["argv"] and "UDID-2" in seen["argv"]
+
+
+async def test_ios_unknown_udid_refused(monkeypatch):
+    _patch_tunneld(monkeypatch, {"UDID-1": [{}]})
+    out = await IosScreenshotTool().execute(udid="NOPE")
+    assert "NOPE" in out and "available" in out.lower()
