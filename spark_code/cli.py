@@ -718,6 +718,8 @@ def build_tools(todo_list: TodoList | None = None, model=None,
     registry.register(WebSearchTool())
     registry.register(WebFetchTool())
     registry.register(RagSearchTool())
+    from .tools.appstore_status import AppStoreStatusTool
+    registry.register(AppStoreStatusTool())
     # Phase 4 Task 3: always registered (no startup network call — see
     # codesearch.py) unless the user explicitly disabled it; away from the
     # RAG host it just returns a friendly unavailable message per-query.
