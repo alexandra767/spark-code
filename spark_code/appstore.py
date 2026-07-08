@@ -112,3 +112,33 @@ class AscClient:
         return {"version_id": vid, "version": version, "state": state,
                 "build_id": build_id, "build_number": build_num,
                 "build_processing_state": build_state}
+
+
+async def readiness(client: "AscClient", app_id: str) -> list[dict]:
+    st = await client.get_submission_state(app_id)
+    checks: list[dict] = []
+    build_ok = bool(st["build_id"]) and st["build_processing_state"] == "VALID"
+    checks.append({"check": "Build attached & processed",
+                   "ok": build_ok,
+                   "hint": "" if build_ok else "Attach a build with processingState=VALID"})
+    enc_ok = False
+    if st["build_id"]:
+        bd = (await client.get(f"/v1/builds/{st['build_id']}")).get("data", {})
+        enc_ok = bd.get("attributes", {}).get("usesNonExemptEncryption") is not None
+    checks.append({"check": "Export-compliance / encryption flag set",
+                   "ok": enc_ok, "hint": "" if enc_ok else "Set usesNonExemptEncryption on the build"})
+    shots = (await client.get(
+        f"/v1/appStoreVersions/{st['version_id']}/appStoreVersionLocalizations"
+        "?include=appScreenshotSets")).get("data", [])
+    shot_ok = False
+    if shots:
+        sets = (await client.get(
+            f"/v1/appStoreVersionLocalizations/{shots[0]['id']}/appScreenshotSets")).get("data", [])
+        shot_ok = bool(sets)
+    checks.append({"check": "Screenshots present",
+                   "ok": shot_ok, "hint": "" if shot_ok else "Upload required screenshots"})
+    return checks
+
+
+def blockers(checks: list[dict]) -> list[dict]:
+    return [c for c in checks if not c["ok"]]

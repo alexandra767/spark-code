@@ -183,3 +183,38 @@ async def test_get_submission_state_build_fetch_raises_ascerror_is_swallowed(tmp
         "version_id": "V1", "version": "2.0", "state": "PREPARE_FOR_SUBMISSION",
         "build_id": None, "build_number": None, "build_processing_state": None,
     }
+
+
+# --- readiness checklist ---
+
+async def test_readiness_flags_missing_build(tmp_path, monkeypatch):
+    _write_config(tmp_path)
+    from spark_code.appstore import AscClient, blockers, readiness
+    c = AscClient(config_dir=str(tmp_path))
+    async def fake_state(app_id):
+        return {"version_id": "V", "version": "1.0", "state": "PREPARE_FOR_SUBMISSION",
+                "build_id": None, "build_number": None, "build_processing_state": None}
+    monkeypatch.setattr(c, "get_submission_state", fake_state)
+    async def fake_get(path): return {"data": []}
+    monkeypatch.setattr(c, "get", fake_get)
+    checks = await readiness(c, "APP")
+    assert any(x["check"].lower().startswith("build") and not x["ok"] for x in checks)
+    assert blockers(checks)  # at least one blocker
+
+async def test_readiness_all_ok(tmp_path, monkeypatch):
+    _write_config(tmp_path)
+    from spark_code.appstore import AscClient, blockers, readiness
+    c = AscClient(config_dir=str(tmp_path))
+    async def fake_state(app_id):
+        return {"version_id": "V", "version": "1.0", "state": "PREPARE_FOR_SUBMISSION",
+                "build_id": "B", "build_number": "42", "build_processing_state": "VALID"}
+    monkeypatch.setattr(c, "get_submission_state", fake_state)
+    async def fake_get(path):
+        if path.endswith("/builds/B"):
+            return {"data": {"attributes": {"usesNonExemptEncryption": False}}}
+        if "appScreenshotSets" in path:
+            return {"data": [{"id": "s1"}]}
+        return {"data": {}}
+    monkeypatch.setattr(c, "get", fake_get)
+    checks = await readiness(c, "APP")
+    assert not blockers(checks)
