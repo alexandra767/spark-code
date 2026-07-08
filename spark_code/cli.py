@@ -801,7 +801,15 @@ def print_banner(console: Console, config: dict, mcp_count: int = 0,
                  project_type: str = "", real_model_name: str | None = None):
     """Print startup banner — two-column layout matching Claude Code."""
     config_name = get(config, "model", "name", default="unknown")
-    model_name = real_model_name or config_name
+    display_name = get(config, "model", "display_name", default="")
+    # A configured display_name wins and suppresses the "(served as <id>)" alias;
+    # otherwise fall back to the auto-resolved real name (with the alias shown).
+    if display_name:
+        model_name = display_name
+        show_served_as = False
+    else:
+        model_name = real_model_name or config_name
+        show_served_as = bool(real_model_name and real_model_name != config_name)
     provider = get(config, "model", "provider", default="")
     cwd = os.getcwd()
     home = os.path.expanduser("~")
@@ -819,7 +827,7 @@ def print_banner(console: Console, config: dict, mcp_count: int = 0,
         left.append("\n")
     left.append("\n")
     left.append(f"  {model_name}", style="#88c0d0")
-    if real_model_name and real_model_name != config_name:
+    if show_served_as:
         left.append(f"  (served as {config_name})", style="#4c566a")
     if provider:
         left.append(f" · {provider}", style="#4c566a")
@@ -2819,6 +2827,7 @@ async def run_interactive(config: dict, resume_session: str = "",
         timeout=float(get(config, "model", "timeout", default=300)),
         real_model_name=real_model_name or "",
         supports_vision=bool(get(config, "model", "vision", default=False)),
+        display_name=get(config, "model", "display_name", default=""),
     )
 
     # Opt-in provider failover: if the config declares a `fallback.chain`,
@@ -2842,6 +2851,7 @@ async def run_interactive(config: dict, resume_session: str = "",
                 provider=name,
                 timeout=float(pconf.get("timeout", 300)),
                 supports_vision=bool(pconf.get("vision", False)),
+                display_name=pconf.get("display_name", ""),
             )
 
         await model.close()  # the chain manages its own per-provider clients
@@ -2998,8 +3008,14 @@ async def run_interactive(config: dict, resume_session: str = "",
             max_tokens=get(config, "model", "max_tokens", default=8192),
             api_key=get(config, "model", "api_key", default=""),
             provider=get(config, "model", "provider", default="ollama"),
+            display_name=get(config, "model", "display_name", default=""),
         )
-        console.print(f"  [#88c0d0]Workers will use: {worker_model_name}[/#88c0d0]")
+        # Show the friendly name only when workers run the SAME wire model as the
+        # main client (so a distinct worker_model still shows its own real id).
+        _disp = get(config, "model", "display_name", default="")
+        _worker_disp = (_disp if _disp and worker_model_name == get(config, "model", "name", default="")
+                        else worker_model_name)
+        console.print(f"  [#88c0d0]Workers will use: {_worker_disp}[/#88c0d0]")
     team_manager = TeamManager(model, tools, console, task_store,
                                stats=session_stats, worker_model=worker_model_obj,
                                worker_permission_mode=permissions.mode)

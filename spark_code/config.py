@@ -217,6 +217,12 @@ def resolve_provider(config: dict, provider_name: str | None = None) -> dict:
     # DEFAULT_CONFIG["model"]["vision"], an arbitrary named provider isn't
     # presumed to have vision unless its config says so.
     resolved["vision"] = bool(provider_conf.get("vision", False))
+    # Optional display-only name. When set, the startup banner, the "Connected
+    # to …" line, and the "Workers will use:" line show this instead of the wire
+    # model id, and the banner drops the "(served as <id>)" alias. Purely
+    # cosmetic — requests still go out under `name`, so a vLLM
+    # `--served-model-name` alias keeps working untouched.
+    resolved["display_name"] = provider_conf.get("display_name", "")
     return config
 
 

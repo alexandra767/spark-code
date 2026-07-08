@@ -248,7 +248,7 @@ class ModelClient:
                  max_tokens: int = 4096, api_key: str = "",
                  provider: str = "ollama", timeout: float = 300.0,
                  max_retries: int = 3, real_model_name: str = "",
-                 supports_vision: bool = False):
+                 supports_vision: bool = False, display_name: str = ""):
         self.provider = provider
         self.model = model
         # Phase 4 Task 4: gates spark_code.tools.simulator.SimulatorScreenshotTool
@@ -261,6 +261,10 @@ class ModelClient:
         # Underlying model name (unmasked from a vLLM --served-model-name alias);
         # display-only (shown in the startup banner). Falls back to `model`.
         self.real_model_name = real_model_name
+        # Optional user-configured display name (config `display_name`). When
+        # set it overrides both `model` and `real_model_name` in human-facing
+        # lines (e.g. the connection message). Display-only.
+        self.display_name = display_name
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.api_key = api_key
@@ -640,7 +644,7 @@ class ModelClient:
             # Use /models endpoint (standard OpenAI-compatible)
             response = await self._client.get(_models_url(self.endpoint), timeout=5.0)
             if response.status_code == 200:
-                return True, f"Connected to {self.provider} ({self.model})"
+                return True, f"Connected to {self.provider} ({self.display_name or self.model})"
             if response.status_code in (401, 403):
                 return False, f"Authentication failed for {self.provider} ({response.status_code}) — check your API key"
             return True, f"Reached {self.provider} at {self.endpoint} [status {response.status_code}]"

@@ -127,11 +127,15 @@ class AndroidControlTool(Tool):
 
     @property
     def description(self) -> str:
-        return ("Control a connected Android phone. action='find' lists tappable on-screen elements "
-                "(read-only). action='launch' opens an app by name (app='gigledger') — resolves the "
-                "installed package, launches immediately, no confirm needed. action='tap'/'type'/'swipe'/'key' "
-                "ACT on the phone and require confirm='yes' (nothing happens without it). tap: target "
-                "(element text) or x,y. type: text. swipe: direction up/down/left/right. key: "
+        return ("Control a connected Android phone. "
+                "TO OPEN/LAUNCH/START AN APP (e.g. 'open gigledger', 'open boonpoint'): use "
+                "action='launch' with app=<name> in ONE call. It launches the app directly and "
+                "immediately — do NOT take a screenshot first, do NOT press home, do NOT use "
+                "find/tap to hunt for an icon. That is the only correct way to open an app. "
+                "action='find' lists tappable on-screen elements (read-only) — use it only to "
+                "interact WITHIN an already-open app. action='tap'/'type'/'swipe'/'key' ACT on the "
+                "phone and require confirm='yes' (nothing happens without it). tap: target (element "
+                "text) or x,y. type: text. swipe: direction up/down/left/right. key: "
                 "back/home/enter/recent/delete. This is your REAL phone.")
 
     @property
