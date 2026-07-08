@@ -91,8 +91,13 @@ class AscClient:
         return data[0]["id"]
 
     async def get_submission_state(self, app_id: str) -> dict:
+        # ASC rejects `sort` on the app→appStoreVersions relationship
+        # (PARAMETER_ERROR.ILLEGAL); the endpoint already returns versions
+        # newest-first, and Apple keeps at most one editable version (always the
+        # newest), so data[0] is the current/editable version — same selection
+        # the appstore-connect-submission playbook uses.
         versions = (await self.get(
-            f"/v1/apps/{app_id}/appStoreVersions?limit=1&sort=-createdDate")).get("data", [])
+            f"/v1/apps/{app_id}/appStoreVersions?limit=1")).get("data", [])
         if not versions:
             raise AscError("No App Store version found for this app")
         v = versions[0]
