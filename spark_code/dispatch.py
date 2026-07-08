@@ -487,71 +487,93 @@ async def run_subagent(model, prompt: str, agent_type: str, config: dict,
             chosen_model = model
             _owns_subagent_model = False
 
-        semaphore = _get_semaphore(config)
-        async with semaphore:
-            # Worktree creation is the expensive part of isolation, so it
-            # happens HERE — inside the same semaphore acquisition as the
-            # sub-agent run — rather than before it. Concurrency stays capped
-            # at agents.max_concurrent exactly like a non-isolated dispatch.
-            if isolated and agent_type == "implementer" and custom is None:
-                registry, repo_root, worktree_path, isolation_note = (
-                    await _setup_worktree_isolation(registry, config))
-                if worktree_path is not None:
-                    system_prompt += _WORKTREE_PROMPT.format(path=worktree_path)
+        # Everything from here through the semaphore-gated run is wrapped in
+        # a try/finally so a provider-owned client (built just above by
+        # _resolve_subagent_model) is closed on EVERY exit path — including
+        # asyncio.CancelledError raised while still parked on
+        # ``semaphore.acquire()``. That is a real path: the lead can fan out
+        # several dispatch_agent calls concurrently via asyncio.gather
+        # (default agents.max_concurrent=3), and a Ctrl+C or task-group
+        # cancellation can cancel a sub-agent's task while it is still
+        # waiting for a semaphore slot — before it ever reaches the inner
+        # try/except below. Previously the close lived INSIDE the inner
+        # try's finally, nested inside ``async with semaphore:``, so that
+        # cancellation path (and any failure from ``_get_semaphore`` itself)
+        # skipped it and leaked the owned client's eagerly-opened
+        # httpx.AsyncClient. The lead's shared ``model``/``utility_model``
+        # are still never closed here — this finally only acts when
+        # ``_owns_subagent_model`` is True, which is exclusively the
+        # provider-built-client path from ``_resolve_subagent_model``.
+        try:
+            semaphore = _get_semaphore(config)
+            async with semaphore:
+                # Worktree creation is the expensive part of isolation, so it
+                # happens HERE — inside the same semaphore acquisition as the
+                # sub-agent run — rather than before it. Concurrency stays capped
+                # at agents.max_concurrent exactly like a non-isolated dispatch.
+                if isolated and agent_type == "implementer" and custom is None:
+                    registry, repo_root, worktree_path, isolation_note = (
+                        await _setup_worktree_isolation(registry, config))
+                    if worktree_path is not None:
+                        system_prompt += _WORKTREE_PROMPT.format(path=worktree_path)
 
-            # Everything from here on (Context/Agent construction AND the
-            # actual run) is wrapped so ANY failure — not just one inside
-            # sub_agent.run() itself — force-removes a worktree that was
-            # already created rather than leaking it. Re-raised either way,
-            # into the outer handler, which formats the
-            # "[dispatch_agent error] ..." string the lead sees.
-            try:
-                sub_context = Context(
-                    system_prompt=system_prompt,
-                    max_tokens=int(get(config, "model", "context_window", default=32768)),
-                    provider_prompt=get(config, "model", "system_prompt", default="") or "",
-                )
-                # Inherit the lead's mode but NEVER prompt: a sub-agent runs on
-                # the shared event loop, where a blocking prompt would freeze
-                # the session. The non-interactive manager fails safe — it
-                # allows only what the mode would allow without a prompt and
-                # denies the rest.
-                permissions = PermissionManager(mode=lead_mode, interactive=False)
+                # Everything from here on (Context/Agent construction AND the
+                # actual run) is wrapped so ANY failure — not just one inside
+                # sub_agent.run() itself — force-removes a worktree that was
+                # already created rather than leaking it. Re-raised either way,
+                # into the outer handler, which formats the
+                # "[dispatch_agent error] ..." string the lead sees.
+                try:
+                    sub_context = Context(
+                        system_prompt=system_prompt,
+                        max_tokens=int(get(config, "model", "context_window", default=32768)),
+                        provider_prompt=get(config, "model", "system_prompt", default="") or "",
+                    )
+                    # Inherit the lead's mode but NEVER prompt: a sub-agent runs on
+                    # the shared event loop, where a blocking prompt would freeze
+                    # the session. The non-interactive manager fails safe — it
+                    # allows only what the mode would allow without a prompt and
+                    # denies the rest.
+                    permissions = PermissionManager(mode=lead_mode, interactive=False)
 
-                sub_agent = Agent(
-                    chosen_model, sub_context, registry, permissions,
-                    console=Console(quiet=True),
-                    # Non-empty prefix so the sub-agent skips the Rich Live
-                    # display (its output must not fight the lead's) in
-                    # addition to the quiet console.
-                    output_prefix="sub",
-                    result_budgets=get(config, "tools", "result_budgets", default=None),
-                )
-                # Own round cap: agents.max_rounds (default 15), independent
-                # of the lead's MAX_TOOL_ROUNDS. Instance attribute shadows
-                # the class attr.
-                sub_agent.MAX_TOOL_ROUNDS = int(
-                    get(config, "agents", "max_rounds", default=_DEFAULT_MAX_ROUNDS)
-                    or _DEFAULT_MAX_ROUNDS)
+                    sub_agent = Agent(
+                        chosen_model, sub_context, registry, permissions,
+                        console=Console(quiet=True),
+                        # Non-empty prefix so the sub-agent skips the Rich Live
+                        # display (its output must not fight the lead's) in
+                        # addition to the quiet console.
+                        output_prefix="sub",
+                        result_budgets=get(config, "tools", "result_budgets", default=None),
+                    )
+                    # Own round cap: agents.max_rounds (default 15), independent
+                    # of the lead's MAX_TOOL_ROUNDS. Instance attribute shadows
+                    # the class attr.
+                    sub_agent.MAX_TOOL_ROUNDS = int(
+                        get(config, "agents", "max_rounds", default=_DEFAULT_MAX_ROUNDS)
+                        or _DEFAULT_MAX_ROUNDS)
 
-                result = await sub_agent.run(prompt)
-            except Exception:
-                # Never leak a worktree on a sub-agent crash.
-                if worktree_path is not None:
-                    await _remove_worktree(repo_root, worktree_path, force=True)
-                raise
-            finally:
-                # Only a provider-built client is ours to close (owns_client
-                # is True only from _resolve_subagent_model's provider path)
-                # — the lead's shared model and utility_model are
-                # caller-managed and must NEVER be closed here. Runs on both
-                # the success and the crash path above, so a provider client
-                # is never leaked even when sub_agent.run() raises.
-                if _owns_subagent_model:
-                    try:
-                        await chosen_model.close()
-                    except Exception:
-                        pass
+                    result = await sub_agent.run(prompt)
+                except Exception:
+                    # Never leak a worktree on a sub-agent crash.
+                    if worktree_path is not None:
+                        await _remove_worktree(repo_root, worktree_path, force=True)
+                    raise
+        finally:
+            # Only a provider-built client is ours to close (owns_client is
+            # True only from _resolve_subagent_model's provider path) — the
+            # lead's shared model and utility_model are caller-managed and
+            # must NEVER be closed here. This finally wraps
+            # _get_semaphore(...) AND ``async with semaphore:`` themselves
+            # (not just the run inside it), so the close also fires if the
+            # task is cancelled while still waiting for a slot, or if
+            # _get_semaphore raises. Guarded by its own try/except so a
+            # failure while closing can't mask the original exception/
+            # cancellation propagating out of this finally.
+            if _owns_subagent_model:
+                try:
+                    await chosen_model.close()
+                except Exception:
+                    pass
     except Exception as e:  # noqa: BLE001 — must never escape into the lead loop
         return f"[dispatch_agent error] {type(e).__name__}: {e}"
 
