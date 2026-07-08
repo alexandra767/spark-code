@@ -732,6 +732,8 @@ def build_tools(todo_list: TodoList | None = None, model=None,
     registry.register(RagSearchTool())
     from .tools.appstore_status import AppStoreStatusTool
     registry.register(AppStoreStatusTool())
+    from .tools.play_status import PlayStatusTool
+    registry.register(PlayStatusTool())
     from .tools.appstore_submit import AppStoreSubmitTool
     registry.register(AppStoreSubmitTool(interactive=interactive))
     from .tools.appstore_build_upload import AppStoreBuildUploadTool
