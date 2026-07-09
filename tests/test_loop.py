@@ -2,7 +2,7 @@
 
 import pytest
 
-from spark_code.loop import LoopConfig, parse_interval, parse_loop_args
+from spark_code.loop import parse_interval, parse_loop_args
 
 
 class TestParseInterval:
