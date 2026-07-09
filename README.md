@@ -64,6 +64,10 @@ Type `/help` in the CLI for the full list, including:
 `/watch`, `/checkpoint`, `/rollback`, `/cost`, `/profile`, `/apply`, `/teach`,
 `/share`, `/search`, `/branch`, `/switch`, and more.
 
+### Main Slash Commands
+
+- **`/loop`** — autonomous rounds: `/loop --check "pytest -q" fix the failing tests` keeps working until the tests actually pass; `/loop every 30m keep the build green` patrols on a timer. Git checkpoint before every round, full audit log in `.spark/loops/`, Esc to stop.
+
 ## License
 
 MIT — Alexandra Titus
