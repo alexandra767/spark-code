@@ -366,3 +366,22 @@ class TestStatusLine:
         asyncio.run(eng.run())
         line = eng.status_line()
         assert "done" in line and "1" in line
+
+
+class TestSlashSentinel:
+    """The /loop slash handler returns a __LOOP__ sentinel like /watch's
+    __WATCH__ (cli.py). We test the pure helper that builds it."""
+
+    def test_loop_args_pass_through(self):
+        from spark_code.loop import build_loop_sentinel
+        assert build_loop_sentinel("fix the tests") == "__LOOP__fix the tests"
+
+    def test_stop_and_status_pass_through(self):
+        from spark_code.loop import build_loop_sentinel
+        assert build_loop_sentinel("stop") == "__LOOP__stop"
+        assert build_loop_sentinel("status") == "__LOOP__status"
+
+    def test_empty_returns_none_for_usage_help(self):
+        from spark_code.loop import build_loop_sentinel
+        assert build_loop_sentinel("") is None
+        assert build_loop_sentinel("   ") is None

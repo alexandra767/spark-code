@@ -42,6 +42,7 @@ _BUILTIN_COMMANDS: dict[str, str] = {
     "/yolo": "Toggle agent mode (autonomous + trust all)",
     "/trust": "Switch to trust mode (allow all)",
     "/auto": "Switch to auto mode (allow reads)",
+    "/loop": "Work in rounds until done, or repeat on a timer",
     "/ask": "Switch to ask mode (confirm all)",
     "/plan": "Create a plan before executing",
     "/plan show": "Show the current plan",

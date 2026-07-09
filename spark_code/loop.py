@@ -268,3 +268,12 @@ class LoopEngine:
             st.status = "stopped"
         self._log(f"\n**ended: {st.status} after {st.round_n} round(s)**")
         return st.status
+
+
+def build_loop_sentinel(args: str) -> str | None:
+    """Slash-handler helper: raw /loop args -> __LOOP__ sentinel.
+    None means "print usage" (no args given)."""
+    text = (args or "").strip()
+    if not text:
+        return None
+    return f"__LOOP__{text}"

@@ -1129,6 +1129,7 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
 - `/mode [ask|auto|trust]` — Switch permission mode
 - `/trust` / `/auto` / `/ask` — Quick mode switch
 - `/yolo` — Toggle agent mode (autonomous + trust all)
+- `/loop [every 30m] [--check "cmd"] <goal>` — Autonomous rounds until done (or on a timer); Esc stops
 
 **Team & Planning**
 - `/team <prompt>` — Spawn a background worker
@@ -2455,6 +2456,18 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
             return None
         return f"__WATCH__{args.strip()}"
 
+    elif command == "/loop":
+        from .loop import build_loop_sentinel
+        sentinel = build_loop_sentinel(args)
+        if sentinel is None:
+            console.print("[#ebcb8b]Usage: /loop \\[every <interval>] [--check \"<cmd>\"] <goal>[/#ebcb8b]")
+            console.print("[#8899aa]  /loop fix the failing tests            — rounds until done[/#8899aa]")
+            console.print("[#8899aa]  /loop --check \"pytest -q\" fix tests    — done when check passes[/#8899aa]")
+            console.print("[#8899aa]  /loop every 30m keep the build green   — repeat on a timer[/#8899aa]")
+            console.print("[#8899aa]  /loop status · /loop stop · Esc stops a running loop[/#8899aa]")
+            return None
+        return sentinel
+
     elif command == "/checkpoint":
         # Create a git stash checkpoint
         try:
@@ -2999,6 +3012,9 @@ async def run_interactive(config: dict, resume_session: str = "",
 
     # Initialize file watcher (lazy — started by /watch)
     file_watcher = None
+    # Most recent /loop engine this session (for /loop status); the loop
+    # itself owns the prompt while running, so there's only ever one live.
+    last_loop_engine = None
 
     # Dual-model routing (Phase 4 Task 2): an optional cheaper utility model
     # (default: the real 30B on Ollama, see routing.DEFAULT_UTILITY_MODEL)
@@ -3589,6 +3605,50 @@ async def run_interactive(config: dict, resume_session: str = "",
                             await file_watcher.stop()
                         file_watcher = FileWatcher(watch_cmd, console)
                         await file_watcher.start()
+
+                elif result.startswith("__LOOP__"):
+                    from .loop import LoopEngine, parse_loop_args
+                    from .ui.esc_watcher import EscWatcher
+                    loop_arg = result[len("__LOOP__"):]
+                    if loop_arg == "stop":
+                        console.print("[#8899aa]No loop is running (a running loop owns the prompt — stop it with Esc).[/#8899aa]")
+                    elif loop_arg == "status":
+                        if last_loop_engine is not None:
+                            console.print(f"[#88c0d0]{last_loop_engine.status_line()}[/#88c0d0]")
+                            console.print(f"[#8899aa]log: {last_loop_engine.state.log_path}[/#8899aa]")
+                        else:
+                            console.print("[#8899aa]No loop has run this session.[/#8899aa]")
+                    else:
+                        try:
+                            loop_cfg = parse_loop_args(loop_arg)
+                        except ValueError as e:
+                            console.print(f"[#bf616a]{e}[/#bf616a]")
+                            continue
+                        engine = LoopEngine(loop_cfg, console, runner=agent.run)
+                        last_loop_engine = engine
+                        # /yolo recipe for the loop's duration: agentic prompt
+                        # + trusted tools, restored in finally NO MATTER WHAT.
+                        prev_prompt = context.system_prompt
+                        prev_mode = permissions.mode if permissions else None
+                        if SYSTEM_PROMPT in context.system_prompt:
+                            context.system_prompt = context.system_prompt.replace(
+                                SYSTEM_PROMPT, AGENTIC_PROMPT)
+                        if permissions:
+                            permissions.mode = "trust"
+                        console.print("[bold #ebcb8b]🔁 Loop started[/bold #ebcb8b] [#8899aa]— Esc to stop; checkpoint before every round[/#8899aa]")
+                        try:
+                            with EscWatcher(on_escape=engine.request_stop):
+                                final_status = await engine.run()
+                        except KeyboardInterrupt:
+                            engine.request_stop()
+                            final_status = "stopped"
+                        finally:
+                            context.system_prompt = prev_prompt
+                            if permissions and prev_mode is not None:
+                                permissions.mode = prev_mode
+                        color = "#a3be8c" if final_status == "done" else "#ebcb8b"
+                        console.print(f"[{color}]Loop ended: {final_status} after {engine.state.round_n} round(s)[/{color}]")
+                        console.print(f"[#8899aa]log: {engine.state.log_path} · /rollback lists round checkpoints[/#8899aa]")
 
                 elif result == "__PROFILE__":
                     # Model performance benchmark
