@@ -1,5 +1,6 @@
 """Tests for the /loop engine (spark_code/loop.py)."""
 
+import asyncio
 import subprocess as _subprocess
 from types import SimpleNamespace
 
@@ -207,3 +208,161 @@ class TestTreeFingerprint:
         )
         monkeypatch.setattr(loop_mod.subprocess, "run", fake)
         assert tree_fingerprint() == ""
+
+
+class FakeRunner:
+    """Injectable stand-in for Agent.run — scripted responses per round."""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.prompts = []
+
+    async def __call__(self, prompt: str) -> str:
+        self.prompts.append(prompt)
+        return self.responses.pop(0) if self.responses else "LOOP_CONTINUE"
+
+
+class _QuietConsole:
+    def print(self, *args, **kwargs):
+        pass
+
+
+def _engine(cfg, runner, tmp_path, monkeypatch, checkpoints=None,
+            fingerprints=None, checks=None):
+    """Engine with all subprocess helpers stubbed out."""
+    monkeypatch.setattr(loop_mod, "make_checkpoint",
+                        lambda label: (checkpoints or ["created"]).pop(0)
+                        if checkpoints else "created")
+    fp_iter = iter(fingerprints or [])
+    monkeypatch.setattr(loop_mod, "tree_fingerprint",
+                        lambda: next(fp_iter, "same"))
+    check_iter = iter(checks or [])
+    monkeypatch.setattr(loop_mod, "run_check",
+                        lambda cmd, timeout_s=300: next(check_iter, (False, "")))
+    return loop_mod.LoopEngine(loop_mod.LoopConfig(**cfg), _QuietConsole(), runner,
+                      loops_dir=str(tmp_path / "loops"))
+
+
+class TestLoopEngineUntilDone:
+    def test_stops_on_self_done(self, tmp_path, monkeypatch):
+        runner = FakeRunner(["did some work LOOP_CONTINUE", "all fixed LOOP_DONE"])
+        eng = _engine({"goal": "fix it"}, runner, tmp_path, monkeypatch,
+                      fingerprints=["a", "b", "c", "d"])  # changes every round
+        status = asyncio.run(eng.run())
+        assert status == "done"
+        assert eng.state.round_n == 2
+
+    def test_check_gates_done_over_model_claim(self, tmp_path, monkeypatch):
+        # Model claims DONE both rounds; check fails then passes — check wins.
+        runner = FakeRunner(["LOOP_DONE", "LOOP_DONE"])
+        eng = _engine({"goal": "fix it", "check_cmd": "pytest"}, runner,
+                      tmp_path, monkeypatch,
+                      fingerprints=["a", "b", "c", "d"],
+                      checks=[(False, "1 failed"), (True, "ok")])
+        status = asyncio.run(eng.run())
+        assert status == "done"
+        assert eng.state.round_n == 2
+        assert eng.state.last_verify == "PASS"
+
+    def test_stalled_after_two_unproductive_rounds(self, tmp_path, monkeypatch):
+        runner = FakeRunner(["LOOP_CONTINUE", "LOOP_CONTINUE", "LOOP_CONTINUE"])
+        # fingerprint never changes -> no progress; verify keeps failing
+        eng = _engine({"goal": "fix it"}, runner, tmp_path, monkeypatch,
+                      fingerprints=["same"] * 10)
+        status = asyncio.run(eng.run())
+        assert status == "stalled"
+        assert eng.state.round_n == 2
+
+    def test_round_cap(self, tmp_path, monkeypatch):
+        runner = FakeRunner(["LOOP_CONTINUE"] * 5)
+        eng = _engine({"goal": "fix it", "max_rounds": 3}, runner, tmp_path,
+                      monkeypatch,
+                      fingerprints=[str(i) for i in range(20)])  # always progress
+        status = asyncio.run(eng.run())
+        assert status == "capped"
+        assert eng.state.round_n == 3
+
+    def test_round_timeout_counts_as_no_progress(self, tmp_path, monkeypatch):
+        async def slow_runner(prompt):
+            await asyncio.sleep(5)
+            return "LOOP_DONE"
+
+        eng = _engine({"goal": "fix it", "round_timeout_s": 0}, slow_runner,
+                      tmp_path, monkeypatch, fingerprints=["same"] * 10)
+        status = asyncio.run(eng.run())
+        assert status == "stalled"  # two timed-out, changeless rounds
+
+    def test_checkpoint_called_before_every_round(self, tmp_path, monkeypatch):
+        labels = []
+        monkeypatch.setattr(loop_mod, "tree_fingerprint", lambda: "x")
+        monkeypatch.setattr(loop_mod, "run_check", lambda c, timeout_s=300: (False, ""))
+
+        def record_checkpoint(label):
+            labels.append(label)
+            return "created"
+
+        monkeypatch.setattr(loop_mod, "make_checkpoint", record_checkpoint)
+        runner = FakeRunner(["LOOP_CONTINUE", "LOOP_DONE"])
+        eng = loop_mod.LoopEngine(loop_mod.LoopConfig(goal="fix"), _QuietConsole(),
+                         runner, loops_dir=str(tmp_path / "loops"))
+        asyncio.run(eng.run())
+        assert len(labels) == eng.state.round_n
+        assert all("spark-checkpoint" in lb for lb in labels)
+
+    def test_log_written(self, tmp_path, monkeypatch):
+        runner = FakeRunner(["LOOP_DONE"])
+        eng = _engine({"goal": "fix the thing"}, runner, tmp_path, monkeypatch,
+                      fingerprints=["a", "b"])
+        asyncio.run(eng.run())
+        text = open(eng.state.log_path).read()
+        assert "fix the thing" in text
+        assert "Round 1" in text
+        assert "ended: done" in text
+
+
+class TestLoopEngineTimed:
+    def test_refires_and_stop_flag_ends_sleep(self, tmp_path, monkeypatch):
+        eng_holder = {}
+
+        class StopAfterTwo(FakeRunner):
+            async def __call__(self, prompt):
+                if len(self.prompts) >= 1:
+                    eng_holder["eng"].request_stop()
+                return await super().__call__(prompt)
+
+        runner = StopAfterTwo(["LOOP_DONE", "LOOP_DONE"])
+        eng = _engine({"goal": "check build", "interval_s": 1}, runner,
+                      tmp_path, monkeypatch,
+                      fingerprints=[str(i) for i in range(10)])
+        eng_holder["eng"] = eng
+        status = asyncio.run(eng.run())
+        # Round 1 succeeded (timed loops don't exit on success), slept,
+        # round 2 ran with stop already requested -> stopped after it.
+        assert status == "stopped"
+        assert eng.state.round_n == 2
+
+    def test_timed_success_does_not_exit(self, tmp_path, monkeypatch):
+        # 3 successful rounds, then stop via flag — proves success ≠ exit.
+        class StopOnThird(FakeRunner):
+            async def __call__(self, prompt):
+                if len(self.prompts) >= 2:
+                    self.eng.request_stop()
+                return await super().__call__(prompt)
+
+        runner = StopOnThird(["LOOP_DONE"] * 5)
+        eng = _engine({"goal": "patrol", "interval_s": 1}, runner, tmp_path,
+                      monkeypatch, fingerprints=[str(i) for i in range(20)])
+        runner.eng = eng
+        status = asyncio.run(eng.run())
+        assert eng.state.round_n == 3
+        assert status == "stopped"
+
+
+class TestStatusLine:
+    def test_status_line_mentions_round(self, tmp_path, monkeypatch):
+        runner = FakeRunner(["LOOP_DONE"])
+        eng = _engine({"goal": "fix"}, runner, tmp_path, monkeypatch,
+                      fingerprints=["a", "b"])
+        asyncio.run(eng.run())
+        line = eng.status_line()
+        assert "done" in line and "1" in line

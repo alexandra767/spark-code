@@ -7,10 +7,14 @@ Usage:
     /loop status | /loop stop
 """
 
+import asyncio
 import hashlib
+import os
 import re
 import subprocess
+import time
 from dataclasses import dataclass
+from typing import Awaitable, Callable
 
 # Interval bounds (spec: min 60s, max 24h)
 _MIN_INTERVAL_S = 60
@@ -140,3 +144,127 @@ def tree_fingerprint() -> str:
         return ""
     blob = (diff.stdout or "") + "\n" + (untracked.stdout or "")
     return hashlib.sha1(blob.encode()).hexdigest()
+
+
+class LoopEngine:
+    """Drives /loop rounds in the foreground. The model runner is injected
+    (tests use fakes; cli passes agent.run). All git/check side effects go
+    through the module-level helpers so tests can monkeypatch them.
+    """
+
+    def __init__(self, config: LoopConfig, console,
+                 runner: Callable[[str], Awaitable[str]],
+                 loops_dir: str = ".spark/loops"):
+        self.config = config
+        self.console = console
+        self.runner = runner
+        self.state = LoopState()
+        os.makedirs(loops_dir, exist_ok=True)
+        slug = re.sub(r"[^a-z0-9]+", "-", config.goal.lower())[:40].strip("-") or "loop"
+        self.state.log_path = os.path.join(
+            loops_dir, f"{time.strftime('%Y%m%d-%H%M%S')}-{slug}.md")
+
+    def request_stop(self) -> None:
+        """Thread-safe-enough stop signal (bool set; read between awaits)."""
+        self.state.stop_requested = True
+
+    def status_line(self) -> str:
+        st = self.state
+        nxt = ""
+        if st.status == "sleeping" and st.next_run_at:
+            nxt = f" · next {time.strftime('%H:%M:%S', time.localtime(st.next_run_at))}"
+        return f"🔁 loop {st.status} · round {st.round_n}{nxt}"
+
+    def _log(self, text: str) -> None:
+        with open(self.state.log_path, "a") as f:
+            f.write(text + "\n")
+
+    def _round_prompt(self, verify_tail: str) -> str:
+        cfg, st = self.config, self.state
+        if st.round_n == 1:
+            base = cfg.goal
+        else:
+            base = (f"Round {st.round_n} of a /loop. Goal: {cfg.goal}\n"
+                    f"The goal is not yet complete — continue working on it.")
+            if verify_tail:
+                base += f"\nLast check output (tail):\n{verify_tail}"
+        if cfg.check_cmd:
+            base += (f"\nThe goal is verified by `{cfg.check_cmd}` exiting 0; "
+                     f"run it yourself to confirm before finishing.")
+        else:
+            base += (f"\nWhen the goal is fully complete, end your reply with "
+                     f"{_DONE_MARKER}. If more work remains, end with "
+                     f"{_CONTINUE_MARKER}.")
+        return base
+
+    async def run(self) -> str:
+        cfg, st = self.config, self.state
+        flavor = "timed" if cfg.interval_s else "until-done"
+        self._log(f"# /loop — {cfg.goal}\n")
+        self._log(f"flavor: {flavor}"
+                  + (f" · every {cfg.interval_s}s" if cfg.interval_s else "")
+                  + (f" · check: `{cfg.check_cmd}`" if cfg.check_cmd else ""))
+        no_progress = 0
+        verify_tail = ""
+        while not st.stop_requested:
+            if cfg.interval_s is None and st.round_n >= cfg.max_rounds:
+                st.status = "capped"
+                break
+            st.round_n += 1
+            st.status = "running"
+            self.console.print(
+                f"[#88c0d0]🔁 Round {st.round_n}"
+                + (f"/{cfg.max_rounds}" if cfg.interval_s is None else "")
+                + f" — {cfg.goal}[/#88c0d0]")
+            cp = make_checkpoint(f"spark-checkpoint-loop-round-{st.round_n}")
+            before = tree_fingerprint()
+            t0 = time.monotonic()
+            timed_out = False
+            try:
+                response = await asyncio.wait_for(
+                    self.runner(self._round_prompt(verify_tail)),
+                    timeout=cfg.round_timeout_s)
+            except asyncio.TimeoutError:
+                response, timed_out = "", True
+            after = tree_fingerprint()
+            changed = before != after
+            if cfg.check_cmd:
+                ok, verify_tail = run_check(cfg.check_cmd)
+                st.last_verify = "PASS" if ok else "FAIL"
+            else:
+                ok = _DONE_MARKER in (response or "")
+                st.last_verify = "SELF-DONE" if ok else "SELF-NOT-DONE"
+                verify_tail = ""
+            self._log(f"\n## Round {st.round_n} — {time.strftime('%H:%M:%S')}\n"
+                      f"- checkpoint: {cp}\n"
+                      f"- files changed: {'yes' if changed else 'no'}\n"
+                      f"- verify: {st.last_verify}"
+                      + (" (round TIMEOUT)" if timed_out else "") + "\n"
+                      f"- took: {int(time.monotonic() - t0)}s")
+            # No-progress guard (both flavors): a failing round that changed
+            # nothing, twice in a row, means we're spinning — stop.
+            if not ok and not changed:
+                no_progress += 1
+                if no_progress >= 2:
+                    st.status = "stalled"
+                    break
+            else:
+                no_progress = 0
+            if cfg.interval_s is None:
+                if ok:
+                    st.status = "done"
+                    break
+            else:
+                # Timed flavor: success does not exit; sleep until next tick,
+                # waking every second to honor stop requests.
+                st.status = "sleeping"
+                st.next_run_at = time.time() + cfg.interval_s
+                self.console.print(f"[#4c566a]{self.status_line()}[/#4c566a]")
+                for _ in range(cfg.interval_s):
+                    if st.stop_requested:
+                        break
+                    await asyncio.sleep(1)
+        if st.stop_requested and st.status != "done":
+            st.status = "stopped"
+        self._log(f"\n**ended: {st.status} after {st.round_n} round(s)**")
+        return st.status
