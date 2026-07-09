@@ -73,3 +73,7 @@ Follows the `/watch` precedent end to end:
 - Unit: interval parsing (valid/invalid/bounds), no-progress detection, round-cap and timeout accounting, stop-flag responsiveness during sleep, sentinel arg round-trip (JSON encode/decode), permission-mode restore.
 - Integration (mock agent runner): until-done stops on verified success; `--check` gates DONE even when the model claims success; timed flavor sleeps and re-fires; STALLED after two no-change failing rounds; Esc stops gracefully; checkpoint called before every round (assert call order).
 - No test invokes a real model (existing test-suite convention).
+
+## v1 implementation note (post-review)
+
+A running loop owns the REPL prompt (foreground design), so `/loop status` and `/loop stop` cannot be typed mid-loop: Esc is the live stop control (round number and next-run time print inline), and `/loop status` reports the most recent loop. This is the intended v1 foreground scope.
