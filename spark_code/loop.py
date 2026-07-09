@@ -7,7 +7,9 @@ Usage:
     /loop status | /loop stop
 """
 
+import hashlib
 import re
+import subprocess
 from dataclasses import dataclass
 
 # Interval bounds (spec: min 60s, max 24h)
@@ -78,3 +80,59 @@ def parse_loop_args(args: str) -> LoopConfig:
     if not text:
         raise ValueError("No goal given — usage: /loop [every 30m] [--check \"cmd\"] <goal>")
     return LoopConfig(goal=text, check_cmd=check_cmd, interval_s=interval_s)
+
+
+def make_checkpoint(label: str) -> str:
+    """Git-stash checkpoint, same recipe as /checkpoint (cli.py):
+    stash push to record, immediately apply --index so the working tree is
+    untouched while the stash entry remains as the restore point.
+
+    Returns "created" | "clean-tree" | "failed" | "git-unavailable".
+    """
+    try:
+        result = subprocess.run(
+            ["git", "stash", "push", "-m", label],
+            capture_output=True, text=True, timeout=10)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return "git-unavailable"
+    if result.returncode != 0:
+        return "failed"
+    if "No local changes" in result.stdout:
+        return "clean-tree"
+    try:
+        subprocess.run(["git", "stash", "apply", "--index"],
+                       capture_output=True, text=True, timeout=10)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return "failed"
+    return "created"
+
+
+def run_check(cmd: str, timeout_s: int = 300) -> tuple[bool, str]:
+    """Run a user check command; ok iff exit 0. Returns (ok, output tail)."""
+    try:
+        r = subprocess.run(cmd, shell=True, capture_output=True, text=True,
+                           timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        return False, f"check timed out after {timeout_s}s"
+    except FileNotFoundError:
+        return False, "check command not found"
+    tail = ((r.stdout or "") + (r.stderr or ""))[-2000:]
+    return r.returncode == 0, tail
+
+
+def tree_fingerprint() -> str:
+    """Content-sensitive snapshot of the working tree, for no-progress
+    detection. `git status --porcelain` is NOT enough (a file edited twice
+    still shows the same 'M path' line) — hash actual diff content plus the
+    untracked-file list.
+    """
+    try:
+        diff = subprocess.run(["git", "diff", "HEAD"],
+                              capture_output=True, text=True, timeout=10)
+        untracked = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard"],
+            capture_output=True, text=True, timeout=10)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return ""
+    blob = (diff.stdout or "") + "\n" + (untracked.stdout or "")
+    return hashlib.sha1(blob.encode()).hexdigest()
