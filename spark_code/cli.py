@@ -3642,6 +3642,9 @@ async def run_interactive(config: dict, resume_session: str = "",
                         except KeyboardInterrupt:
                             engine.request_stop()
                             final_status = "stopped"
+                        except Exception as e:
+                            console.print(f"[#bf616a]Loop error: {e}[/#bf616a]")
+                            final_status = engine.state.status
                         finally:
                             context.system_prompt = prev_prompt
                             if permissions and prev_mode is not None:
