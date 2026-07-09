@@ -102,6 +102,27 @@ def _fake_run_factory(returncode=0, stdout="", stderr="", raises=None):
     return fake_run
 
 
+def _fake_run_sequence(*results):
+    """Build a subprocess.run that returns different results for each call.
+    Each result is (returncode, stdout, stderr) or raises an exception.
+    """
+    calls = []
+    result_list = list(results)
+
+    def fake_run(*args, **kwargs):
+        calls.append((args, kwargs))
+        if not result_list:
+            raise RuntimeError("fake_run called more times than expected")
+        result = result_list.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        returncode, stdout, stderr = result
+        return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
+
+    fake_run.calls = calls
+    return fake_run
+
+
 class TestMakeCheckpoint:
     def test_created(self, monkeypatch):
         fake = _fake_run_factory(returncode=0, stdout="Saved working directory")
@@ -126,6 +147,14 @@ class TestMakeCheckpoint:
         fake = _fake_run_factory(raises=FileNotFoundError())
         monkeypatch.setattr(loop_mod.subprocess, "run", fake)
         assert make_checkpoint("x") == "git-unavailable"
+
+    def test_apply_fails(self, monkeypatch):
+        fake = _fake_run_sequence(
+            (0, "Saved working directory", ""),  # push succeeds
+            (1, "", "conflict"),  # apply fails
+        )
+        monkeypatch.setattr(loop_mod.subprocess, "run", fake)
+        assert make_checkpoint("x") == "failed"
 
 
 class TestRunCheck:
@@ -168,5 +197,13 @@ class TestTreeFingerprint:
 
     def test_git_unavailable_empty(self, monkeypatch):
         fake = _fake_run_factory(raises=FileNotFoundError())
+        monkeypatch.setattr(loop_mod.subprocess, "run", fake)
+        assert tree_fingerprint() == ""
+
+    def test_git_diff_fails(self, monkeypatch):
+        fake = _fake_run_sequence(
+            (1, "", "fatal: not a git repository"),  # git diff fails
+            (0, "", ""),  # git ls-files still runs but doesn't matter
+        )
         monkeypatch.setattr(loop_mod.subprocess, "run", fake)
         assert tree_fingerprint() == ""

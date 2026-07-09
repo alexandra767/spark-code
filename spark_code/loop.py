@@ -100,9 +100,11 @@ def make_checkpoint(label: str) -> str:
     if "No local changes" in result.stdout:
         return "clean-tree"
     try:
-        subprocess.run(["git", "stash", "apply", "--index"],
-                       capture_output=True, text=True, timeout=10)
+        apply_result = subprocess.run(["git", "stash", "apply", "--index"],
+                                      capture_output=True, text=True, timeout=10)
     except (FileNotFoundError, subprocess.TimeoutExpired):
+        return "failed"
+    if apply_result.returncode != 0:
         return "failed"
     return "created"
 
@@ -133,6 +135,8 @@ def tree_fingerprint() -> str:
             ["git", "ls-files", "--others", "--exclude-standard"],
             capture_output=True, text=True, timeout=10)
     except (FileNotFoundError, subprocess.TimeoutExpired):
+        return ""
+    if diff.returncode != 0 or untracked.returncode != 0:
         return ""
     blob = (diff.stdout or "") + "\n" + (untracked.stdout or "")
     return hashlib.sha1(blob.encode()).hexdigest()
