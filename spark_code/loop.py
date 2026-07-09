@@ -7,14 +7,8 @@ Usage:
     /loop status | /loop stop
 """
 
-import asyncio
-import hashlib
-import os
 import re
-import subprocess
-import time
 from dataclasses import dataclass
-from typing import Awaitable, Callable
 
 # Interval bounds (spec: min 60s, max 24h)
 _MIN_INTERVAL_S = 60
