@@ -4540,7 +4540,15 @@ async def _one_shot(config: dict, prompt: str, output: str = "text",
     # Honor --trust/--auto/--yolo (main() writes them into config) instead of
     # hardcoding "auto", so `spark --trust "do X"` doesn't still prompt.
     agentic = config.get("_agentic", False)
-    context = Context(system_prompt=AGENTIC_PROMPT if agentic else SYSTEM_PROMPT)
+    # 2026-07-10: one-shot runs must carry the SAME provider/platform prompts
+    # as interactive sessions — a bare Context here silently dropped
+    # providers.<name>.system_prompt (found when the fine-tuned 30B narrated
+    # instead of calling tools headlessly; the act-first policy never reached it).
+    context = Context(
+        system_prompt=AGENTIC_PROMPT if agentic else SYSTEM_PROMPT,
+        platform_prompt=format_platform_prompt(os.getcwd()),
+        provider_prompt=get(config, "model", "system_prompt", default=""),
+    )
     permissions = PermissionManager(
         mode=get(config, "permissions", "mode", default="auto"),
         interactive=False)
