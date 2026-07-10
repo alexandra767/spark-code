@@ -69,6 +69,7 @@ from .tools.list_dir import ListDirTool
 from .tools.rag_search import RagSearchTool
 from .tools.read_file import ReadFileTool
 from .tools.spawn_worker import SpawnWorkerTool
+from .tools.stack_info import StackInfoTool
 from .tools.wait_for_workers import WaitForWorkersTool
 from .tools.web_fetch import WebFetchTool
 from .tools.web_search import WebSearchTool
@@ -755,6 +756,7 @@ def build_tools(todo_list: TodoList | None = None, model=None,
     registry.register(WebSearchTool())
     registry.register(WebFetchTool())
     registry.register(RagSearchTool())
+    registry.register(StackInfoTool())
     from .tools.appstore_status import AppStoreStatusTool
     registry.register(AppStoreStatusTool())
     from .tools.play_status import PlayStatusTool
