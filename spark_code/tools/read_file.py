@@ -3,7 +3,13 @@
 import os
 
 from ..keys import keys_path
-from .base import MAX_READ_SIZE, Tool, _is_binary, _validate_path
+from .base import (
+    MAX_READ_SIZE,
+    Tool,
+    _is_binary,
+    _validate_path,
+    is_protected_credential_file,
+)
 
 
 class ReadFileTool(Tool):
@@ -49,7 +55,7 @@ class ReadFileTool(Tool):
         # Returned as a plain refusal STRING (not raised) so it flows through
         # the same "Error: ..."-shaped result path the model already expects,
         # rather than surfacing as an unhandled exception.
-        if os.path.realpath(path) == os.path.realpath(keys_path()):
+        if is_protected_credential_file(path, keys_path):
             return "Refusing to read the Spark keys file"
 
         if not os.path.exists(path):

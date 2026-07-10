@@ -255,6 +255,17 @@ class TestSetConfigScope:
             assert written["model"]["temperature"] == 0.4
 
 
+class TestUtilityModelDefaultHost:
+    def test_default_utility_endpoint_is_tailnet_not_local(self):
+        """The shipped utility_model default must use the tailnet hostname, not
+        the .local mDNS name — resolve_provider never rewrites utility_model,
+        so a .local default would break an off-LAN (nomad) session."""
+        from spark_code.config import DEFAULT_CONFIG
+        ep = DEFAULT_CONFIG["utility_model"]["endpoint"]
+        assert ep == "http://spark-4a54.tailcade53.ts.net:11434"
+        assert ".local" not in ep
+
+
 class TestGet:
     def test_returns_nested_value(self):
         config = {"level1": {"level2": {"level3": "found"}}}

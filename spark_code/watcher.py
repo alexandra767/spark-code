@@ -25,6 +25,9 @@ _WATCH_EXTENSIONS = {
     ".yaml", ".yml", ".toml", ".json", ".sql", ".sh",
 }
 
+# Max wall-clock a single watch-command run may take before it's killed.
+_COMMAND_TIMEOUT_S = 120
+
 # Directories to ignore
 _IGNORE_DIRS = {
     "__pycache__", "node_modules", ".git", ".venv", "venv", ".tox",
@@ -138,6 +141,7 @@ class FileWatcher:
 
     async def _run_command(self):
         """Execute the watch command."""
+        process = None
         try:
             process = await asyncio.create_subprocess_shell(
                 self.command,
@@ -146,7 +150,7 @@ class FileWatcher:
                 cwd=self.directory,
             )
             stdout, _ = await asyncio.wait_for(
-                process.communicate(), timeout=120
+                process.communicate(), timeout=_COMMAND_TIMEOUT_S
             )
             output = stdout.decode("utf-8", errors="replace").strip()
 
@@ -164,6 +168,21 @@ class FileWatcher:
                     f"  Exit code: {process.returncode}", style=_C_RED))
 
         except asyncio.TimeoutError:
-            self.console.print(Text("  Command timed out", style=_C_RED))
+            # wait_for only cancels the communicate() coroutine — the child
+            # process keeps running. Without killing it, a slow/hung command
+            # orphans a process, and every subsequent file change spawns
+            # ANOTHER one. Kill and reap it, then report the timeout.
+            if process is not None:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass  # already exited between the timeout and the kill
+                try:
+                    await process.wait()
+                except Exception:
+                    pass
+            self.console.print(Text(
+                f"  Command timed out after {_COMMAND_TIMEOUT_S}s "
+                f"— killed", style=_C_RED))
         except Exception as e:
             self.console.print(Text(f"  Error: {e}", style=_C_RED))

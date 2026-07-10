@@ -244,11 +244,31 @@ def build_task_desc(step: dict, refs: dict[int, dict]) -> str:
     return "\n".join(parts)
 
 
-def _make_worker_name(title: str, step_num: int) -> str:
-    """Create a clean worker name from a step title."""
-    name = re.sub(r"[^a-z0-9]", "-", title.lower())
-    name = re.sub(r"-+", "-", name).strip("-")
-    return (name[:15] if name else f"step-{step_num}")
+def _make_worker_name(title: str, step_num: int,
+                      used: set[str] | None = None) -> str:
+    """Create a clean, UNIQUE worker name from a step title.
+
+    The sanitized title is truncated to 15 chars. Two steps whose titles share
+    the same first 15 sanitized chars would otherwise produce the SAME name;
+    team.spawn's duplicate-running guard then returns None for the second and
+    the step is silently dropped from tracking/execution. When *used* is given,
+    a numeric suffix (``-2``, ``-3``, …) is appended on collision — trimmed to
+    stay within the 15-char base budget — and the chosen name is recorded in
+    *used* so every step gets a distinct worker.
+    """
+    base = re.sub(r"[^a-z0-9]", "-", title.lower())
+    base = re.sub(r"-+", "-", base).strip("-")
+    base = base[:15] if base else f"step-{step_num}"
+    if used is None:
+        return base
+    name = base
+    n = 2
+    while name in used:
+        suffix = f"-{n}"
+        name = (base[:15 - len(suffix)].rstrip("-") or f"step-{step_num}") + suffix
+        n += 1
+    used.add(name)
+    return name
 
 
 async def execute_plan(plan_text: str, team_manager, agent, console: Console):
@@ -285,6 +305,11 @@ async def execute_plan(plan_text: str, team_manager, agent, console: Console):
         )
     console.print()
 
+    # Names already handed to workers this run — so two steps with the same
+    # 15-char title prefix get distinct names instead of colliding (which would
+    # make the second spawn return None and drop the step silently).
+    used_names: set[str] = set()
+
     i = 0
     while i < len(steps):
         step = steps[i]
@@ -311,12 +336,23 @@ async def execute_plan(plan_text: str, team_manager, agent, console: Console):
 
                 task_desc = build_task_desc(s, refs)
 
-                worker_name = _make_worker_name(s["title"], s["number"])
+                worker_name = _make_worker_name(
+                    s["title"], s["number"], used=used_names)
                 worker = await team_manager.spawn(
                     task_desc, name=worker_name
                 )
                 if worker:
                     workers.append(worker)
+                else:
+                    # spawn() returned None (name collision that slipped past
+                    # the dedup, or worker-slot exhaustion). Surface it loudly
+                    # instead of silently dropping the step from the plan.
+                    console.print(
+                        f"[{_C_RED}]  ✗ Step {s['number']} "
+                        f"({s['title']}) could not be spawned as "
+                        f"'{worker_name}' — skipped (name collision or no "
+                        f"worker slot). Re-run or adjust the plan.[/{_C_RED}]"
+                    )
 
             # Wait for all workers in this batch
             while any(w.status == "running" for w in workers):

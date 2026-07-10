@@ -576,10 +576,21 @@ async def run_subagent(model, prompt: str, agent_type: str, config: dict,
                         or _DEFAULT_MAX_ROUNDS)
 
                     result = await sub_agent.run(prompt)
-                except Exception:
-                    # Never leak a worktree on a sub-agent crash.
+                except BaseException:
+                    # Never leak a worktree on a sub-agent crash OR cancellation.
+                    # asyncio.CancelledError is a BaseException (NOT Exception),
+                    # so a plain `except Exception` skipped it — and cancellation
+                    # is a real path here (a /loop round's 15-min asyncio.wait_for
+                    # timeout cancels agent.run, and a lead Ctrl+C cancels the
+                    # task group), which then leaked `.spark/worktrees/<id>/` on
+                    # disk and in `git worktree list`. Force-remove, then re-raise
+                    # so the cancellation/exception still propagates unchanged.
                     if worktree_path is not None:
-                        await _remove_worktree(repo_root, worktree_path, force=True)
+                        try:
+                            await _remove_worktree(
+                                repo_root, worktree_path, force=True)
+                        except Exception:
+                            pass
                     raise
         finally:
             # Only a provider-built client is ours to close (owns_client is
@@ -622,6 +633,22 @@ async def run_subagent(model, prompt: str, agent_type: str, config: dict,
         result += f"\n\n[isolation note: {isolation_note}]"
 
     return _truncate_result(result, _SUBAGENT_RESULT_BUDGET)
+
+
+def _resolve_lead_mode(get_lead_mode, permissions, lead_mode) -> str:
+    """Resolve the lead's CURRENT permission mode, most-specific source first:
+    an explicit getter (respects a mid-session Shift+Tab change), then a live
+    PermissionManager's ``.mode``, then a static string, defaulting to the
+    safest ``"ask"``. Shared by every dispatch-style tool so a sub-agent it
+    launches always inherits the mode the lead is in RIGHT NOW."""
+    if get_lead_mode is not None:
+        try:
+            return get_lead_mode() or "ask"
+        except Exception:
+            return "ask"
+    if permissions is not None:
+        return getattr(permissions, "mode", "ask") or "ask"
+    return lead_mode or "ask"
 
 
 class DispatchAgentTool(Tool):
@@ -747,14 +774,8 @@ class DispatchAgentTool(Tool):
         }
 
     def _resolve_lead_mode(self) -> str:
-        if self._get_lead_mode is not None:
-            try:
-                return self._get_lead_mode() or "ask"
-            except Exception:
-                return "ask"
-        if self._permissions is not None:
-            return getattr(self._permissions, "mode", "ask") or "ask"
-        return self._lead_mode or "ask"
+        return _resolve_lead_mode(
+            self._get_lead_mode, self._permissions, self._lead_mode)
 
     async def execute(self, prompt: str = "", agent_type: str = "explore",
                       isolated: bool = False, **kwargs) -> str:
@@ -763,3 +784,106 @@ class DispatchAgentTool(Tool):
             self._resolve_lead_mode(),
             agent_defs=self._agent_defs, utility_model=self._utility_model,
             isolated=bool(isolated), mcp_tools=self._mcp_tools)
+
+
+class BrowseWebTool(Tool):
+    """Drive a REAL web browser via the ``web-driver`` sub-agent (Gemini vision).
+
+    A thin wrapper over :func:`run_subagent` that always routes to
+    ``agent_type="web-driver"`` — the ``.spark/agents/web-driver.md`` custom
+    def that actually controls a browser (navigate, click, type, fill, submit)
+    using Gemini vision. It exists because the model kept hallucinating a
+    nonexistent ``web_driver`` tool instead of ``dispatch_agent(agent_type=
+    "web-driver")``; this gives that capability its own first-class name.
+
+    Constructor mirrors :class:`DispatchAgentTool` exactly (same model, config,
+    lead-mode resolution, ``agent_defs``, ``utility_model`` and shared
+    ``mcp_tools`` — the browser MCP tools the web-driver def's ``tools:``
+    allowlist actually names). Register it in ``cli.build_tools`` right beside
+    ``DispatchAgentTool`` with the same arguments; it is intentionally NOT
+    self-registering.
+    """
+
+    name = "browse_web"
+    _BASE_DESCRIPTION = (
+        "Drive a REAL web browser via the web-driver sub-agent (Gemini vision). "
+        "USE THIS for interactive web tasks — clicking, typing, filling forms, "
+        "logging in, submitting, or navigating a multi-step flow on a live "
+        "page. Do NOT use it for read-only page reads: to just grab a page's "
+        "text or check a URL, use web_fetch instead. The web-driver runs in "
+        "its own isolated context and returns only a final report of what it "
+        "did and the ending page state."
+    )
+
+    def __init__(self, model=None, config: dict | None = None,
+                 permissions: PermissionManager | None = None,
+                 lead_mode: str | None = None,
+                 get_lead_mode=None,
+                 agent_defs: dict[str, AgentDef] | None = None,
+                 utility_model=None,
+                 mcp_tools=None):
+        self._model = model
+        self._config = config or {}
+        # Lead-mode resolution, identical to DispatchAgentTool: getter, then a
+        # live PermissionManager, then a static string, defaulting to "ask".
+        self._permissions = permissions
+        self._lead_mode = lead_mode
+        self._get_lead_mode = get_lead_mode
+        self._agent_defs = agent_defs or {}
+        self._utility_model = utility_model
+        # The lead's already-connected MCP tool instances (the playwright
+        # browser control the web-driver def's tools: allowlist names) — SHARED
+        # with the sub-agent, since there is one browser.
+        self._mcp_tools = list(mcp_tools or [])
+
+    @property
+    def description(self) -> str:
+        return self._BASE_DESCRIPTION
+
+    @property
+    def is_read_only(self) -> bool:
+        return False
+
+    @property
+    def requires_permission(self) -> bool:
+        return True
+
+    @property
+    def parameters(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": (
+                        "What to do in the browser, in plain language — e.g. "
+                        "'log into example.com with these credentials and "
+                        "download the latest invoice'. Be specific and "
+                        "self-contained: the web-driver starts with NO "
+                        "knowledge of this conversation, so include every "
+                        "detail it needs and say exactly what to report back."
+                    ),
+                },
+                "url": {
+                    "type": "string",
+                    "description": (
+                        "Optional starting URL to open before doing the task."
+                    ),
+                },
+            },
+            "required": ["task"],
+        }
+
+    def _resolve_lead_mode(self) -> str:
+        return _resolve_lead_mode(
+            self._get_lead_mode, self._permissions, self._lead_mode)
+
+    async def execute(self, task: str = "", url: str = "", **kwargs) -> str:
+        prompt = (task or "").strip()
+        if url:
+            prompt = f"Starting URL: {url}\n\n{prompt}"
+        return await run_subagent(
+            self._model, prompt, "web-driver", self._config,
+            self._resolve_lead_mode(),
+            agent_defs=self._agent_defs, utility_model=self._utility_model,
+            mcp_tools=self._mcp_tools)

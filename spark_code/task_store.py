@@ -128,6 +128,16 @@ class TaskStore:
         Also prunes stale/old tasks first. Writing to a temp file and renaming
         means a crash mid-write can never truncate the live file (which the old
         code did, causing 'recovery' to reset everything to empty).
+
+        KNOWN LIMITATION (cross-session lost update): the atomic replace
+        prevents file CORRUPTION but not lost updates. This store is a global
+        ~/.spark/tasks.json shared across CLI sessions; each session does
+        load()->mutate->save(all), so two concurrent `spark` processes will
+        clobber each other's tasks (last writer wins), and each load()'s
+        orphan reconciliation marks the OTHER session's live in_progress tasks
+        stale. In-process (a single session's asyncio workers) is safe via
+        self._lock. A real fix would need per-record merge or file locking;
+        not worth it at current single-user scale.
         """
         with self._lock:
             self._prune()

@@ -71,10 +71,13 @@ def test_get_utility_client_partial_block_fills_defaults():
 
 def test_get_utility_client_default_points_at_real_30b():
     """The shipped default (also what config.DEFAULT_CONFIG carries) is the
-    real 30B on the DGX's Ollama instance — not vLLM's :30000."""
+    real 30B on the DGX's Ollama instance — not vLLM's :30000 — reachable via
+    the tailnet hostname so an off-LAN (nomad) session can still hit it."""
     assert DEFAULT_UTILITY_MODEL["model"] == "qwen3-coder:30b"
-    assert DEFAULT_UTILITY_MODEL["endpoint"] == "http://spark-4a54.local:11434"
+    assert DEFAULT_UTILITY_MODEL["endpoint"] == "http://spark-4a54.tailcade53.ts.net:11434"
     assert DEFAULT_UTILITY_MODEL["provider"] == "ollama"
+    # The .local mDNS name only resolves on the LAN — must not be the default.
+    assert ".local" not in DEFAULT_UTILITY_MODEL["endpoint"]
 
 
 def test_get_utility_client_non_dict_block_is_disabled():

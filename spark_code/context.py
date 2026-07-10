@@ -209,9 +209,18 @@ class Context:
         self.schema_reserve_tokens = 0
         # Server-reported prompt token count from the most recent response's
         # usage block (set via record_usage). None until the first response
-        # arrives, or after a history change (compact/clear) makes the old
-        # count stale.
+        # arrives, or after a history change (compact/clear/load/rewind) makes
+        # the old count stale.
         self.last_prompt_tokens: int | None = None
+        # History watermark captured alongside last_prompt_tokens: the message
+        # count and total message char-size AT THE MOMENT the server reported
+        # that prompt-token count. context_left() uses these to add an estimate
+        # of ONLY the messages appended SINCE (this turn's assistant reply +
+        # tool results — often several KB each) on top of the server count,
+        # instead of trusting a number that predates them. Reset to None
+        # (together with last_prompt_tokens) whenever history changes shape.
+        self._usage_msg_count: int | None = None
+        self._usage_msg_chars: int | None = None
 
     def add_user(self, content: str):
         """Add a user message."""
@@ -346,6 +355,12 @@ class Context:
             "messages": copy.deepcopy(self.messages),
             "turn_count": self.turn_count,
             "last_prompt_tokens": self.last_prompt_tokens,
+            # Capture the usage watermark alongside its count so a rewind
+            # restores a consistent (count, chars, tokens) triple — otherwise a
+            # restored last_prompt_tokens would carry a live, mismatched
+            # watermark and context_left() would mis-add "appended" messages.
+            "usage_msg_count": self._usage_msg_count,
+            "usage_msg_chars": self._usage_msg_chars,
         })
 
     def rewind_conversation(self, steps: int = 1) -> bool:
@@ -376,6 +391,10 @@ class Context:
         self.messages = copy.deepcopy(snap["messages"])
         self.turn_count = snap["turn_count"]
         self.last_prompt_tokens = snap["last_prompt_tokens"]
+        # Older snapshots (pre-watermark) lack these keys — default to None,
+        # which makes context_left() fall back to the safe char-based estimate.
+        self._usage_msg_count = snap.get("usage_msg_count")
+        self._usage_msg_chars = snap.get("usage_msg_chars")
         self.sanitize_orphaned_tool_calls()
         return True
 
@@ -445,6 +464,8 @@ class Context:
         # count from before this compaction no longer reflects reality —
         # stale usage must not keep reporting the pre-compaction window.
         self.last_prompt_tokens = None
+        self._usage_msg_count = None
+        self._usage_msg_chars = None
 
         # Post-compact check
         if self.max_tokens > 0:
@@ -557,6 +578,8 @@ class Context:
         self.messages = []
         self.turn_count = 0
         self.last_prompt_tokens = None
+        self._usage_msg_count = None
+        self._usage_msg_chars = None
 
     @staticmethod
     def _estimate_messages_chars(messages: list[dict]) -> int:
@@ -614,23 +637,55 @@ class Context:
 
     def record_usage(self, prompt_tokens: int):
         """Record the server-reported prompt token count from the most recent
-        response's usage block. Overrides the char-based estimate for
-        context_left() until the history changes (compact/clear reset it —
-        a stale count would otherwise keep reporting the pre-compaction
-        window)."""
+        response's usage block, plus a watermark of the history size at that
+        moment (message count + total message chars).
+
+        context_left() prefers this server count (the model's own tokenizer)
+        but ADDS an estimate of any messages appended since the watermark. The
+        server number reflects the PREVIOUS request's prompt; the messages
+        recorded after it streamed — this turn's assistant reply and its tool
+        results (several KB each) — are not in it. Without the watermark those
+        later messages were invisible to the context meter and to
+        _maybe_compact, so a long turn could push the next request past the
+        window and 400; and because an errored request reports no usage, a
+        stale count would otherwise stick and re-overflow every turn until a
+        manual /clear.
+
+        The watermark (and last_prompt_tokens) reset to None whenever history
+        changes shape (compact/clear/load/rewind) — a stale count must not keep
+        reporting the pre-change window."""
         self.last_prompt_tokens = prompt_tokens
+        self._usage_msg_count = len(self.messages)
+        self._usage_msg_chars = self._estimate_messages_chars(self.messages)
 
     def context_left(self, window: int) -> float:
         """Fraction of the context window still free, as 1.0 (empty) down to
         0.0 (full). Prefers the last server-reported prompt token count
-        (accurate — it's the model's own tokenizer); falls back to
-        estimate_tokens() when the server has never reported usage (e.g. some
-        Ollama configs omit it). Never divides by zero: an unset/zero window
-        reports 0.0 left (treated as full/unknown) rather than raising."""
+        (accurate — it's the model's own tokenizer) PLUS an estimate of any
+        messages appended since that count was recorded (see record_usage): the
+        server number predates this turn's later assistant/tool messages. Falls
+        back to estimate_tokens() when the server has never reported usage (e.g.
+        some Ollama configs omit it). Never divides by zero: an unset/zero
+        window reports 0.0 left (treated as full/unknown) rather than raising."""
         if not window:
             return 0.0
-        tokens = self.last_prompt_tokens if self.last_prompt_tokens is not None \
-            else self.estimate_tokens()
+        if self.last_prompt_tokens is not None:
+            tokens = self.last_prompt_tokens
+            # Add ONLY the messages appended since the server count was taken,
+            # using the same ~3.5 chars/token estimate as estimate_tokens. A
+            # history shrink (shouldn't happen without a reset) falls back to
+            # the full char-based estimate rather than under-reporting.
+            if (self._usage_msg_chars is not None
+                    and self._usage_msg_count is not None
+                    and len(self.messages) >= self._usage_msg_count):
+                appended_chars = (self._estimate_messages_chars(self.messages)
+                                  - self._usage_msg_chars)
+                if appended_chars > 0:
+                    tokens += int(appended_chars / 3.5)
+            else:
+                tokens = self.estimate_tokens()
+        else:
+            tokens = self.estimate_tokens()
         return max(0.0, min(1.0, 1.0 - (tokens / window)))
 
     def save(self, path: str, label: str = "", cwd: str = ""):
@@ -658,6 +713,13 @@ class Context:
             return False
         self.messages = data.get("messages", [])
         self.turn_count = data.get("turn_count", 0)
+        # Loading replaces the entire history, so any server-reported count from
+        # a prior session no longer matches these messages — reset it (and its
+        # watermark) so context_left() re-estimates instead of reporting a
+        # window for messages that are no longer here.
+        self.last_prompt_tokens = None
+        self._usage_msg_count = None
+        self._usage_msg_chars = None
         # A session saved mid-interrupt can carry orphaned tool_calls; repair on
         # load so --resume / /history don't immediately 400.
         self.sanitize_orphaned_tool_calls()

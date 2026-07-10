@@ -1,6 +1,7 @@
 """Google Play Developer API client for Spark Code (read-only status slice)."""
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -33,7 +34,18 @@ def _resolve_sa_path(sa_path=None) -> str:
 
 class PlayClient:
     def __init__(self, sa_path=None):
-        self._sa = json.loads(Path(_resolve_sa_path(sa_path)).read_text())
+        resolved = _resolve_sa_path(sa_path)
+        try:
+            self._sa = json.loads(Path(resolved).read_text())
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
+            # _resolve_sa_path already confirmed the file exists; a failure
+            # here means it's corrupt/unreadable. Raise the same PlayError
+            # callers (play_status.py, play_publish.py) already catch, with an
+            # actionable message, instead of leaking a raw JSONDecodeError
+            # traceback.
+            raise PlayError(
+                f"Play service-account JSON at {resolved} is unreadable or "
+                f"malformed ({e}) — check the file is valid JSON.") from e
         self._tok = None
         self._tok_exp = 0.0
 
@@ -108,7 +120,10 @@ class PlayClient:
         tok = await self._token()
         url = ("https://androidpublisher.googleapis.com/upload/androidpublisher/v3/"
                f"applications/{package}/edits/{edit_id}/bundles?uploadType=media")
-        data = Path(aab_path).read_bytes()
+        # A release AAB is 20-150MB; a synchronous read_bytes() here would
+        # block the event loop (and every other worker) for the whole read.
+        # Offload it to a thread so concurrent work keeps progressing.
+        data = await asyncio.to_thread(Path(aab_path).read_bytes)
         async with httpx.AsyncClient(timeout=600.0) as c:
             r = await c.post(url, headers={"Authorization": f"Bearer {tok}",
                                            "Content-Type": "application/octet-stream"}, content=data)

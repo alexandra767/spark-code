@@ -68,3 +68,65 @@ async def test_track_status_deletes_edit_even_on_read_error(tmp_path, monkeypatc
     with pytest.raises(PlayError):
         await c.track_status("com.x.app")
     assert deleted == ["/applications/com.x.app/edits/EDIT2"]  # deleted despite the read error
+
+
+def test_malformed_sa_json_raises_playerror_not_traceback(tmp_path):
+    # Fix 10: a corrupt service-account.json must raise PlayError (which
+    # callers already catch), not leak a raw JSONDecodeError traceback.
+    bad = tmp_path / "sa.json"
+    bad.write_text("{ this is : not valid json ,,,")
+    with pytest.raises(PlayError) as ei:
+        PlayClient(sa_path=str(bad))
+    assert "malformed" in str(ei.value).lower() or "unreadable" in str(ei.value).lower()
+
+
+async def test_upload_bundle_offloads_read_to_thread(tmp_path, monkeypatch):
+    # Fix 9: the (20-150MB) AAB read must be offloaded to a worker thread so it
+    # doesn't block the event loop; the bytes still reach the upload.
+    import spark_code.play as play_mod
+
+    c = PlayClient(sa_path=_sa_file(tmp_path))
+
+    async def fake_token():
+        return "tok123"
+    monkeypatch.setattr(c, "_token", fake_token)
+
+    aab = tmp_path / "app.aab"
+    aab.write_bytes(b"AAB-BYTES")
+
+    seen = {}
+    real_to_thread = play_mod.asyncio.to_thread
+
+    async def spy_to_thread(fn, *a, **kw):
+        seen["offloaded"] = True
+        return await real_to_thread(fn, *a, **kw)
+    monkeypatch.setattr(play_mod.asyncio, "to_thread", spy_to_thread)
+
+    captured = {}
+
+    class FakeResp:
+        status_code = 200
+        text = '{"versionCode": 77}'
+
+        def json(self):
+            return {"versionCode": 77}
+
+    class FakeClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, headers=None, content=None):
+            captured["content"] = content
+            return FakeResp()
+    monkeypatch.setattr(play_mod.httpx, "AsyncClient", FakeClient)
+
+    vc = await c.upload_bundle("com.x.app", "EDIT1", str(aab))
+    assert vc == 77
+    assert seen.get("offloaded") is True
+    assert captured["content"] == b"AAB-BYTES"

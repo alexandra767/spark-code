@@ -39,9 +39,11 @@ logger = logging.getLogger(__name__)
 # The real 30B utility model, on the DGX's Ollama instance — NOT vLLM's
 # :30000 (that's the primary 80B alias, qwen3.5:122b). Used both as the
 # shipped default (config.DEFAULT_CONFIG["utility_model"]) and to fill any
-# fields a partial user override omits.
+# fields a partial user override omits. Tailnet (tailscale) hostname, not the
+# .local mDNS name, so an off-LAN (nomad) session can still reach it — keep in
+# sync with config.DEFAULT_CONFIG["utility_model"]["endpoint"].
 DEFAULT_UTILITY_MODEL: dict[str, Any] = {
-    "endpoint": "http://spark-4a54.local:11434",
+    "endpoint": "http://spark-4a54.tailcade53.ts.net:11434",
     "model": "qwen3-coder:30b",
     "provider": "ollama",
 }

@@ -16,10 +16,28 @@ logger = logging.getLogger(__name__)
 # Built-in tool names a custom /teach tool must never shadow — a custom tool
 # named e.g. "read_file" or "grep" would inherit the built-in's always_allow
 # grant and silently run arbitrary shell under a trusted name.
+#
+# This static set is the DEFAULT / safety net. It had drifted (missing every
+# tool added after the Phase-2 era — stack_info, the android_*/ios_* device
+# tools, the appstore_*/play_* store tools, code_search, dispatch_agent). The
+# authoritative reserved set is derived from the LIVE registry at construction
+# time in cli.py (`reserved_names=set(registry.names()) | BUILTIN_TOOL_NAMES`)
+# so it can never drift again even if a new tool is added without updating this
+# list; keep this list roughly current as the belt to that suspenders.
 BUILTIN_TOOL_NAMES = frozenset({
+    # core file / shell / search
     "read_file", "write_file", "edit_file", "bash", "glob", "grep",
-    "list_dir", "web_search", "web_fetch", "rag_search", "spawn_worker",
-    "wait_for_workers", "send_message", "todo_write",
+    "list_dir", "web_search", "web_fetch", "rag_search", "code_search",
+    "stack_info",
+    # orchestration
+    "spawn_worker", "wait_for_workers", "send_message", "todo_write",
+    "dispatch_agent", "browse_web",
+    # device / vision
+    "android_control", "android_screenshot", "ios_launch", "ios_screenshot",
+    "watch_phone", "simulator_screenshot",
+    # app store / play
+    "appstore_status", "appstore_submit", "appstore_build_upload",
+    "play_status", "play_publish",
 })
 
 

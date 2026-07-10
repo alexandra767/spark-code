@@ -29,6 +29,21 @@ _DONE_MARKER = "LOOP_DONE"
 _CONTINUE_MARKER = "LOOP_CONTINUE"
 
 
+def _response_signals_done(response: str | None) -> bool:
+    """True only when the self-assessment DONE marker TERMINATES the reply.
+
+    The round prompt asks the model to *end* its reply with LOOP_DONE. A plain
+    substring test wrongly completes the loop when the model merely MENTIONS
+    the marker while still working ("I won't write LOOP_DONE until the tests
+    pass"). So require it at the very end: the last non-empty line ends with
+    LOOP_DONE (optionally trailed by whitespace/punctuation).
+    """
+    lines = [ln.strip() for ln in (response or "").splitlines() if ln.strip()]
+    if not lines:
+        return False
+    return bool(re.search(rf"{_DONE_MARKER}[\s.!]*$", lines[-1]))
+
+
 def parse_interval(text: str) -> int:
     """'30m' -> 1800 seconds. Raises ValueError with a friendly message."""
     m = _INTERVAL_RE.match(text.strip().lower())
@@ -55,7 +70,8 @@ class LoopConfig:
 @dataclass
 class LoopState:
     round_n: int = 0
-    status: str = "idle"  # idle|running|sleeping|done|stalled|stopped|capped
+    # idle|running|sleeping|done|stalled|stopped|capped|checkpoint-failed
+    status: str = "idle"
     last_verify: str = ""  # PASS|FAIL|SELF-DONE|SELF-NOT-DONE|""
     next_run_at: float | None = None
     stop_requested: bool = False
@@ -67,6 +83,12 @@ def parse_loop_args(args: str) -> LoopConfig:
 
     Grammar: [every <interval>] [--check "<cmd>"] <goal...>
     Raises ValueError on bad interval or missing goal.
+
+    ``--check`` is recognized ONLY as a LEADING flag (right after an optional
+    ``every <interval>``). Scanning for it anywhere would mangle a goal that
+    merely mentions it, e.g. ``/loop add a --check "verbose" flag to the CLI``.
+    A goal that must contain a literal ``--check`` therefore has to place the
+    real flag form first (or drop ``--check`` from the leading position).
     """
     text = args.strip()
     interval_s = None
@@ -76,11 +98,11 @@ def parse_loop_args(args: str) -> LoopConfig:
         interval_s = parse_interval(head)
         text = tail.strip()
     check_cmd = None
-    m = re.search(
-        r"--check\s+\"([^\"]+)\"|--check\s+'([^']+)'|--check\s+(\S+)", text)
+    m = re.match(
+        r"--check\s+(?:\"([^\"]+)\"|'([^']+)'|(\S+))\s*", text)
     if m:
         check_cmd = m.group(1) or m.group(2) or m.group(3)
-        text = (text[:m.start()] + text[m.end():]).strip()
+        text = text[m.end():].strip()
     if not text:
         raise ValueError("No goal given — usage: /loop [every 30m] [--check \"cmd\"] <goal>")
     return LoopConfig(goal=text, check_cmd=check_cmd, interval_s=interval_s)
@@ -91,7 +113,11 @@ def make_checkpoint(label: str) -> str:
     stash push to record, immediately apply --index so the working tree is
     untouched while the stash entry remains as the restore point.
 
-    Returns "created" | "clean-tree" | "failed" | "git-unavailable".
+    Returns "created" | "clean-tree" | "failed" | "apply-failed" |
+    "git-unavailable". "apply-failed" is the DANGEROUS case: the push
+    succeeded but the re-apply did not, so the working tree is now reverted
+    and the only copy of the WIP is the stash entry — distinct from "failed"
+    (the push itself failed, tree untouched) so the caller can react to it.
     """
     try:
         result = subprocess.run(
@@ -109,7 +135,10 @@ def make_checkpoint(label: str) -> str:
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return "failed"
     if apply_result.returncode != 0:
-        return "failed"
+        # Push succeeded but re-apply failed: the tree is reverted and the WIP
+        # lives only in the stash. Flag it distinctly so the loop can stop
+        # loudly instead of running the model against the wrong state.
+        return "apply-failed"
     return "created"
 
 
@@ -206,17 +235,53 @@ class LoopEngine:
                   + (f" · check: `{cfg.check_cmd}`" if cfg.check_cmd else ""))
         no_progress = 0
         verify_tail = ""
+        # Flipped off the first time git proves unavailable: with no git there
+        # is no checkpoint safety net AND no fingerprint, so the no-progress
+        # stall guard (below) would false-positive on every round.
+        git_available = True
         while not st.stop_requested:
             if cfg.interval_s is None and st.round_n >= cfg.max_rounds:
                 st.status = "capped"
                 break
             st.round_n += 1
             st.status = "running"
+            round_started_at = time.time()
             self.console.print(
                 f"[#88c0d0]🔁 Round {st.round_n}"
                 + (f"/{cfg.max_rounds}" if cfg.interval_s is None else "")
                 + f" — {cfg.goal}[/#88c0d0]")
             cp = make_checkpoint(f"spark-checkpoint-loop-round-{st.round_n}")
+            # Surface the checkpoint safety-net status ONCE, at loop start, so a
+            # non-git dir (or a broken git) doesn't silently promise a restore
+            # point that isn't there.
+            if st.round_n == 1:
+                if cp == "git-unavailable":
+                    git_available = False
+                    self.console.print(
+                        "[#ebcb8b]⚠ git unavailable — running with no checkpoint "
+                        "safety net (no per-round restore point); the "
+                        "no-progress stall guard is disabled.[/#ebcb8b]")
+                    self._log("- note: git unavailable — no checkpoint safety "
+                              "net; stall guard disabled")
+                elif cp == "failed":
+                    self.console.print(
+                        "[#ebcb8b]⚠ checkpoint failed — running without a "
+                        "restore point this round.[/#ebcb8b]")
+            # A stash pushed but not re-applied means the working tree is
+            # reverted and the WIP is stranded in the stash. Stop LOUDLY with
+            # recovery steps rather than run the model against the wrong state.
+            if cp == "apply-failed":
+                st.status = "checkpoint-failed"
+                self.console.print(
+                    "[#bf616a]✗ Checkpoint could not be restored after "
+                    "stashing. Your uncommitted work is safe in the git stash, "
+                    "but the working tree was reverted — STOPPING the loop to "
+                    "avoid running against the wrong state.\n"
+                    "  Recover it with:  git stash pop[/#bf616a]")
+                self._log(f"\n## Round {st.round_n} — checkpoint apply-failed\n"
+                          "- WIP left in the git stash; loop HALTED before "
+                          "running the round. Recover with `git stash pop`.")
+                break
             before = tree_fingerprint()
             t0 = time.monotonic()
             timed_out = False
@@ -232,7 +297,7 @@ class LoopEngine:
                 ok, verify_tail = run_check(cfg.check_cmd)
                 st.last_verify = "PASS" if ok else "FAIL"
             else:
-                ok = _DONE_MARKER in (response or "")
+                ok = _response_signals_done(response)
                 st.last_verify = "SELF-DONE" if ok else "SELF-NOT-DONE"
                 verify_tail = ""
             self._log(f"\n## Round {st.round_n} — {time.strftime('%H:%M:%S')}\n"
@@ -241,29 +306,37 @@ class LoopEngine:
                       f"- verify: {st.last_verify}"
                       + (" (round TIMEOUT)" if timed_out else "") + "\n"
                       f"- took: {int(time.monotonic() - t0)}s")
-            # No-progress guard (both flavors): a failing round that changed
-            # nothing, twice in a row, means we're spinning — stop.
-            if not ok and not changed:
-                no_progress += 1
-                if no_progress >= 2:
-                    st.status = "stalled"
-                    break
-            else:
-                no_progress = 0
+            # No-progress guard — until-done flavor ONLY, and only when git can
+            # actually observe progress. A timed patrol's idle rounds are its
+            # HEALTHY state (nothing to do this tick), and with no git `changed`
+            # is always False — so in both cases this guard would false-positive
+            # into a permanent STALLED.
+            if cfg.interval_s is None and git_available:
+                if not ok and not changed:
+                    no_progress += 1
+                    if no_progress >= 2:
+                        st.status = "stalled"
+                        break
+                else:
+                    no_progress = 0
             if cfg.interval_s is None:
                 if ok:
                     st.status = "done"
                     break
             else:
-                # Timed flavor: success does not exit; sleep until next tick,
-                # waking every second to honor stop requests.
+                # Timed flavor: success does not exit. Anchor the NEXT run to
+                # when THIS round STARTED, so the period stays a steady
+                # interval_s regardless of how long the round took (a 4-min
+                # round on a 30-min interval still fires every 30 min, not 34).
+                # Wake at most every second so a stop request is honored fast.
                 st.status = "sleeping"
-                st.next_run_at = time.time() + cfg.interval_s
+                st.next_run_at = round_started_at + cfg.interval_s
                 self.console.print(f"[#4c566a]{self.status_line()}[/#4c566a]")
-                for _ in range(cfg.interval_s):
-                    if st.stop_requested:
+                while not st.stop_requested:
+                    remaining = st.next_run_at - time.time()
+                    if remaining <= 0:
                         break
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(min(1.0, remaining))
         if st.stop_requested and st.status != "done":
             st.status = "stopped"
         self._log(f"\n**ended: {st.status} after {st.round_n} round(s)**")

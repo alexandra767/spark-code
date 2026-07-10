@@ -72,7 +72,12 @@ DEFAULT_CONFIG = {
     # default, pointed at the real 30B on the DGX's Ollama instance — set
     # to `null` in config.yaml to disable. See spark_code/routing.py.
     "utility_model": {
-        "endpoint": "http://spark-4a54.local:11434",
+        # Tailnet (tailscale) hostname, not the .local mDNS name: .local only
+        # resolves on the same LAN, so an off-LAN (nomad) session couldn't
+        # reach the utility model — and resolve_provider never rewrites
+        # utility_model, so this default is what ships. Keep in sync with
+        # routing.DEFAULT_UTILITY_MODEL.
+        "endpoint": "http://spark-4a54.tailcade53.ts.net:11434",
         "model": "qwen3-coder:30b",
         "provider": "ollama",
     },

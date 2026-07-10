@@ -77,6 +77,50 @@ async def test_empty_description_raises(tmp_path, monkeypatch):
         await describe_image(str(img), config=CFG)
 
 
+async def test_describe_image_uses_jpeg_mime_for_jpg(tmp_path, monkeypatch):
+    # The data URL media type must be derived from the file, not hardcoded to
+    # PNG — some providers reject a JPEG mislabeled as image/png.
+    img = tmp_path / "shot.jpg"
+    img.write_bytes(b"\xff\xd8\xff_fake_jpeg")
+    seen = {}
+
+    class FakeClient:
+        def __init__(self, **kw):
+            pass
+
+        async def chat(self, messages, tools=None, stream=True):
+            seen["messages"] = messages
+            yield {"type": "text", "content": "ok"}
+
+        async def close(self):
+            pass
+    monkeypatch.setattr("spark_code.vision.ModelClient", FakeClient)
+    await describe_image(str(img), config=CFG)
+    url = seen["messages"][0]["content"][1]["image_url"]["url"]
+    assert url.startswith("data:image/jpeg;base64,")
+
+
+async def test_describe_image_falls_back_to_png_for_unknown_ext(tmp_path, monkeypatch):
+    img = tmp_path / "capture.unknownext"
+    img.write_bytes(b"whatever")
+    seen = {}
+
+    class FakeClient:
+        def __init__(self, **kw):
+            pass
+
+        async def chat(self, messages, tools=None, stream=True):
+            seen["messages"] = messages
+            yield {"type": "text", "content": "ok"}
+
+        async def close(self):
+            pass
+    monkeypatch.setattr("spark_code.vision.ModelClient", FakeClient)
+    await describe_image(str(img), config=CFG)
+    url = seen["messages"][0]["content"][1]["image_url"]["url"]
+    assert url.startswith("data:image/png;base64,")
+
+
 async def test_describe_image_honors_config_vision_provider(tmp_path, monkeypatch):
     # cost knob: model.vision_provider picks the model (e.g. cheap flash) when
     # the caller doesn't pass one explicitly.

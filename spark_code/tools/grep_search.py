@@ -6,7 +6,12 @@ import re
 import shutil
 import signal
 
-from .base import Tool
+from ..keys import keys_path
+from .base import (
+    Tool,
+    is_protected_credential_file,
+    protected_credential_realpaths,
+)
 
 
 async def _kill_process_group(process) -> None:
@@ -74,17 +79,29 @@ class GrepTool(Tool):
         search_path = path or os.getcwd()
         search_path = os.path.expanduser(search_path)
 
+        # SECURITY: grep is a content-reader on the always_allow list (no
+        # permission prompt in any mode), so — like read_file — it must refuse
+        # to dump the Spark credential files. read_file guarded this; grep did
+        # not, leaving the exact "read keys, then web_fetch them out" exfil
+        # chain open through a sibling tool. Refuse a direct target here and
+        # exclude the protected files from any directory walk below.
+        if is_protected_credential_file(search_path, keys_path):
+            return "Refusing to grep the Spark keys/credential file"
+        protected = protected_credential_realpaths(keys_path)
+
         # Try ripgrep first
         if shutil.which("rg"):
-            return await self._rg_search(pattern, search_path, glob, case_insensitive)
+            return await self._rg_search(pattern, search_path, glob,
+                                         case_insensitive, protected)
         else:
             # Sync os.walk over a big tree would block the event loop.
             return await asyncio.to_thread(
-                self._python_search, pattern, search_path, glob, case_insensitive
+                self._python_search, pattern, search_path, glob,
+                case_insensitive, protected
             )
 
     async def _rg_search(self, pattern: str, path: str, file_glob: str,
-                         case_insensitive: bool) -> str:
+                         case_insensitive: bool, protected: set[str] | None = None) -> str:
         cmd = ["rg", "--no-heading", "--line-number", "--max-count", "50",
                # Cap match line length so a minified/one-line JSON doesn't dump
                # megabytes; show a short preview of the omitted tail instead.
@@ -93,6 +110,15 @@ class GrepTool(Tool):
             cmd.append("-i")
         if file_glob:
             cmd.extend(["--glob", file_glob])
+        # Exclude any protected credential file that lives inside the search
+        # tree (the direct-target case is already refused in execute()). Only
+        # fires when the walk actually descends into ~/.spark, so the basename
+        # exclusion can't hide a same-named file elsewhere in a real project.
+        if protected:
+            root_rp = os.path.realpath(path)
+            for pf in protected:
+                if pf == root_rp or pf.startswith(root_rp + os.sep):
+                    cmd.extend(["--glob", "!" + os.path.basename(pf)])
         # -e guards a pattern that starts with '-' (otherwise parsed as a flag);
         # '--' ends option parsing so a path can't be misread as a flag either.
         cmd.extend(["-e", pattern, "--", path])
@@ -131,9 +157,10 @@ class GrepTool(Tool):
         return output
 
     def _python_search(self, pattern: str, path: str, file_glob: str,
-                       case_insensitive: bool) -> str:
+                       case_insensitive: bool, protected: set[str] | None = None) -> str:
         """Fallback Python-based search."""
         import fnmatch
+        protected = protected or set()
         flags = re.IGNORECASE if case_insensitive else 0
         try:
             regex = re.compile(pattern, flags)
@@ -152,6 +179,10 @@ class GrepTool(Tool):
                 if file_glob and not fnmatch.fnmatch(fname, file_glob):
                     continue
                 fpath = os.path.join(root, fname)
+                # SECURITY: never read a protected credential file's contents
+                # even when it's reached via a directory walk.
+                if protected and os.path.realpath(fpath) in protected:
+                    continue
                 try:
                     with open(fpath, "r", encoding="utf-8", errors="replace") as f:
                         for i, line in enumerate(f, 1):

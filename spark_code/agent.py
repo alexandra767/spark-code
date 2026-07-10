@@ -835,6 +835,16 @@ class Agent:
                     # once per turn (a model that keeps re-emitting a slash
                     # line can't loop forever on this).
                     self._skill_auto_expanded = True
+                    # `text` here is JUST the raw "/<skill> args" directive,
+                    # already folded into full_response above (this branch is
+                    # only reached when the whole reply is that one line). It's
+                    # a control line, not part of the answer — peel it back off
+                    # so the returned result (e.g. headless JSON) is only the
+                    # expanded reply, not the slash line prepended to it. Safe:
+                    # full_response ends with `text` (nothing mutated it since
+                    # the `+= text` above) and text is non-empty here.
+                    if text:
+                        full_response = full_response[:-len(text)]
                     self.context.add_user(skill_prompt)
                     continue
                 if self._should_nudge_verification():

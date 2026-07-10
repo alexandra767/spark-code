@@ -296,6 +296,74 @@ def test_cloud_key_shapes_are_scrubbed(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# PEM / private-key redaction — ASC .p8 keys and Play SA JSON private_key
+# ---------------------------------------------------------------------------
+
+
+def test_pem_private_key_block_is_scrubbed(tmp_path):
+    # Shape of an Apple ASC .p8 signing key (multi-line PEM block).
+    pem = (
+        "-----BEGIN PRIVATE KEY-----\n"
+        "MIGTAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBHkwdwIBAQQg" + ("A" * 40) + "\n"
+        "oUQDQgAE" + ("B" * 40) + "\n"
+        "-----END PRIVATE KEY-----"
+    )
+    context = FakeContext(messages=[
+        {"role": "user", "content": f"here is my ASC key:\n{pem}\nplease store it"},
+    ])
+    path = export_session(context, str(tmp_path), _meta())
+    with open(path) as f:
+        record = json.loads(f.readline())
+    blob = json.dumps(record)
+    assert "BEGIN PRIVATE KEY" not in blob
+    assert "MIGTAgEA" not in blob
+    assert "[REDACTED]" in record["messages"][0]["content"]
+
+
+def test_rsa_ec_openssh_private_key_headers_are_scrubbed(tmp_path):
+    for header in ("RSA PRIVATE KEY", "EC PRIVATE KEY", "OPENSSH PRIVATE KEY"):
+        body = "Z" * 60
+        pem = f"-----BEGIN {header}-----\n{body}\n-----END {header}-----"
+        context = FakeContext(messages=[{"role": "user", "content": pem}])
+        path = export_session(context, str(tmp_path), _meta())
+        with open(path) as f:
+            blob = f.readlines()[-1]
+        assert body not in blob, f"unscrubbed {header}"
+        assert "[REDACTED]" in blob
+
+
+def test_play_sa_json_private_key_is_scrubbed(tmp_path):
+    # A Play service-account JSON blob pasted into a session — json.dumps
+    # escapes the newlines to backslash-n, which the PEM pattern still spans.
+    sa_json = json.dumps({
+        "type": "service_account",
+        "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEv" + ("Q" * 40)
+                       + "\n-----END PRIVATE KEY-----\n",
+        "client_email": "bot@proj.iam.gserviceaccount.com",
+    })
+    context = FakeContext(messages=[{"role": "user", "content": f"my sa file: {sa_json}"}])
+    path = export_session(context, str(tmp_path), _meta())
+    with open(path) as f:
+        blob = f.readline()
+    assert "MIIEv" not in blob
+    assert "BEGIN PRIVATE KEY" not in blob
+    # client_email is not a secret and must survive the scrub.
+    assert "bot@proj.iam.gserviceaccount.com" in blob
+
+
+def test_existing_non_secret_content_survives_pem_patterns(tmp_path):
+    # Regression: the new patterns must not over-redact ordinary prose.
+    context = FakeContext(messages=[
+        {"role": "user", "content": "the private key concept in RSA is asymmetric"},
+        {"role": "assistant", "content": "yes — a keypair has a public and private half"},
+    ])
+    path = export_session(context, str(tmp_path), _meta())
+    with open(path) as f:
+        record = json.loads(f.readline())
+    assert "[REDACTED]" not in json.dumps(record["messages"])
+
+
+# ---------------------------------------------------------------------------
 # Fix 1 — interrupted sessions must NOT export as "clean" (CLI wiring)
 # ---------------------------------------------------------------------------
 

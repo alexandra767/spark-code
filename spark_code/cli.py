@@ -29,7 +29,7 @@ from .codesearch import CodeSearchTool, index_project, resolve_service_url
 from .config import ensure_dirs, get, load_config, resolve_write_roots, set_config
 from .context import AGENTIC_PROMPT, SYSTEM_PROMPT, Context, build_skill_prompt_section
 from .corpus import export_session
-from .custom_tools import CustomToolRegistry
+from .custom_tools import BUILTIN_TOOL_NAMES, CustomToolRegistry
 from .doctor import render_doctor, run_doctor
 from .editor import detect_editor, open_in_editor
 from .hooks import HookManager
@@ -755,7 +755,7 @@ def build_tools(todo_list: TodoList | None = None, model=None,
     registry.register(ListDirTool())
     registry.register(WebSearchTool())
     registry.register(WebFetchTool())
-    registry.register(RagSearchTool())
+    registry.register(RagSearchTool(config=config))
     registry.register(StackInfoTool())
     from .tools.appstore_status import AppStoreStatusTool
     registry.register(AppStoreStatusTool())
@@ -802,8 +802,16 @@ def build_tools(todo_list: TodoList | None = None, model=None,
     from .tools.ios_launch import IosLaunchTool
     registry.register(IosLaunchTool())
     if model is not None and config is not None:
-        from .dispatch import DispatchAgentTool
+        from .dispatch import BrowseWebTool, DispatchAgentTool
         registry.register(DispatchAgentTool(
+            model=model, config=config, permissions=permissions,
+            agent_defs=agent_defs, utility_model=utility_model,
+            mcp_tools=mcp_tools))
+        # A correctly-named browser affordance on the main model. Without it
+        # the 80B (which can't see the agent_only playwright tools) invents a
+        # nonexistent `web_driver` tool instead of dispatch_agent(agent_type=
+        # "web-driver"); this routes cleanly to the Gemini web-driver sub-agent.
+        registry.register(BrowseWebTool(
             model=model, config=config, permissions=permissions,
             agent_defs=agent_defs, utility_model=utility_model,
             mcp_tools=mcp_tools))
@@ -1210,6 +1218,24 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
                 resolved_mode = resolve_mode_name(value.strip())
                 if resolved_mode is not None:
                     value = resolved_mode
+                if value == "plan":
+                    # "plan" is a per-session STATE, not a runnable live mode:
+                    # permissions.mode="plan" silently behaves like ask, and a
+                    # persisted "plan" would recreate that on next launch (startup
+                    # always begins with plan_state inactive). Mirror /mode plan
+                    # for this session and persist the VALID mode it maps to
+                    # (auto) so the saved config never holds an unrunnable value.
+                    if permissions is not None:
+                        permissions.mode = "auto"
+                    if plan_state is not None:
+                        plan_state.active = True
+                    ok, msg = set_config(config, key_path, "auto")
+                    if ok:
+                        console.print("[#a3be8c]Entered plan mode for this session (reads free, writes prompt).[/#a3be8c]")
+                        console.print("[#8899aa]Note: plan is a per-session state — saved permissions.mode = auto. Use /mode plan to re-enter it next session.[/#8899aa]")
+                    else:
+                        console.print(f"[#bf616a]{msg}[/#bf616a]")
+                    return None
             ok, msg = set_config(config, key_path, value)
             if ok:
                 # Apply to the live objects so the change takes effect this
@@ -1343,8 +1369,12 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
         # background thread holds stdin in cbreak and drains the same fd the
         # masked Prompt.ask needs to read from.
         from spark_code.ui.esc_watcher import pause_all
-        with pause_all():
-            entered = Prompt.ask(f"  Paste your {preset['key_env']}", password=True)
+        try:
+            with pause_all():
+                entered = Prompt.ask(f"  Paste your {preset['key_env']}", password=True)
+        except (KeyboardInterrupt, EOFError):
+            console.print("\n[#8899aa]Cancelled — nothing saved.[/#8899aa]")
+            return None
 
         value = (entered or "").strip()
         if not value:
@@ -1595,7 +1625,7 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
 
     elif command == "/image":
         if not args:
-            console.print("[#ebcb8b]Usage: /image <file_path> [prompt][/#ebcb8b]")
+            console.print("[#ebcb8b]Usage: /image <file_path> \\[prompt][/#ebcb8b]")
             console.print("[#8899aa]Example: /image ~/Desktop/screenshot.png what's wrong with this UI?[/#8899aa]")
             return None
         # Parse: first token is path, rest is prompt. Use shlex so dragged-in
@@ -1622,10 +1652,20 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
             if not found:
                 console.print(f"[#bf616a]File not found: {_esc(img_path or raw)}[/#bf616a]")
                 return None
-        # Read and encode image
+        # Read and encode image. os.path.exists() above is True for a
+        # directory too (e.g. `/image ~/Desktop`), so guard the open with an
+        # explicit isfile check + OSError catch — mirrors the drag-drop path —
+        # instead of letting IsADirectoryError escape as a raw traceback.
+        if not os.path.isfile(img_path):
+            console.print(f"[#bf616a]Not a file: {_esc(img_path)}[/#bf616a]")
+            return None
         mime_type = mimetypes.guess_type(img_path)[0] or "image/png"
-        with open(img_path, "rb") as f:
-            img_data = base64.b64encode(f.read()).decode("utf-8")
+        try:
+            with open(img_path, "rb") as f:
+                img_data = base64.b64encode(f.read()).decode("utf-8")
+        except OSError as e:
+            console.print(f"[#bf616a]Could not read image: {_esc(str(e))}[/#bf616a]")
+            return None
         size_kb = len(img_data) * 3 / 4 / 1024
         console.print(f"  [#88c0d0]Image[/#88c0d0] [#d8dee9]{os.path.basename(img_path)}[/#d8dee9] [#4c566a]({size_kb:.0f} KB, {mime_type})[/#4c566a]")
         # Snapshot BEFORE the turn's user message enters context (Phase 5
@@ -1690,7 +1730,7 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
         if not args:
             console.print("[#ebcb8b]Usage: /team <prompt> — spawn a worker[/#ebcb8b]")
             console.print("[#8899aa]  /team status     — show all workers[/#8899aa]")
-            console.print("[#8899aa]  /team stop [id]  — stop a worker[/#8899aa]")
+            console.print("[#8899aa]  /team stop \\[id]  — stop a worker[/#8899aa]")
             console.print("[#8899aa]  /team msg <name> <message> — message a worker[/#8899aa]")
             return None
 
@@ -2059,7 +2099,7 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
         # Scaffold a new project
         raw_args = args.strip() if args else ""
         if not raw_args:
-            console.print("[#ebcb8b]Usage: /new <project-name> [description][/#ebcb8b]")
+            console.print("[#ebcb8b]Usage: /new <project-name> \\[description][/#ebcb8b]")
             console.print("[#8899aa]  Scaffolds a new project with git[/#8899aa]")
             console.print("[#8899aa]  Example: /new my-app[/#8899aa]")
             console.print("[#8899aa]  Example: /new weather-api a FastAPI weather service[/#8899aa]")
@@ -2171,9 +2211,9 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
             if sess["turns"]:
                 parts.append(f"[#8899aa]{sess['turns']} turns[/#8899aa]")
             if sess["label"]:
-                parts.append(f"[#d8dee9]{sess['label']}[/#d8dee9]")
+                parts.append(f"[#d8dee9]{_esc(str(sess['label']))}[/#d8dee9]")
             if cwd:
-                parts.append(f"[#4c566a]{cwd}[/#4c566a]")
+                parts.append(f"[#4c566a]{_esc(cwd)}[/#4c566a]")
 
             detail = "  ·  ".join(parts) if parts else ""
             console.print(f"  [#88c0d0]{sess['name']}[/#88c0d0]  {detail}")
@@ -2228,7 +2268,7 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
             if sess["turns"]:
                 parts.append(f"[#8899aa]{sess['turns']} turns[/#8899aa]")
             if sess["label"]:
-                parts.append(f"[#d8dee9]{sess['label']}[/#d8dee9]")
+                parts.append(f"[#d8dee9]{_esc(str(sess['label']))}[/#d8dee9]")
             detail = "  ·  ".join(parts) if parts else ""
             console.print(f"  [#88c0d0]{i}.[/#88c0d0] {sess['name']}  {detail}")
 
@@ -2237,7 +2277,7 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
                 "[#8899aa]Resume which session? (number, blank to cancel)[/#8899aa]",
                 default="",
             )
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, EOFError):
             console.print()
             return None
         answer = answer.strip()
@@ -2487,11 +2527,19 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
                     # Re-apply the changes so the working tree is unchanged while
                     # the stash entry REMAINS as the checkpoint. `pop` would have
                     # deleted the very checkpoint we just made.
-                    subprocess.run(
+                    apply_result = subprocess.run(
                         ["git", "stash", "apply", "--index"],
                         capture_output=True, text=True, timeout=10,
                     )
-                    console.print("[#8899aa]Working state preserved. Use /rollback to restore.[/#8899aa]")
+                    if apply_result.returncode == 0:
+                        console.print("[#8899aa]Working state preserved. Use /rollback to restore.[/#8899aa]")
+                    else:
+                        # The stash push SUCCEEDED (changes are safely stashed)
+                        # but re-applying to the working tree failed — do NOT
+                        # claim the tree is preserved; point at the recovery path.
+                        err = apply_result.stderr.strip() or "git stash apply failed"
+                        console.print(f"[#bf616a]Could not restore working tree: {err}[/#bf616a]")
+                        console.print("[#ebcb8b]Your changes are saved in the stash — run /rollback (or `git stash apply`) to recover them.[/#ebcb8b]")
             else:
                 console.print(f"[#bf616a]Checkpoint failed: {result.stderr.strip()}[/#bf616a]")
         except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -2548,7 +2596,7 @@ def handle_slash_command(cmd: str, context: Context, console: Console,
                     choices=["1", "2", "3", "4"],
                     default="1",
                 )
-            except KeyboardInterrupt:
+            except (KeyboardInterrupt, EOFError):
                 console.print()
                 return None
 
@@ -2763,6 +2811,20 @@ def _prompt_with_patched_stdout(session):
     """
     with patch_stdout(raw=True):
         return session.prompt()
+
+
+def _loop_escape_action(engine, agent) -> None:
+    """Esc during a /loop: stop the loop AND cancel the in-flight round.
+
+    ``engine.request_stop()`` only flips a flag the loop checks BETWEEN rounds,
+    so on its own Esc appears dead until the current round finishes (up to
+    ``round_timeout_s`` — as long as 15 min). Also calling ``agent.cancel()`` —
+    the same clean-cancel Ctrl+C uses — makes the running generation return its
+    partial promptly; the round then ends and the loop honors the stop flag.
+    Extracted to module scope so the Esc wiring is unit-testable.
+    """
+    engine.request_stop()
+    agent.cancel()
 
 
 async def run_interactive(config: dict, resume_session: str = "",
@@ -3007,8 +3069,12 @@ async def run_interactive(config: dict, resume_session: str = "",
     # Initialize branch manager
     branch_manager = BranchManager()
 
-    # Initialize custom tools
-    custom_tool_registry = CustomToolRegistry()
+    # Initialize custom tools. Reserve every LIVE built-in tool name (plus the
+    # static safety-net list) so a /teach tool can never shadow a real tool and
+    # inherit its always_allow grant — `tools` here holds only built-ins (custom
+    # tools are registered just below), so its names are exactly the reserved set.
+    reserved = set(tools.names()) | set(BUILTIN_TOOL_NAMES)
+    custom_tool_registry = CustomToolRegistry(reserved_names=reserved)
     for ct in custom_tool_registry.all():
         tools.register(ct)
 
@@ -3474,491 +3540,22 @@ async def run_interactive(config: dict, resume_session: str = "",
 
             # Handle slash commands
             if user_input.startswith("/"):
-                result = handle_slash_command(
-                    user_input, context, console, config, skills, model,
-                    permissions=permissions,
-                    team_manager=team_manager,
-                    task_store=task_store,
-                    memory=memory,
-                    stats=session_stats,
-                    pinned=pinned,
-                    snippets=snippet_lib,
-                    plan_state=plan_state,
-                )
-                if result is None:
-                    continue
-                if result == "__IMAGE_SENT__":
-                    # Image already added to context — run agent without add_user
-                    try:
-                        team_monitor.start()
-                        await _run_with_notify(agent.run_without_user_add())
-                    except KeyboardInterrupt:
-                        console.print("\n[#ebcb8b]Interrupted[/#ebcb8b]")
-                    except Exception as e:
-                        console.print(f"\n[#bf616a]Error: {e}[/#bf616a]")
-                    finally:
-                        team_monitor.stop()
-                elif result.startswith("__COMPACT__"):
-                    instructions = result[len("__COMPACT__"):].strip() or None
-                    # Ctrl+C-safe (sibling-branch pattern) — see _handle_compact.
-                    await _handle_compact(
-                        model, context, console, instructions,
-                        utility_model=resolve_utility_for(
-                            config, "compaction", utility_model))
-                elif result.startswith("__REVIEW__"):
-                    from .review import run_review
-                    review_target = result[len("__REVIEW__"):].strip()
-                    lead_mode = getattr(permissions, "mode", "ask") or "ask"
-                    try:
-                        await run_review(model, config, console, lead_mode,
-                                         target=review_target,
-                                         utility_model=utility_model)
-                    except KeyboardInterrupt:
-                        console.print("\n[#ebcb8b]Review cancelled.[/#ebcb8b]")
-                    except Exception as e:
-                        console.print(f"\n[#bf616a]Review error: {e}[/#bf616a]")
-                elif result.startswith("__TEAM_SPAWN__"):
-                    prompt = result[len("__TEAM_SPAWN__"):]
-                    try:
-                        await team_manager.spawn(prompt)
-                    except Exception as e:
-                        console.print(f"\n[#bf616a]Error spawning worker: {e}[/#bf616a]")
-                elif result.startswith("__PLAN_EXECUTE__"):
-                    plan_content = result[len("__PLAN_EXECUTE__"):]
-                    try:
-                        team_monitor.start()
-                        await execute_plan(
-                            plan_content, team_manager, agent, console
-                        )
-                    except KeyboardInterrupt:
-                        console.print("\n[#ebcb8b]Plan interrupted[/#ebcb8b]")
-                    except Exception as e:
-                        console.print(f"\n[#bf616a]Error: {e}[/#bf616a]")
-                    finally:
-                        team_monitor.stop()
-                elif result.startswith("__RUN_CMD__"):
-                    run_command = result[len("__RUN_CMD__"):]
-                    run_prompt = (
-                        f"Run this command in the current directory:\n\n"
-                        f"```\n{run_command}\n```\n\n"
-                        f"Use the bash tool. Show the output."
+                try:
+                    result = handle_slash_command(
+                        user_input, context, console, config, skills, model,
+                        permissions=permissions,
+                        team_manager=team_manager,
+                        task_store=task_store,
+                        memory=memory,
+                        stats=session_stats,
+                        pinned=pinned,
+                        snippets=snippet_lib,
+                        plan_state=plan_state,
                     )
-                    try:
-                        team_monitor.start()
-                        await _run_with_notify(agent.run(run_prompt))
-                    except KeyboardInterrupt:
-                        console.print("\n[#ebcb8b]Interrupted[/#ebcb8b]")
-                    except Exception as e:
-                        console.print(f"\n[#bf616a]Error: {e}[/#bf616a]")
-                    finally:
-                        team_monitor.stop()
-                elif result == "__INDEX__":
-                    index_service_url = resolve_service_url(config)
-                    console.print(
-                        f"[#88c0d0]▸ Indexing project for code_search "
-                        f"({index_service_url})...[/#88c0d0]")
-                    try:
-                        outcome = await index_project(
-                            os.getcwd(), service_url=index_service_url)
-                    except Exception as e:
-                        console.print(f"[#bf616a]Index error: {e}[/#bf616a]")
-                    else:
-                        if outcome.get("error"):
-                            console.print(f"[#ebcb8b]  ⚠ {outcome['error']}[/#ebcb8b]")
-                        else:
-                            console.print(
-                                f"[#a3be8c]  ✓ Indexed {outcome['indexed']} file(s), "
-                                f"skipped {outcome['skipped']} — "
-                                f"collection {outcome['collection']}[/#a3be8c]")
-                elif result == "__DOCTOR__":
-                    # Read-only: run_doctor never raises per-check (every
-                    # check is individually try/excepted — see doctor.py),
-                    # but this outer try/except is defense-in-depth so a
-                    # genuine bug still can't crash the REPL.
-                    console.print("[#88c0d0]▸ Running health checks...[/#88c0d0]")
-                    try:
-                        checks = await run_doctor(config)
-                    except Exception as e:
-                        console.print(f"[#bf616a]Doctor error: {e}[/#bf616a]")
-                    else:
-                        render_doctor(console, checks)
-                elif result.startswith("__TEAM_STOP__"):
-                    stop_id = result[len("__TEAM_STOP__"):]
-                    try:
-                        if stop_id:
-                            ok = await team_manager.stop(stop_id)
-                            if not ok:
-                                console.print(f"[#ebcb8b]Worker #{stop_id} not found[/#ebcb8b]")
-                        else:
-                            await team_manager.stop_all()
-                            console.print("[#a3be8c]All workers stopped[/#a3be8c]")
-                    except Exception as e:
-                        console.print(f"\n[#bf616a]Error stopping worker: {e}[/#bf616a]")
-                elif result.startswith("__WATCH__"):
-                    watch_cmd = result[len("__WATCH__"):]
-                    if watch_cmd.lower() == "off":
-                        if file_watcher and file_watcher.is_running:
-                            await file_watcher.stop()
-                            file_watcher = None
-                        else:
-                            console.print("[#8899aa]No watcher running.[/#8899aa]")
-                    else:
-                        if file_watcher and file_watcher.is_running:
-                            await file_watcher.stop()
-                        file_watcher = FileWatcher(watch_cmd, console)
-                        await file_watcher.start()
-
-                elif result.startswith("__LOOP__"):
-                    from .loop import LoopEngine, parse_loop_args
-                    from .ui.esc_watcher import EscWatcher
-                    loop_arg = result[len("__LOOP__"):]
-                    if loop_arg == "stop":
-                        console.print("[#8899aa]No loop is running (a running loop owns the prompt — stop it with Esc).[/#8899aa]")
-                    elif loop_arg == "status":
-                        if last_loop_engine is not None:
-                            console.print(f"[#88c0d0]{last_loop_engine.status_line()}[/#88c0d0]")
-                            console.print(f"[#8899aa]log: {last_loop_engine.state.log_path}[/#8899aa]")
-                        else:
-                            console.print("[#8899aa]No loop has run this session.[/#8899aa]")
-                    else:
-                        try:
-                            loop_cfg = parse_loop_args(loop_arg)
-                        except ValueError as e:
-                            console.print(f"[#bf616a]{e}[/#bf616a]")
-                            continue
-                        engine = LoopEngine(loop_cfg, console, runner=agent.run)
-                        last_loop_engine = engine
-                        # /yolo recipe for the loop's duration: agentic prompt
-                        # + trusted tools, restored in finally NO MATTER WHAT.
-                        prev_prompt = context.system_prompt
-                        prev_mode = permissions.mode if permissions else None
-                        if SYSTEM_PROMPT in context.system_prompt:
-                            context.system_prompt = context.system_prompt.replace(
-                                SYSTEM_PROMPT, AGENTIC_PROMPT)
-                        if permissions:
-                            permissions.mode = "trust"
-                        console.print("[bold #ebcb8b]🔁 Loop started[/bold #ebcb8b] [#8899aa]— Esc to stop; checkpoint before every round[/#8899aa]")
-                        try:
-                            with EscWatcher(on_escape=engine.request_stop):
-                                final_status = await engine.run()
-                        except KeyboardInterrupt:
-                            engine.request_stop()
-                            final_status = "stopped"
-                        except Exception as e:
-                            console.print(f"[#bf616a]Loop error: {e}[/#bf616a]")
-                            final_status = engine.state.status
-                        finally:
-                            context.system_prompt = prev_prompt
-                            if permissions and prev_mode is not None:
-                                permissions.mode = prev_mode
-                        color = "#a3be8c" if final_status == "done" else "#ebcb8b"
-                        console.print(f"[{color}]Loop ended: {final_status} after {engine.state.round_n} round(s)[/{color}]")
-                        console.print(f"[#8899aa]log: {engine.state.log_path} · /rollback lists round checkpoints[/#8899aa]")
-
-                elif result == "__PROFILE__":
-                    # Model performance benchmark
-                    import time as _t
-                    console.print("[#88c0d0]Running benchmark...[/#88c0d0]")
-                    bench_prompt = "Write a Python function that checks if a number is prime. Include type hints."
-                    bench_ctx = Context(system_prompt="You are a coding assistant.", max_tokens=4096)
-                    bench_ctx.add_user(bench_prompt)
-                    start_t = _t.monotonic()
-                    first_token_t = None
-                    total_chars = 0
-                    try:
-                        async for chunk in model.chat(bench_ctx.get_messages(), tools=None, stream=True):
-                            if chunk["type"] == "text":
-                                if first_token_t is None:
-                                    first_token_t = _t.monotonic()
-                                total_chars += len(chunk["content"])
-                    except Exception as e:
-                        console.print(f"  [#bf616a]Benchmark failed: {_esc(str(e))}[/#bf616a]")
+                    if result is None:
                         continue
-                    end_t = _t.monotonic()
-                    ttft = (first_token_t - start_t) if first_token_t else 0
-                    total_time = end_t - start_t
-                    est_tokens = total_chars / 4
-                    tps = est_tokens / total_time if total_time > 0 else 0
-                    console.print(f"  [#88c0d0]TTFT:[/#88c0d0] [#d8dee9]{ttft:.2f}s[/#d8dee9]")
-                    console.print(f"  [#88c0d0]Total time:[/#88c0d0] [#d8dee9]{total_time:.2f}s[/#d8dee9]")
-                    console.print(f"  [#88c0d0]Output:[/#88c0d0] [#d8dee9]~{int(est_tokens)} tokens ({total_chars} chars)[/#d8dee9]")
-                    console.print(f"  [#88c0d0]Speed:[/#88c0d0] [#a3be8c]{tps:.1f} tokens/sec[/#a3be8c]")
-                    console.print(f"  [#88c0d0]Model:[/#88c0d0] [#d8dee9]{_esc(str(get(config, 'model', 'display_name', default='') or get(config, 'model', 'name')))}[/#d8dee9]")
-
-                elif result == "__BENCHMARK__":
-                    import time as _btime
-                    model_name = get(config, "model", "name", default="unknown")
-                    console.print(f"  [#88c0d0]Benchmarking {model_name}...[/#88c0d0]")
-                    bench_prompt = "Write a Python function that checks if a number is prime."
-                    bench_msgs = [{"role": "user", "content": bench_prompt}]
-                    first_token_time = None
-                    token_count = 0
-                    start = _btime.monotonic()
-                    try:
-                        async for chunk in model.chat(
-                            messages=bench_msgs, tools=[], stream=True
-                        ):
-                            if chunk["type"] == "text":
-                                if first_token_time is None:
-                                    first_token_time = _btime.monotonic()
-                                token_count += max(1, len(chunk["content"].split()))
-                            elif chunk["type"] == "done":
-                                break
-                        end = _btime.monotonic()
-                        ttft = (first_token_time - start) if first_token_time else 0
-                        total_time = end - start
-                        gen_time = (end - first_token_time) if first_token_time else 0
-                        speed = token_count / gen_time if gen_time > 0 else 0
-                        console.print(f"  [#a3be8c]Time to first token: {ttft:.1f}s[/#a3be8c]")
-                        console.print(f"  [#a3be8c]Generation speed: {speed:.1f} tok/s[/#a3be8c]")
-                        console.print(f"  [#a3be8c]Total: {token_count} tokens in {total_time:.1f}s[/#a3be8c]")
-                    except (KeyboardInterrupt, asyncio.CancelledError):
-                        console.print("\n  [#ebcb8b]Benchmark cancelled.[/#ebcb8b]")
-                    except Exception as e:
-                        console.print(f"  [#bf616a]Benchmark failed: {e}[/#bf616a]")
-                    continue
-
-                elif result.startswith("__TEACH__"):
-                    teach_args = result[len("__TEACH__"):]
-                    # Parse: name "description" -- command
-                    if " -- " in teach_args:
-                        before, command_str = teach_args.split(" -- ", 1)
-                        parts = before.strip().split(maxsplit=1)
-                        tool_name = parts[0] if parts else ""
-                        tool_desc = parts[1].strip('"\'') if len(parts) > 1 else f"Custom tool: {tool_name}"
-                    else:
-                        parts = teach_args.strip().split(maxsplit=2)
-                        tool_name = parts[0] if parts else ""
-                        tool_desc = parts[1].strip('"\'') if len(parts) > 1 else f"Custom tool: {tool_name}"
-                        command_str = parts[2] if len(parts) > 2 else ""
-
-                    if not tool_name or not command_str:
-                        console.print("[#ebcb8b]Usage: /teach <name> <description> -- <command>[/#ebcb8b]")
-                    else:
-                        try:
-                            ct = custom_tool_registry.add(tool_name, tool_desc, command_str)
-                        except ValueError as e:
-                            # e.g. name collides with a built-in tool
-                            console.print(f"[#bf616a]Can't teach '{_esc(tool_name)}': {_esc(str(e))}[/#bf616a]")
-                        else:
-                            tools.register(ct)
-                            console.print(f"[#a3be8c]Taught: {_esc(tool_name)} — {_esc(tool_desc)}[/#a3be8c]")
-                            console.print(f"[#8899aa]Command: {_esc(command_str)}[/#8899aa]")
-
-                elif result.startswith("__BRANCH__"):
-                    branch_args = result[len("__BRANCH__"):]
-                    if not branch_args:
-                        # List branches
-                        branches = branch_manager.list_branches()
-                        if not branches:
-                            console.print("[#8899aa]No branches yet. Use /branch <name>[/#8899aa]")
-                        else:
-                            console.print("[bold #eceff4]Branches:[/bold #eceff4]")
-                            for b in branches:
-                                marker = " [#a3be8c]<- current[/#a3be8c]" if b["current"] else ""
-                                console.print(
-                                    f"  [#88c0d0]{b['name']}[/#88c0d0]  "
-                                    f"[#8899aa]{b['turns']} turns[/#8899aa]{marker}")
-                    else:
-                        msg = branch_manager.create_branch(branch_args, context, os.getcwd())
-                        console.print(f"[#a3be8c]{msg}[/#a3be8c]")
-
-                elif result.startswith("__SWITCH__"):
-                    branch_name = result[len("__SWITCH__"):]
-                    # Save current branch first
-                    branch_manager.save_branch(branch_manager.current, context, os.getcwd())
-                    ok, msg = branch_manager.switch_branch(branch_name, context)
-                    style = "#a3be8c" if ok else "#bf616a"
-                    console.print(f"[{style}]{msg}[/{style}]")
-
-                elif result == "__BRANCHES__":
-                    branches = branch_manager.list_branches()
-                    if not branches:
-                        console.print("[#8899aa]No branches. Use /branch <name> to create one.[/#8899aa]")
-                    else:
-                        console.print("[bold #eceff4]Conversation branches:[/bold #eceff4]")
-                        for b in branches:
-                            marker = " [#a3be8c]<- current[/#a3be8c]" if b["current"] else ""
-                            parent = f" [#4c566a](from {b['parent']})[/#4c566a]" if b.get("parent") else ""
-                            console.print(
-                                f"  [#88c0d0]{b['name']}[/#88c0d0]  "
-                                f"[#8899aa]{b['turns']} turns[/#8899aa]"
-                                f"{parent}{marker}")
-                        console.print("[#8899aa]Use /switch <name> to switch branches[/#8899aa]")
-
-                elif result.startswith("__SHARE__"):
-                    share_format = result[len("__SHARE__"):].strip() or "html"
-                    lines = ["<!DOCTYPE html><html><head>",
-                             "<meta charset='utf-8'>",
-                             "<title>Spark Code Session</title>",
-                             "<style>",
-                             "body{font-family:monospace;background:#2e3440;color:#d8dee9;max-width:800px;margin:0 auto;padding:20px}",
-                             ".user{color:#88c0d0;font-weight:bold}.assistant{color:#d8dee9}",
-                             ".tool{color:#a3be8c;font-style:italic}pre{background:#3b4252;padding:10px;border-radius:4px;overflow-x:auto}",
-                             "h1{color:#ebcb8b}h2{color:#88c0d0;border-bottom:1px solid #4c566a}",
-                             "</style></head><body>",
-                             "<h1>Spark Code Session</h1>"]
-                    import html as _html
-                    for msg in context.messages:
-                        role = msg.get("role", "")
-                        content = msg.get("content", "") or ""
-                        if role == "user" and isinstance(content, str):
-                            lines.append(f"<h2 class='user'>User</h2><p>{_html.escape(content[:2000])}</p>")
-                        elif role == "assistant" and isinstance(content, str) and content:
-                            lines.append(f"<h2 class='assistant'>Assistant</h2><p>{_html.escape(content[:2000])}</p>")
-                        elif role == "tool":
-                            name = msg.get("name", "tool")
-                            preview = (content[:500] + "...") if len(content) > 500 else content
-                            lines.append(f"<p class='tool'>Tool: {_html.escape(str(name))}</p><pre>{_html.escape(preview)}</pre>")
-                    lines.append("</body></html>")
-                    html_content = "\n".join(lines)
-
-                    if share_format == "gist":
-                        # Export as markdown for gist
-                        md_lines = ["# Spark Code Session\n"]
-                        for msg in context.messages:
-                            role = msg.get("role", "")
-                            content = msg.get("content", "") or ""
-                            if role == "user" and isinstance(content, str):
-                                md_lines.append(f"## User\n\n{content[:2000]}\n")
-                            elif role == "assistant" and isinstance(content, str):
-                                md_lines.append(f"## Assistant\n\n{content[:2000]}\n")
-                        md_text = "\n".join(md_lines)
-                        share_path = os.path.join(os.getcwd(), "session_share.md")
-                        with open(share_path, "w") as f:
-                            f.write(md_text)
-                        console.print(f"[#a3be8c]Saved to {share_path}[/#a3be8c]")
-                        console.print("[#8899aa]Create a gist: gh gist create session_share.md[/#8899aa]")
-                    else:
-                        share_path = os.path.join(os.getcwd(), "session_share.html")
-                        with open(share_path, "w") as f:
-                            f.write(html_content)
-                        console.print(f"[#a3be8c]Saved to {share_path}[/#a3be8c]")
-
-                elif result.startswith("__SEARCH__"):
-                    query = result[len("__SEARCH__"):].lower()
-                    history_dir = _sessions_dir()
-                    if not os.path.isdir(history_dir):
-                        console.print("[#8899aa]No saved sessions.[/#8899aa]")
-                    else:
-                        import json as _json
-                        matches = []
-                        for f in sorted(os.listdir(history_dir), reverse=True):
-                            if not f.endswith(".json"):
-                                continue
-                            path = os.path.join(history_dir, f)
-                            try:
-                                with open(path, encoding="utf-8") as fh:
-                                    data = _json.load(fh)
-                                for msg in data.get("messages", []):
-                                    content = msg.get("content", "")
-                                    if isinstance(content, str) and query in content.lower():
-                                        label = data.get("label", f.replace(".json", ""))
-                                        # Extract matching snippet
-                                        idx = content.lower().index(query)
-                                        start = max(0, idx - 40)
-                                        end = min(len(content), idx + len(query) + 40)
-                                        snippet = content[start:end].replace("\n", " ")
-                                        matches.append((label, snippet, f))
-                                        break
-                            except Exception:
-                                pass
-                            if len(matches) >= 10:
-                                break
-
-                        if not matches:
-                            console.print(f"[#8899aa]No sessions matching '{_esc(query)}'[/#8899aa]")
-                        else:
-                            console.print(f"[bold #eceff4]Sessions matching '{_esc(query)}':[/bold #eceff4]")
-                            for label, snippet, fname in matches:
-                                console.print(f"  [#88c0d0]{_esc(str(label))}[/#88c0d0]")
-                                console.print(f"    [#8899aa]...{_esc(str(snippet))}...[/#8899aa]")
-                            console.print("[#8899aa]Use /history <name> to resume[/#8899aa]")
-
-                elif result == "__ANALYTICS__":
-                    stats = session_stats
-                    if not stats:
-                        console.print("[#8899aa]No stats available.[/#8899aa]")
-                    else:
-                        # Generate analytics report
-                        console.print()
-                        console.print("[bold #eceff4]Session Analytics[/bold #eceff4]")
-                        console.print("[#4c566a]─────────────────────────────────[/#4c566a]")
-                        console.print(f"  [#88c0d0]Duration:[/#88c0d0] {stats.format_duration()}")
-                        console.print(f"  [#88c0d0]Turns:[/#88c0d0] {context.turn_count}")
-                        console.print(f"  [#88c0d0]Total tool calls:[/#88c0d0] {stats.total_tool_calls}")
-                        console.print()
-
-                        # Tool usage breakdown
-                        if stats.tool_calls:
-                            console.print("  [bold #eceff4]Tool Usage[/bold #eceff4]")
-                            max_count = max(stats.tool_calls.values())
-                            for name, count in sorted(stats.tool_calls.items(), key=lambda x: -x[1]):
-                                bar_len = int(count / max_count * 20) if max_count else 0
-                                bar = "[#a3be8c]" + "█" * bar_len + "[/#a3be8c]" + "[#4c566a]" + "░" * (20 - bar_len) + "[/#4c566a]"
-                                console.print(f"    {name:<15} {bar} {count}")
-
-                        # Files touched
-                        all_files = stats.files_read | stats.files_written | stats.files_edited
-                        if all_files:
-                            console.print()
-                            console.print("  [bold #eceff4]Files Touched[/bold #eceff4]")
-                            home = os.path.expanduser("~")
-                            for fpath in sorted(all_files)[:15]:
-                                display = "~" + fpath[len(home):] if fpath.startswith(home) else fpath
-                                tags = []
-                                if fpath in stats.files_read:
-                                    tags.append("[#88c0d0]R[/#88c0d0]")
-                                if fpath in stats.files_written:
-                                    tags.append("[#a3be8c]W[/#a3be8c]")
-                                if fpath in stats.files_edited:
-                                    tags.append("[#ebcb8b]E[/#ebcb8b]")
-                                console.print(f"    {''.join(tags)} {display}")
-
-                        # Token usage
-                        console.print()
-                        console.print("  [bold #eceff4]Tokens[/bold #eceff4]")
-                        console.print(f"    Input:  {model.total_input_tokens:,}")
-                        console.print(f"    Output: {model.total_output_tokens:,}")
-                        cost = model.estimated_cost
-                        if cost > 0:
-                            console.print(f"    Cost:   ${cost:.4f}")
-
-                        # Cache stats
-                        if tool_cache:
-                            cs = tool_cache.stats
-                            console.print()
-                            console.print("  [bold #eceff4]Cache[/bold #eceff4]")
-                            console.print(f"    Entries: {cs['entries']}  Hits: {cs['hits']}  Misses: {cs['misses']}  Rate: {cs['hit_rate']}")
-
-                elif result == "__RETRY__":
-                    if not last_user_message:
-                        console.print("  [#ebcb8b]No previous message to retry.[/#ebcb8b]")
-                    else:
-                        console.print(f"  [#88c0d0]Retrying: {_esc(last_user_message[:60])}...[/#88c0d0]")
-                        try:
-                            team_monitor.start()
-                            await _run_with_notify(agent.run(last_user_message))
-                        except KeyboardInterrupt:
-                            console.print("\n[#ebcb8b]Interrupted[/#ebcb8b]")
-                        except Exception as e:
-                            console.print(f"\n[#bf616a]Error: {e}[/#bf616a]")
-                        finally:
-                            team_monitor.stop()
-                    continue
-
-                elif result == "__CONTINUE__":
-                    from spark_code.agent import CHECKPOINT_DIR, load_checkpoint
-                    checkpoint_path = str(CHECKPOINT_DIR / "latest.json")
-                    data = load_checkpoint(checkpoint_path)
-                    if not data:
-                        console.print("  [#ebcb8b]No checkpoint found.[/#ebcb8b]")
-                    else:
-                        saved_cwd = data.get("cwd", "")
-                        if saved_cwd and saved_cwd != os.getcwd():
-                            console.print(f"  [#ebcb8b]Note: CWD changed. Checkpoint was in {saved_cwd}[/#ebcb8b]")
-                        _restore_checkpoint(context, data)
-                        console.print(f"  [#a3be8c]Checkpoint restored ({len(data['messages'])} messages). Resuming...[/#a3be8c]")
+                    if result == "__IMAGE_SENT__":
+                        # Image already added to context — run agent without add_user
                         try:
                             team_monitor.start()
                             await _run_with_notify(agent.run_without_user_add())
@@ -3968,134 +3565,633 @@ async def run_interactive(config: dict, resume_session: str = "",
                             console.print(f"\n[#bf616a]Error: {e}[/#bf616a]")
                         finally:
                             team_monitor.stop()
-
-                elif result == "__CLEAN__":
-                    if not session_stats or not session_stats.files_created:
-                        console.print("  [#ebcb8b]No files were created this session.[/#ebcb8b]")
-                    else:
-                        existing = []
-                        for f in sorted(session_stats.files_created):
-                            if os.path.exists(f):
-                                try:
-                                    lines = len(open(f).readlines())
-                                except Exception:
-                                    lines = 0
-                                existing.append((f, lines))
-                        if not existing:
-                            console.print("  [#ebcb8b]All created files have already been deleted.[/#ebcb8b]")
+                    elif result.startswith("__COMPACT__"):
+                        instructions = result[len("__COMPACT__"):].strip() or None
+                        # Ctrl+C-safe (sibling-branch pattern) — see _handle_compact.
+                        await _handle_compact(
+                            model, context, console, instructions,
+                            utility_model=resolve_utility_for(
+                                config, "compaction", utility_model))
+                    elif result.startswith("__REVIEW__"):
+                        from .review import run_review
+                        review_target = result[len("__REVIEW__"):].strip()
+                        lead_mode = getattr(permissions, "mode", "ask") or "ask"
+                        try:
+                            await run_review(model, config, console, lead_mode,
+                                             target=review_target,
+                                             utility_model=utility_model)
+                        except KeyboardInterrupt:
+                            console.print("\n[#ebcb8b]Review cancelled.[/#ebcb8b]")
+                        except Exception as e:
+                            console.print(f"\n[#bf616a]Review error: {e}[/#bf616a]")
+                    elif result.startswith("__TEAM_SPAWN__"):
+                        prompt = result[len("__TEAM_SPAWN__"):]
+                        try:
+                            await team_manager.spawn(prompt)
+                        except Exception as e:
+                            console.print(f"\n[#bf616a]Error spawning worker: {e}[/#bf616a]")
+                    elif result.startswith("__PLAN_EXECUTE__"):
+                        plan_content = result[len("__PLAN_EXECUTE__"):]
+                        try:
+                            team_monitor.start()
+                            await execute_plan(
+                                plan_content, team_manager, agent, console
+                            )
+                        except KeyboardInterrupt:
+                            console.print("\n[#ebcb8b]Plan interrupted[/#ebcb8b]")
+                        except Exception as e:
+                            console.print(f"\n[#bf616a]Error: {e}[/#bf616a]")
+                        finally:
+                            team_monitor.stop()
+                    elif result.startswith("__RUN_CMD__"):
+                        run_command = result[len("__RUN_CMD__"):]
+                        run_prompt = (
+                            f"Run this command in the current directory:\n\n"
+                            f"```\n{run_command}\n```\n\n"
+                            f"Use the bash tool. Show the output."
+                        )
+                        try:
+                            team_monitor.start()
+                            await _run_with_notify(agent.run(run_prompt))
+                        except KeyboardInterrupt:
+                            console.print("\n[#ebcb8b]Interrupted[/#ebcb8b]")
+                        except Exception as e:
+                            console.print(f"\n[#bf616a]Error: {e}[/#bf616a]")
+                        finally:
+                            team_monitor.stop()
+                    elif result == "__INDEX__":
+                        index_service_url = resolve_service_url(config)
+                        console.print(
+                            f"[#88c0d0]▸ Indexing project for code_search "
+                            f"({index_service_url})...[/#88c0d0]")
+                        try:
+                            outcome = await index_project(
+                                os.getcwd(), service_url=index_service_url)
+                        except Exception as e:
+                            console.print(f"[#bf616a]Index error: {e}[/#bf616a]")
                         else:
-                            console.print("  [#88c0d0]Files created this session:[/#88c0d0]")
-                            for path, lines in existing:
-                                short = path.replace(os.getcwd() + "/", "")
-                                console.print(f"    {short} ({lines} lines)")
+                            if outcome.get("error"):
+                                console.print(f"[#ebcb8b]  ⚠ {outcome['error']}[/#ebcb8b]")
+                            else:
+                                console.print(
+                                    f"[#a3be8c]  ✓ Indexed {outcome['indexed']} file(s), "
+                                    f"skipped {outcome['skipped']} — "
+                                    f"collection {outcome['collection']}[/#a3be8c]")
+                    elif result == "__DOCTOR__":
+                        # Read-only: run_doctor never raises per-check (every
+                        # check is individually try/excepted — see doctor.py),
+                        # but this outer try/except is defense-in-depth so a
+                        # genuine bug still can't crash the REPL.
+                        console.print("[#88c0d0]▸ Running health checks...[/#88c0d0]")
+                        try:
+                            checks = await run_doctor(config)
+                        except Exception as e:
+                            console.print(f"[#bf616a]Doctor error: {e}[/#bf616a]")
+                        else:
+                            render_doctor(console, checks)
+                    elif result.startswith("__TEAM_STOP__"):
+                        stop_id = result[len("__TEAM_STOP__"):]
+                        try:
+                            if stop_id:
+                                ok = await team_manager.stop(stop_id)
+                                if not ok:
+                                    console.print(f"[#ebcb8b]Worker #{stop_id} not found[/#ebcb8b]")
+                            else:
+                                await team_manager.stop_all()
+                                console.print("[#a3be8c]All workers stopped[/#a3be8c]")
+                        except Exception as e:
+                            console.print(f"\n[#bf616a]Error stopping worker: {e}[/#bf616a]")
+                    elif result.startswith("__WATCH__"):
+                        watch_cmd = result[len("__WATCH__"):]
+                        if watch_cmd.lower() == "off":
+                            if file_watcher and file_watcher.is_running:
+                                await file_watcher.stop()
+                                file_watcher = None
+                            else:
+                                console.print("[#8899aa]No watcher running.[/#8899aa]")
+                        else:
+                            if file_watcher and file_watcher.is_running:
+                                await file_watcher.stop()
+                            file_watcher = FileWatcher(watch_cmd, console)
+                            await file_watcher.start()
+
+                    elif result.startswith("__LOOP__"):
+                        from .loop import LoopEngine, parse_loop_args
+                        from .ui.esc_watcher import EscWatcher
+                        loop_arg = result[len("__LOOP__"):]
+                        if loop_arg == "stop":
+                            console.print("[#8899aa]No loop is running (a running loop owns the prompt — stop it with Esc).[/#8899aa]")
+                        elif loop_arg == "status":
+                            if last_loop_engine is not None:
+                                console.print(f"[#88c0d0]{last_loop_engine.status_line()}[/#88c0d0]")
+                                console.print(f"[#8899aa]log: {last_loop_engine.state.log_path}[/#8899aa]")
+                            else:
+                                console.print("[#8899aa]No loop has run this session.[/#8899aa]")
+                        else:
+                            try:
+                                loop_cfg = parse_loop_args(loop_arg)
+                            except ValueError as e:
+                                console.print(f"[#bf616a]{e}[/#bf616a]")
+                                continue
+                            engine = LoopEngine(loop_cfg, console, runner=agent.run)
+                            last_loop_engine = engine
+                            # /yolo recipe for the loop's duration: agentic prompt
+                            # + trusted tools, restored in finally NO MATTER WHAT.
+                            prev_prompt = context.system_prompt
+                            prev_mode = permissions.mode if permissions else None
+                            if SYSTEM_PROMPT in context.system_prompt:
+                                context.system_prompt = context.system_prompt.replace(
+                                    SYSTEM_PROMPT, AGENTIC_PROMPT)
+                            if permissions:
+                                permissions.mode = "trust"
+                            console.print("[bold #ebcb8b]🔁 Loop started[/bold #ebcb8b] [#8899aa]— Esc to stop (ends the current round); checkpoint before every round[/#8899aa]")
+                            try:
+                                with EscWatcher(on_escape=lambda: _loop_escape_action(engine, agent)):
+                                    final_status = await engine.run()
+                            except KeyboardInterrupt:
+                                engine.request_stop()
+                                final_status = "stopped"
+                            except Exception as e:
+                                console.print(f"[#bf616a]Loop error: {e}[/#bf616a]")
+                                final_status = engine.state.status
+                            finally:
+                                context.system_prompt = prev_prompt
+                                if permissions and prev_mode is not None:
+                                    permissions.mode = prev_mode
+                            color = "#a3be8c" if final_status == "done" else "#ebcb8b"
+                            console.print(f"[{color}]Loop ended: {final_status} after {engine.state.round_n} round(s)[/{color}]")
+                            console.print(f"[#8899aa]log: {engine.state.log_path} · /rollback lists round checkpoints[/#8899aa]")
+
+                    elif result == "__PROFILE__":
+                        # Model performance benchmark
+                        import time as _t
+                        console.print("[#88c0d0]Running benchmark...[/#88c0d0]")
+                        bench_prompt = "Write a Python function that checks if a number is prime. Include type hints."
+                        bench_ctx = Context(system_prompt="You are a coding assistant.", max_tokens=4096)
+                        bench_ctx.add_user(bench_prompt)
+                        start_t = _t.monotonic()
+                        first_token_t = None
+                        total_chars = 0
+                        try:
+                            async for chunk in model.chat(bench_ctx.get_messages(), tools=None, stream=True):
+                                if chunk["type"] == "text":
+                                    if first_token_t is None:
+                                        first_token_t = _t.monotonic()
+                                    total_chars += len(chunk["content"])
+                        except Exception as e:
+                            console.print(f"  [#bf616a]Benchmark failed: {_esc(str(e))}[/#bf616a]")
+                            continue
+                        end_t = _t.monotonic()
+                        ttft = (first_token_t - start_t) if first_token_t else 0
+                        total_time = end_t - start_t
+                        est_tokens = total_chars / 4
+                        tps = est_tokens / total_time if total_time > 0 else 0
+                        console.print(f"  [#88c0d0]TTFT:[/#88c0d0] [#d8dee9]{ttft:.2f}s[/#d8dee9]")
+                        console.print(f"  [#88c0d0]Total time:[/#88c0d0] [#d8dee9]{total_time:.2f}s[/#d8dee9]")
+                        console.print(f"  [#88c0d0]Output:[/#88c0d0] [#d8dee9]~{int(est_tokens)} tokens ({total_chars} chars)[/#d8dee9]")
+                        console.print(f"  [#88c0d0]Speed:[/#88c0d0] [#a3be8c]{tps:.1f} tokens/sec[/#a3be8c]")
+                        console.print(f"  [#88c0d0]Model:[/#88c0d0] [#d8dee9]{_esc(str(get(config, 'model', 'display_name', default='') or get(config, 'model', 'name')))}[/#d8dee9]")
+
+                    elif result == "__BENCHMARK__":
+                        import time as _btime
+                        model_name = get(config, "model", "name", default="unknown")
+                        console.print(f"  [#88c0d0]Benchmarking {model_name}...[/#88c0d0]")
+                        bench_prompt = "Write a Python function that checks if a number is prime."
+                        bench_msgs = [{"role": "user", "content": bench_prompt}]
+                        first_token_time = None
+                        token_count = 0
+                        start = _btime.monotonic()
+                        try:
+                            async for chunk in model.chat(
+                                messages=bench_msgs, tools=[], stream=True
+                            ):
+                                if chunk["type"] == "text":
+                                    if first_token_time is None:
+                                        first_token_time = _btime.monotonic()
+                                    token_count += max(1, len(chunk["content"].split()))
+                                elif chunk["type"] == "done":
+                                    break
+                            end = _btime.monotonic()
+                            ttft = (first_token_time - start) if first_token_time else 0
+                            total_time = end - start
+                            gen_time = (end - first_token_time) if first_token_time else 0
+                            speed = token_count / gen_time if gen_time > 0 else 0
+                            console.print(f"  [#a3be8c]Time to first token: {ttft:.1f}s[/#a3be8c]")
+                            console.print(f"  [#a3be8c]Generation speed: {speed:.1f} tok/s[/#a3be8c]")
+                            console.print(f"  [#a3be8c]Total: {token_count} tokens in {total_time:.1f}s[/#a3be8c]")
+                        except (KeyboardInterrupt, asyncio.CancelledError):
+                            console.print("\n  [#ebcb8b]Benchmark cancelled.[/#ebcb8b]")
+                        except Exception as e:
+                            console.print(f"  [#bf616a]Benchmark failed: {e}[/#bf616a]")
+                        continue
+
+                    elif result.startswith("__TEACH__"):
+                        teach_args = result[len("__TEACH__"):]
+                        # Parse: name "description" -- command
+                        if " -- " in teach_args:
+                            before, command_str = teach_args.split(" -- ", 1)
+                            parts = before.strip().split(maxsplit=1)
+                            tool_name = parts[0] if parts else ""
+                            tool_desc = parts[1].strip('"\'') if len(parts) > 1 else f"Custom tool: {tool_name}"
+                        else:
+                            parts = teach_args.strip().split(maxsplit=2)
+                            tool_name = parts[0] if parts else ""
+                            tool_desc = parts[1].strip('"\'') if len(parts) > 1 else f"Custom tool: {tool_name}"
+                            command_str = parts[2] if len(parts) > 2 else ""
+
+                        if not tool_name or not command_str:
+                            console.print("[#ebcb8b]Usage: /teach <name> <description> -- <command>[/#ebcb8b]")
+                        else:
+                            try:
+                                ct = custom_tool_registry.add(tool_name, tool_desc, command_str)
+                            except ValueError as e:
+                                # e.g. name collides with a built-in tool
+                                console.print(f"[#bf616a]Can't teach '{_esc(tool_name)}': {_esc(str(e))}[/#bf616a]")
+                            else:
+                                tools.register(ct)
+                                console.print(f"[#a3be8c]Taught: {_esc(tool_name)} — {_esc(tool_desc)}[/#a3be8c]")
+                                console.print(f"[#8899aa]Command: {_esc(command_str)}[/#8899aa]")
+
+                    elif result.startswith("__BRANCH__"):
+                        branch_args = result[len("__BRANCH__"):]
+                        if not branch_args:
+                            # List branches
+                            branches = branch_manager.list_branches()
+                            if not branches:
+                                console.print("[#8899aa]No branches yet. Use /branch <name>[/#8899aa]")
+                            else:
+                                console.print("[bold #eceff4]Branches:[/bold #eceff4]")
+                                for b in branches:
+                                    marker = " [#a3be8c]<- current[/#a3be8c]" if b["current"] else ""
+                                    console.print(
+                                        f"  [#88c0d0]{b['name']}[/#88c0d0]  "
+                                        f"[#8899aa]{b['turns']} turns[/#8899aa]{marker}")
+                        else:
+                            try:
+                                msg = branch_manager.create_branch(branch_args, context, os.getcwd())
+                            except ValueError as e:
+                                console.print(f"[#bf616a]{_esc(str(e))}[/#bf616a]")
+                            else:
+                                console.print(f"[#a3be8c]{msg}[/#a3be8c]")
+
+                    elif result.startswith("__SWITCH__"):
+                        branch_name = result[len("__SWITCH__"):]
+                        # Save current branch first
+                        branch_manager.save_branch(branch_manager.current, context, os.getcwd())
+                        ok, msg = branch_manager.switch_branch(branch_name, context)
+                        style = "#a3be8c" if ok else "#bf616a"
+                        console.print(f"[{style}]{msg}[/{style}]")
+
+                    elif result == "__BRANCHES__":
+                        branches = branch_manager.list_branches()
+                        if not branches:
+                            console.print("[#8899aa]No branches. Use /branch <name> to create one.[/#8899aa]")
+                        else:
+                            console.print("[bold #eceff4]Conversation branches:[/bold #eceff4]")
+                            for b in branches:
+                                marker = " [#a3be8c]<- current[/#a3be8c]" if b["current"] else ""
+                                parent = f" [#4c566a](from {b['parent']})[/#4c566a]" if b.get("parent") else ""
+                                console.print(
+                                    f"  [#88c0d0]{b['name']}[/#88c0d0]  "
+                                    f"[#8899aa]{b['turns']} turns[/#8899aa]"
+                                    f"{parent}{marker}")
+                            console.print("[#8899aa]Use /switch <name> to switch branches[/#8899aa]")
+
+                    elif result.startswith("__SHARE__"):
+                        share_format = result[len("__SHARE__"):].strip() or "html"
+                        lines = ["<!DOCTYPE html><html><head>",
+                                 "<meta charset='utf-8'>",
+                                 "<title>Spark Code Session</title>",
+                                 "<style>",
+                                 "body{font-family:monospace;background:#2e3440;color:#d8dee9;max-width:800px;margin:0 auto;padding:20px}",
+                                 ".user{color:#88c0d0;font-weight:bold}.assistant{color:#d8dee9}",
+                                 ".tool{color:#a3be8c;font-style:italic}pre{background:#3b4252;padding:10px;border-radius:4px;overflow-x:auto}",
+                                 "h1{color:#ebcb8b}h2{color:#88c0d0;border-bottom:1px solid #4c566a}",
+                                 "</style></head><body>",
+                                 "<h1>Spark Code Session</h1>"]
+                        import html as _html
+                        for msg in context.messages:
+                            role = msg.get("role", "")
+                            content = msg.get("content", "") or ""
+                            if role == "user" and isinstance(content, str):
+                                lines.append(f"<h2 class='user'>User</h2><p>{_html.escape(content[:2000])}</p>")
+                            elif role == "assistant" and isinstance(content, str) and content:
+                                lines.append(f"<h2 class='assistant'>Assistant</h2><p>{_html.escape(content[:2000])}</p>")
+                            elif role == "tool":
+                                name = msg.get("name", "tool")
+                                preview = (content[:500] + "...") if len(content) > 500 else content
+                                lines.append(f"<p class='tool'>Tool: {_html.escape(str(name))}</p><pre>{_html.escape(preview)}</pre>")
+                        lines.append("</body></html>")
+                        html_content = "\n".join(lines)
+
+                        if share_format == "gist":
+                            # Export as markdown for gist
+                            md_lines = ["# Spark Code Session\n"]
+                            for msg in context.messages:
+                                role = msg.get("role", "")
+                                content = msg.get("content", "") or ""
+                                if role == "user" and isinstance(content, str):
+                                    md_lines.append(f"## User\n\n{content[:2000]}\n")
+                                elif role == "assistant" and isinstance(content, str):
+                                    md_lines.append(f"## Assistant\n\n{content[:2000]}\n")
+                            md_text = "\n".join(md_lines)
+                            share_path = os.path.join(os.getcwd(), "session_share.md")
+                            with open(share_path, "w") as f:
+                                f.write(md_text)
+                            console.print(f"[#a3be8c]Saved to {share_path}[/#a3be8c]")
+                            console.print("[#8899aa]Create a gist: gh gist create session_share.md[/#8899aa]")
+                        else:
+                            share_path = os.path.join(os.getcwd(), "session_share.html")
+                            with open(share_path, "w") as f:
+                                f.write(html_content)
+                            console.print(f"[#a3be8c]Saved to {share_path}[/#a3be8c]")
+
+                    elif result.startswith("__SEARCH__"):
+                        query = result[len("__SEARCH__"):].lower()
+                        history_dir = _sessions_dir()
+                        if not os.path.isdir(history_dir):
+                            console.print("[#8899aa]No saved sessions.[/#8899aa]")
+                        else:
+                            import json as _json
+                            matches = []
+                            for f in sorted(os.listdir(history_dir), reverse=True):
+                                if not f.endswith(".json"):
+                                    continue
+                                path = os.path.join(history_dir, f)
+                                try:
+                                    with open(path, encoding="utf-8") as fh:
+                                        data = _json.load(fh)
+                                    for msg in data.get("messages", []):
+                                        content = msg.get("content", "")
+                                        if isinstance(content, str) and query in content.lower():
+                                            label = data.get("label", f.replace(".json", ""))
+                                            # Extract matching snippet
+                                            idx = content.lower().index(query)
+                                            start = max(0, idx - 40)
+                                            end = min(len(content), idx + len(query) + 40)
+                                            snippet = content[start:end].replace("\n", " ")
+                                            matches.append((label, snippet, f))
+                                            break
+                                except Exception:
+                                    pass
+                                if len(matches) >= 10:
+                                    break
+
+                            if not matches:
+                                console.print(f"[#8899aa]No sessions matching '{_esc(query)}'[/#8899aa]")
+                            else:
+                                console.print(f"[bold #eceff4]Sessions matching '{_esc(query)}':[/bold #eceff4]")
+                                for label, snippet, fname in matches:
+                                    console.print(f"  [#88c0d0]{_esc(str(label))}[/#88c0d0]")
+                                    console.print(f"    [#8899aa]...{_esc(str(snippet))}...[/#8899aa]")
+                                console.print("[#8899aa]Use /history <name> to resume[/#8899aa]")
+
+                    elif result == "__ANALYTICS__":
+                        stats = session_stats
+                        if not stats:
+                            console.print("[#8899aa]No stats available.[/#8899aa]")
+                        else:
+                            # Generate analytics report
                             console.print()
-                            answer = await session.prompt_async("  Delete all? [y/N/select] ")
-                            answer = answer.strip().lower()
-                            if answer == "y":
-                                for path, _ in existing:
+                            console.print("[bold #eceff4]Session Analytics[/bold #eceff4]")
+                            console.print("[#4c566a]─────────────────────────────────[/#4c566a]")
+                            console.print(f"  [#88c0d0]Duration:[/#88c0d0] {stats.format_duration()}")
+                            console.print(f"  [#88c0d0]Turns:[/#88c0d0] {context.turn_count}")
+                            console.print(f"  [#88c0d0]Total tool calls:[/#88c0d0] {stats.total_tool_calls}")
+                            console.print()
+
+                            # Tool usage breakdown
+                            if stats.tool_calls:
+                                console.print("  [bold #eceff4]Tool Usage[/bold #eceff4]")
+                                max_count = max(stats.tool_calls.values())
+                                for name, count in sorted(stats.tool_calls.items(), key=lambda x: -x[1]):
+                                    bar_len = int(count / max_count * 20) if max_count else 0
+                                    bar = "[#a3be8c]" + "█" * bar_len + "[/#a3be8c]" + "[#4c566a]" + "░" * (20 - bar_len) + "[/#4c566a]"
+                                    console.print(f"    {name:<15} {bar} {count}")
+
+                            # Files touched
+                            all_files = stats.files_read | stats.files_written | stats.files_edited
+                            if all_files:
+                                console.print()
+                                console.print("  [bold #eceff4]Files Touched[/bold #eceff4]")
+                                home = os.path.expanduser("~")
+                                for fpath in sorted(all_files)[:15]:
+                                    display = "~" + fpath[len(home):] if fpath.startswith(home) else fpath
+                                    tags = []
+                                    if fpath in stats.files_read:
+                                        tags.append("[#88c0d0]R[/#88c0d0]")
+                                    if fpath in stats.files_written:
+                                        tags.append("[#a3be8c]W[/#a3be8c]")
+                                    if fpath in stats.files_edited:
+                                        tags.append("[#ebcb8b]E[/#ebcb8b]")
+                                    console.print(f"    {''.join(tags)} {display}")
+
+                            # Token usage
+                            console.print()
+                            console.print("  [bold #eceff4]Tokens[/bold #eceff4]")
+                            console.print(f"    Input:  {model.total_input_tokens:,}")
+                            console.print(f"    Output: {model.total_output_tokens:,}")
+                            cost = model.estimated_cost
+                            if cost > 0:
+                                console.print(f"    Cost:   ${cost:.4f}")
+
+                            # Cache stats
+                            if tool_cache:
+                                cs = tool_cache.stats
+                                console.print()
+                                console.print("  [bold #eceff4]Cache[/bold #eceff4]")
+                                console.print(f"    Entries: {cs['entries']}  Hits: {cs['hits']}  Misses: {cs['misses']}  Rate: {cs['hit_rate']}")
+
+                    elif result == "__RETRY__":
+                        if not last_user_message:
+                            console.print("  [#ebcb8b]No previous message to retry.[/#ebcb8b]")
+                        else:
+                            console.print(f"  [#88c0d0]Retrying: {_esc(last_user_message[:60])}...[/#88c0d0]")
+                            try:
+                                team_monitor.start()
+                                await _run_with_notify(agent.run(last_user_message))
+                            except KeyboardInterrupt:
+                                console.print("\n[#ebcb8b]Interrupted[/#ebcb8b]")
+                            except Exception as e:
+                                console.print(f"\n[#bf616a]Error: {e}[/#bf616a]")
+                            finally:
+                                team_monitor.stop()
+                        continue
+
+                    elif result == "__CONTINUE__":
+                        from spark_code.agent import CHECKPOINT_DIR, load_checkpoint
+                        checkpoint_path = str(CHECKPOINT_DIR / "latest.json")
+                        data = load_checkpoint(checkpoint_path)
+                        if not data:
+                            console.print("  [#ebcb8b]No checkpoint found.[/#ebcb8b]")
+                        else:
+                            saved_cwd = data.get("cwd", "")
+                            if saved_cwd and saved_cwd != os.getcwd():
+                                console.print(f"  [#ebcb8b]Note: CWD changed. Checkpoint was in {saved_cwd}[/#ebcb8b]")
+                            _restore_checkpoint(context, data)
+                            console.print(f"  [#a3be8c]Checkpoint restored ({len(data['messages'])} messages). Resuming...[/#a3be8c]")
+                            try:
+                                team_monitor.start()
+                                await _run_with_notify(agent.run_without_user_add())
+                            except KeyboardInterrupt:
+                                console.print("\n[#ebcb8b]Interrupted[/#ebcb8b]")
+                            except Exception as e:
+                                console.print(f"\n[#bf616a]Error: {e}[/#bf616a]")
+                            finally:
+                                team_monitor.stop()
+
+                    elif result == "__CLEAN__":
+                        if not session_stats or not session_stats.files_created:
+                            console.print("  [#ebcb8b]No files were created this session.[/#ebcb8b]")
+                        else:
+                            existing = []
+                            for f in sorted(session_stats.files_created):
+                                if os.path.exists(f):
                                     try:
-                                        os.remove(path)
-                                        console.print(f"  [#a3be8c]Deleted {os.path.basename(path)}[/#a3be8c]")
-                                    except Exception as e:
-                                        console.print(f"  [#bf616a]Error deleting {path}: {e}[/#bf616a]")
-                            elif answer == "select":
+                                        lines = len(open(f).readlines())
+                                    except Exception:
+                                        lines = 0
+                                    existing.append((f, lines))
+                            if not existing:
+                                console.print("  [#ebcb8b]All created files have already been deleted.[/#ebcb8b]")
+                            else:
+                                console.print("  [#88c0d0]Files created this session:[/#88c0d0]")
                                 for path, lines in existing:
                                     short = path.replace(os.getcwd() + "/", "")
-                                    ans = await session.prompt_async(f"  Delete {short}? [y/N] ")
-                                    if ans.strip().lower() == "y":
+                                    console.print(f"    {short} ({lines} lines)")
+                                console.print()
+                                try:
+                                    answer = await session.prompt_async("  Delete all? [y/N/select] ")
+                                except (KeyboardInterrupt, EOFError):
+                                    console.print("  Cancelled.")
+                                    continue
+                                answer = answer.strip().lower()
+                                if answer == "y":
+                                    for path, _ in existing:
                                         try:
                                             os.remove(path)
                                             console.print(f"  [#a3be8c]Deleted {os.path.basename(path)}[/#a3be8c]")
                                         except Exception as e:
-                                            console.print(f"  [#bf616a]Error: {e}[/#bf616a]")
-                            else:
-                                console.print("  Cancelled.")
-                    continue
-
-                elif result.startswith("__MODEL_SWITCH__"):
-                    provider_name = result[len("__MODEL_SWITCH__"):]
-                    providers = config.get("providers", {})
-                    if provider_name not in providers:
-                        # Check built-in providers
-                        if provider_name in PROVIDERS:
-                            console.print(f"[#ebcb8b]Provider '{provider_name}' is built-in but not configured in your config.yaml[/#ebcb8b]")
-                            console.print("[#8899aa]Add it to your config.yaml under 'providers:' to use it[/#8899aa]")
-                        else:
-                            console.print(f"[#bf616a]Unknown provider: {provider_name}[/#bf616a]")
-                            if providers:
-                                console.print(f"[#8899aa]Available: {', '.join(providers.keys())}[/#8899aa]")
+                                            console.print(f"  [#bf616a]Error deleting {path}: {e}[/#bf616a]")
+                                elif answer == "select":
+                                    for path, lines in existing:
+                                        short = path.replace(os.getcwd() + "/", "")
+                                        try:
+                                            ans = await session.prompt_async(f"  Delete {short}? [y/N] ")
+                                        except (KeyboardInterrupt, EOFError):
+                                            console.print("  Cancelled.")
+                                            break
+                                        if ans.strip().lower() == "y":
+                                            try:
+                                                os.remove(path)
+                                                console.print(f"  [#a3be8c]Deleted {os.path.basename(path)}[/#a3be8c]")
+                                            except Exception as e:
+                                                console.print(f"  [#bf616a]Error: {e}[/#bf616a]")
+                                else:
+                                    console.print("  Cancelled.")
                         continue
 
-                    pconf = providers[provider_name]
-                    # Phase 5 Task 2: a provider added via /setkey has no
-                    # api_key in its config block at all (the key lives in
-                    # ~/.spark/keys) — resolve_provider_key applies the same
-                    # precedence config.resolve_provider does at startup
-                    # (explicit ${ENV}-resolved config key > keys file > "").
-                    resolved_key = resolve_provider_key(provider_name, pconf, load_keys())
-                    # Resolve the underlying model name for the new endpoint.
-                    new_real = await resolve_real_model_name(
-                        endpoint=pconf.get("endpoint", ""),
-                        api_key=resolved_key,
-                        timeout=1.5,
-                        configured_model=pconf.get("model", ""),
-                    )
-                    # Close old client
-                    await model.close()
-                    # Create new client
-                    model = ModelClient(
-                        endpoint=pconf.get("endpoint", "http://localhost:11434"),
-                        model=pconf.get("model", "unknown"),
-                        temperature=pconf.get("temperature", 0.7),
-                        max_tokens=pconf.get("max_tokens", 8192),
-                        api_key=resolved_key,
-                        provider=provider_name,
-                        timeout=float(pconf.get("timeout", 300)),
-                        real_model_name=new_real or "",
-                        supports_vision=bool(pconf.get("vision", False)),
-                    )
-                    # Update config
-                    config["model"]["name"] = pconf.get("model", "unknown")
-                    config["model"]["endpoint"] = pconf.get("endpoint", "http://localhost:11434")
-                    config["model"]["provider"] = provider_name
-                    config["model"]["vision"] = bool(pconf.get("vision", False))
-                    config["model"]["api_key"] = resolved_key
+                    elif result.startswith("__MODEL_SWITCH__"):
+                        provider_name = result[len("__MODEL_SWITCH__"):]
+                        providers = config.get("providers", {})
+                        if provider_name not in providers:
+                            # Check built-in providers
+                            if provider_name in PROVIDERS:
+                                console.print(f"[#ebcb8b]Provider '{provider_name}' is built-in but not configured in your config.yaml[/#ebcb8b]")
+                                console.print("[#8899aa]Add it to your config.yaml under 'providers:' to use it[/#8899aa]")
+                            else:
+                                console.print(f"[#bf616a]Unknown provider: {provider_name}[/#bf616a]")
+                                if providers:
+                                    console.print(f"[#8899aa]Available: {', '.join(providers.keys())}[/#8899aa]")
+                            continue
 
-                    # Update every holder of the PRIMARY model client — the
-                    # agent AND the team manager (which kept the now-closed
-                    # client, so /team after a switch would hit a closed
-                    # httpx client). Deliberately does NOT touch
-                    # agent.utility_model/worker_model_obj — Task 2's utility
-                    # client (like the pre-existing worker model) has its own
-                    # lifecycle, independent of the primary model switching
-                    # providers.
-                    agent.model = model
-                    if team_manager is not None:
-                        team_manager.model = model
-                    console.print(f"[#a3be8c]Switched to {provider_name} ({pconf.get('model', '?')})[/#a3be8c]")
-                    console.print("[#8899aa]Conversation context preserved[/#8899aa]")
-                else:
-                    # Skill returned a prompt — send to agent
-                    is_projectplan = "projectplan.md" in result
-                    user_input = result
-                    try:
-                        team_monitor.start()
-                        await _run_with_notify(agent.run(user_input))
-                    except KeyboardInterrupt:
-                        console.print("\n[#ebcb8b]Interrupted[/#ebcb8b]")
-                    except Exception as e:
-                        console.print(f"\n[#bf616a]Error: {e}[/#bf616a]")
-                    finally:
-                        team_monitor.stop()
-                    # Post-run status for /projectplan
-                    if is_projectplan:
-                        pp_path = os.path.join(os.getcwd(), "projectplan.md")
-                        if os.path.exists(pp_path):
-                            console.print("\n[#a3be8c]▸ projectplan.md created successfully[/#a3be8c]")
-                            console.print("[#88c0d0]  /projectplan show  to review  ·  /projectplan go  to execute[/#88c0d0]")
+                        pconf = providers[provider_name]
+                        # Phase 5 Task 2: a provider added via /setkey has no
+                        # api_key in its config block at all (the key lives in
+                        # ~/.spark/keys) — resolve_provider_key applies the same
+                        # precedence config.resolve_provider does at startup
+                        # (explicit ${ENV}-resolved config key > keys file > "").
+                        resolved_key = resolve_provider_key(provider_name, pconf, load_keys())
+                        # Resolve the underlying model name for the new endpoint.
+                        new_real = await resolve_real_model_name(
+                            endpoint=pconf.get("endpoint", ""),
+                            api_key=resolved_key,
+                            timeout=1.5,
+                            configured_model=pconf.get("model", ""),
+                        )
+                        # Close old client
+                        await model.close()
+                        # Create new client
+                        model = ModelClient(
+                            endpoint=pconf.get("endpoint", "http://localhost:11434"),
+                            model=pconf.get("model", "unknown"),
+                            temperature=pconf.get("temperature", 0.7),
+                            max_tokens=pconf.get("max_tokens", 8192),
+                            api_key=resolved_key,
+                            provider=provider_name,
+                            timeout=float(pconf.get("timeout", 300)),
+                            real_model_name=new_real or "",
+                            supports_vision=bool(pconf.get("vision", False)),
+                        )
+                        # Update config
+                        config["model"]["name"] = pconf.get("model", "unknown")
+                        config["model"]["endpoint"] = pconf.get("endpoint", "http://localhost:11434")
+                        config["model"]["provider"] = provider_name
+                        config["model"]["vision"] = bool(pconf.get("vision", False))
+                        config["model"]["api_key"] = resolved_key
+                        # display_name follows the NEW provider: adopt its configured
+                        # display_name if it has one, otherwise DROP the stale key so
+                        # the toolbar/banner show this provider's real model name
+                        # instead of the previous provider's friendly alias (e.g. the
+                        # qwen3.5:122b alias lingering after a switch).
+                        new_display = pconf.get("display_name")
+                        if new_display:
+                            config["model"]["display_name"] = new_display
                         else:
-                            console.print("\n[#bf616a]▸ projectplan.md was NOT created — model may have failed[/#bf616a]")
-                            console.print("[#8899aa]  Try again or use /projectplan <prompt> with a simpler request[/#8899aa]")
+                            config["model"].pop("display_name", None)
+
+                        # Update every holder of the PRIMARY model client — the
+                        # agent AND the team manager (which kept the now-closed
+                        # client, so /team after a switch would hit a closed
+                        # httpx client). Deliberately does NOT touch
+                        # agent.utility_model/worker_model_obj — Task 2's utility
+                        # client (like the pre-existing worker model) has its own
+                        # lifecycle, independent of the primary model switching
+                        # providers.
+                        agent.model = model
+                        if team_manager is not None:
+                            team_manager.model = model
+                        console.print(f"[#a3be8c]Switched to {provider_name} ({pconf.get('model', '?')})[/#a3be8c]")
+                        console.print("[#8899aa]Conversation context preserved[/#8899aa]")
+                    else:
+                        # Skill returned a prompt — send to agent
+                        is_projectplan = "projectplan.md" in result
+                        user_input = result
+                        try:
+                            team_monitor.start()
+                            await _run_with_notify(agent.run(user_input))
+                        except KeyboardInterrupt:
+                            console.print("\n[#ebcb8b]Interrupted[/#ebcb8b]")
+                        except Exception as e:
+                            console.print(f"\n[#bf616a]Error: {e}[/#bf616a]")
+                        finally:
+                            team_monitor.stop()
+                        # Post-run status for /projectplan
+                        if is_projectplan:
+                            pp_path = os.path.join(os.getcwd(), "projectplan.md")
+                            if os.path.exists(pp_path):
+                                console.print("\n[#a3be8c]▸ projectplan.md created successfully[/#a3be8c]")
+                                console.print("[#88c0d0]  /projectplan show  to review  ·  /projectplan go  to execute[/#88c0d0]")
+                            else:
+                                console.print("\n[#bf616a]▸ projectplan.md was NOT created — model may have failed[/#bf616a]")
+                                console.print("[#8899aa]  Try again or use /projectplan <prompt> with a simpler request[/#8899aa]")
+                except Exception as _cmd_exc:
+                    # Any uncaught error in a slash handler or its sentinel
+                    # dispatch is contained here so one bad command can't crash
+                    # the whole REPL. KeyboardInterrupt / SystemExit (e.g. /exit)
+                    # are BaseException, not Exception, so they still propagate.
+                    console.print(f"\n[#bf616a]Command error: {_esc(str(_cmd_exc))}[/#bf616a]")
+                    continue
             elif _is_shell_command(user_input):
                 # Direct shell command — run via agent with explicit instruction
                 run_prompt = (
@@ -4548,6 +4644,10 @@ async def _one_shot(config: dict, prompt: str, output: str = "text",
     # instead of calling tools headlessly; the act-first policy never reached it).
     context = Context(
         system_prompt=AGENTIC_PROMPT if agentic else SYSTEM_PROMPT,
+        # Carry the configured context window (same as the interactive build)
+        # — without it Context falls back to its 32768 default, so small-window
+        # configs overflow and large-window configs compact far too early.
+        max_tokens=get(config, "model", "context_window", default=32768),
         platform_prompt=format_platform_prompt(os.getcwd()),
         provider_prompt=get(config, "model", "system_prompt", default=""),
     )

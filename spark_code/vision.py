@@ -3,6 +3,7 @@ primary model can work with what's on screen."""
 from __future__ import annotations
 
 import base64
+import mimetypes
 from pathlib import Path
 
 from .config import load_config, load_keys, resolve_provider_key
@@ -45,9 +46,15 @@ async def describe_image(image_path, prompt=None, provider_name=None, config=Non
         provider=provider_name,
         supports_vision=True)
     b64 = base64.b64encode(data).decode("utf-8")
+    # Derive the media type from the file so a JPEG/WebP/GIF isn't mislabeled
+    # as PNG in the data URL (some providers reject a mismatched mime). Fall
+    # back to image/png for unknown/non-image extensions.
+    mime, _ = mimetypes.guess_type(str(image_path))
+    if not mime or not mime.startswith("image/"):
+        mime = "image/png"
     messages = [{"role": "user", "content": [
         {"type": "text", "text": prompt or DEFAULT_VISION_PROMPT},
-        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}}]}]
+        {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}]}]
     text = ""
     try:
         err_detail = ""

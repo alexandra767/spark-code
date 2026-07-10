@@ -299,3 +299,45 @@ def test_normal_prompt_gets_no_stderr_note(cli_runner_env):
     assert result.exit_code == 0
     assert "-p is now the prompt flag" not in result.stderr
     assert calls["prompt"] == "fix the failing tests"
+
+
+# ---------------------------------------------------------------------------
+# Audit finding #10: the headless Context must carry the configured context
+# window — a bare Context() silently fell back to the 32768 default, so
+# small-window configs overflowed and large-window configs compacted early.
+# ---------------------------------------------------------------------------
+
+async def test_one_shot_context_window_from_config(scripted_model, monkeypatch):
+    captured = {}
+    real_context = cli_mod.Context
+
+    def _capturing_context(*args, **kwargs):
+        captured["max_tokens"] = kwargs.get("max_tokens")
+        return real_context(*args, **kwargs)
+
+    monkeypatch.setattr(cli_mod, "Context", _capturing_context)
+    scripted_model.rounds = [
+        [{"type": "text", "content": "ok"}, {"type": "done", "usage": {}}],
+    ]
+    code = await _one_shot(
+        {"model": {"context_window": 123456}, "permissions": {"mode": "trust"}},
+        "hi", output="json")
+    assert code == 0
+    assert captured["max_tokens"] == 123456
+
+
+async def test_one_shot_context_window_defaults_when_unset(scripted_model, monkeypatch):
+    captured = {}
+    real_context = cli_mod.Context
+
+    def _capturing_context(*args, **kwargs):
+        captured["max_tokens"] = kwargs.get("max_tokens")
+        return real_context(*args, **kwargs)
+
+    monkeypatch.setattr(cli_mod, "Context", _capturing_context)
+    scripted_model.rounds = [
+        [{"type": "text", "content": "ok"}, {"type": "done", "usage": {}}],
+    ]
+    code = await _one_shot({"permissions": {"mode": "trust"}}, "hi", output="json")
+    assert code == 0
+    assert captured["max_tokens"] == 32768  # documented default

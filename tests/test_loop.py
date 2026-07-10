@@ -2,12 +2,14 @@
 
 import asyncio
 import subprocess as _subprocess
+import time
 from types import SimpleNamespace
 
 import pytest
 
 from spark_code import loop as loop_mod
 from spark_code.loop import (
+    _response_signals_done,
     make_checkpoint,
     parse_interval,
     parse_loop_args,
@@ -88,6 +90,58 @@ class TestParseLoopArgs:
         assert cfg.max_rounds == 20
         assert cfg.round_timeout_s == 900
 
+    def test_check_only_parsed_as_leading_flag(self):
+        # A goal that merely MENTIONS --check must NOT be misparsed as the flag
+        # (regression: re.search grabbed --check anywhere, mangling the goal).
+        cfg = parse_loop_args('add a --check "verbose" flag to the CLI')
+        assert cfg.check_cmd is None
+        assert cfg.goal == 'add a --check "verbose" flag to the CLI'
+
+    def test_leading_check_still_parsed(self):
+        cfg = parse_loop_args('--check "pytest -q" fix the tests')
+        assert cfg.check_cmd == "pytest -q"
+        assert cfg.goal == "fix the tests"
+
+    def test_check_after_every_still_parsed(self):
+        cfg = parse_loop_args('every 30m --check "make build" keep it green')
+        assert cfg.interval_s == 1800
+        assert cfg.check_cmd == "make build"
+        assert cfg.goal == "keep it green"
+
+    def test_goal_starting_with_checkpoint_word_not_a_flag(self):
+        # "--checkpoint ..." begins with "--check" but is NOT the flag: the
+        # leading matcher requires whitespace after --check.
+        cfg = parse_loop_args("--checkpoint the database before migrating")
+        assert cfg.check_cmd is None
+        assert cfg.goal == "--checkpoint the database before migrating"
+
+
+class TestResponseSignalsDone:
+    def test_marker_at_end_of_line(self):
+        assert _response_signals_done("all fixed LOOP_DONE") is True
+
+    def test_marker_on_own_final_line(self):
+        assert _response_signals_done("did the work\nLOOP_DONE") is True
+
+    def test_marker_with_trailing_punctuation(self):
+        assert _response_signals_done("done here. LOOP_DONE.") is True
+
+    def test_marker_mentioned_mid_reply_is_not_done(self):
+        # The false-completion the fix targets.
+        assert _response_signals_done(
+            "I won't write LOOP_DONE until the tests pass") is False
+
+    def test_marker_followed_by_more_text_is_not_done(self):
+        assert _response_signals_done(
+            "LOOP_DONE\nActually, one more thing to check") is False
+
+    def test_continue_marker_is_not_done(self):
+        assert _response_signals_done("still working LOOP_CONTINUE") is False
+
+    def test_empty_is_not_done(self):
+        assert _response_signals_done("") is False
+        assert _response_signals_done(None) is False
+
 
 def _fake_run_factory(returncode=0, stdout="", stderr="", raises=None):
     """Build a subprocess.run stand-in capturing calls."""
@@ -150,12 +204,14 @@ class TestMakeCheckpoint:
         assert make_checkpoint("x") == "git-unavailable"
 
     def test_apply_fails(self, monkeypatch):
+        # Push succeeds but apply --index fails: DANGEROUS (tree reverted, WIP
+        # stranded in the stash) — distinct from "failed" so the loop can halt.
         fake = _fake_run_sequence(
             (0, "Saved working directory", ""),  # push succeeds
             (1, "", "conflict"),  # apply fails
         )
         monkeypatch.setattr(loop_mod.subprocess, "run", fake)
-        assert make_checkpoint("x") == "failed"
+        assert make_checkpoint("x") == "apply-failed"
 
 
 class TestRunCheck:
@@ -356,6 +412,118 @@ class TestLoopEngineTimed:
         status = asyncio.run(eng.run())
         assert eng.state.round_n == 3
         assert status == "stopped"
+
+
+class _RecConsole:
+    """Console that records the raw (markup-laden) strings printed to it."""
+
+    def __init__(self):
+        self.msgs: list[str] = []
+
+    def print(self, *args, **kwargs):
+        self.msgs.append(str(args[0]) if args else "")
+
+
+class TestLoopDoneMarkerGating:
+    def test_mid_reply_mention_does_not_complete_loop(self, tmp_path, monkeypatch):
+        # Round 1 MENTIONS the marker while continuing — must NOT complete.
+        # Round 2 ends with it — completes there.
+        runner = FakeRunner([
+            "I won't write LOOP_DONE until the tests pass. LOOP_CONTINUE",
+            "all fixed now LOOP_DONE",
+        ])
+        eng = _engine({"goal": "fix it"}, runner, tmp_path, monkeypatch,
+                      fingerprints=["a", "b", "c", "d"])  # changes each round
+        status = asyncio.run(eng.run())
+        assert status == "done"
+        assert eng.state.round_n == 2
+
+
+class TestTimedStallGuard:
+    def test_timed_loop_does_not_stall_on_idle_rounds(self, tmp_path, monkeypatch):
+        # A timed patrol whose rounds change nothing and self-report NOT-DONE
+        # must keep patrolling — idle rounds are its HEALTHY state, not a stall.
+        class StopOnThird(FakeRunner):
+            async def __call__(self, prompt):
+                if len(self.prompts) >= 2:
+                    self.eng.request_stop()
+                return await super().__call__(prompt)
+
+        runner = StopOnThird(["LOOP_CONTINUE"] * 6)
+        eng = _engine({"goal": "patrol", "interval_s": 1}, runner, tmp_path,
+                      monkeypatch, fingerprints=["same"] * 20)  # never changes
+        runner.eng = eng
+        status = asyncio.run(eng.run())
+        assert status == "stopped"      # NOT "stalled"
+        assert eng.state.round_n == 3   # ran past the 2-round stall cap
+
+
+class TestNonGitDir:
+    def test_git_unavailable_warns_and_disables_stall(self, tmp_path, monkeypatch):
+        # No git → make_checkpoint "git-unavailable", tree_fingerprint "" (never
+        # "changed"). The until-done loop must NOT stall (real progress is
+        # invisible to git) and must warn once about the missing safety net.
+        class StopAfterFour(FakeRunner):
+            async def __call__(self, prompt):
+                if len(self.prompts) >= 3:
+                    self.eng.request_stop()
+                return await super().__call__(prompt)
+
+        runner = StopAfterFour(["LOOP_CONTINUE"] * 8)
+        monkeypatch.setattr(loop_mod, "make_checkpoint",
+                            lambda label: "git-unavailable")
+        monkeypatch.setattr(loop_mod, "tree_fingerprint", lambda: "")
+        monkeypatch.setattr(loop_mod, "run_check",
+                            lambda c, timeout_s=300: (False, ""))
+        console = _RecConsole()
+        eng = loop_mod.LoopEngine(loop_mod.LoopConfig(goal="fix"), console,
+                                  runner, loops_dir=str(tmp_path / "loops"))
+        runner.eng = eng
+        status = asyncio.run(eng.run())
+        assert status == "stopped"       # NOT "stalled"
+        assert eng.state.round_n == 4    # ran well past the 2-round stall cap
+        assert any("checkpoint safety net" in m for m in console.msgs)
+
+    def test_checkpoint_apply_failed_halts_loudly(self, tmp_path, monkeypatch):
+        # A stash pushed but not re-applied leaves the WIP stranded and the tree
+        # reverted — the loop must STOP with recovery steps and never run the
+        # model against the wrong state.
+        runner = FakeRunner(["LOOP_CONTINUE", "LOOP_DONE"])  # would run if alive
+        monkeypatch.setattr(loop_mod, "make_checkpoint",
+                            lambda label: "apply-failed")
+        monkeypatch.setattr(loop_mod, "tree_fingerprint", lambda: "x")
+        monkeypatch.setattr(loop_mod, "run_check",
+                            lambda c, timeout_s=300: (False, ""))
+        console = _RecConsole()
+        eng = loop_mod.LoopEngine(loop_mod.LoopConfig(goal="fix"), console,
+                                  runner, loops_dir=str(tmp_path / "loops"))
+        status = asyncio.run(eng.run())
+        assert status == "checkpoint-failed"
+        assert runner.prompts == []      # the round never ran — model untouched
+        assert any("git stash pop" in m for m in console.msgs)
+
+
+class TestTimedSleepAnchoring:
+    def test_timed_sleep_anchored_to_round_start(self, tmp_path, monkeypatch):
+        # A slow round must NOT push out the next run: next_run_at is anchored
+        # to when the round STARTED (round_start + interval), not when it ended,
+        # so a 30-min interval with 4-min rounds fires every 30 min, not 34.
+        eng_holder = {}
+
+        async def slow_runner(prompt):
+            eng_holder["eng"].request_stop()   # stop so we don't really sleep
+            await asyncio.sleep(0.4)            # round takes measurable time
+            return "LOOP_CONTINUE"
+
+        eng = _engine({"goal": "patrol", "interval_s": 1}, slow_runner, tmp_path,
+                      monkeypatch, fingerprints=["a", "b"])
+        eng_holder["eng"] = eng
+        t_start = time.time()
+        asyncio.run(eng.run())
+        period = eng.state.next_run_at - t_start
+        # Anchored ≈ interval_s (1.0); the un-anchored bug would give ≈1.4
+        # (interval + the 0.4s round).
+        assert 0.85 <= period <= 1.3, period
 
 
 class TestStatusLine:

@@ -130,3 +130,46 @@ async def test_orrery_unreachable_is_friendly_never_raises(monkeypatch):
     result = await StackInfoTool().execute()
 
     assert "Orrery is not running" in result
+
+
+async def test_file_search_non_json_degrades_but_keeps_stack(monkeypatch):
+    """A non-JSON 200 from /api/files/search (fresp.json() → ValueError) must
+    NOT escape to the outer handler and get mis-reported as 'Orrery is not
+    running' while Orrery IS up — the stack matches already gathered survive."""
+    async def fake_get(self, url, params=None):
+        if url.endswith("/api/stack/search"):
+            return _FakeResp({"nodes": [
+                {"id": "app:x", "label": "budget-app", "ring": "applications"}]})
+        if url.endswith("/api/files/search"):
+            r = _FakeResp(None)  # 200, but .json() blows up
+
+            def boom():
+                raise ValueError("Expecting value: line 1 column 1")
+
+            r.json = boom
+            return r
+        raise AssertionError(f"unexpected url {url}")
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    result = await StackInfoTool().execute(query="budget.xlsx")
+
+    assert "budget-app" in result                 # stack match preserved
+    assert "Orrery is not running" not in result  # NOT mis-reported as down
+    assert "file search unavailable" in result    # degraded note
+
+
+async def test_file_search_shape_drift_is_tolerated(monkeypatch):
+    """Hits that aren't the expected {host, path} dicts (a bare string, or a
+    dict missing 'path') must not KeyError out to 'Orrery is not running'."""
+    async def fake_get(self, url, params=None):
+        if url.endswith("/api/stack/search"):
+            return _FakeResp({"nodes": []})
+        if url.endswith("/api/files/search"):
+            return _FakeResp({"hits": ["oops", {"host": "mac"}], "truncated": False})
+        raise AssertionError(f"unexpected url {url}")
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    result = await StackInfoTool().execute(query="report.pdf")
+
+    assert "Orrery is not running" not in result
+    assert "[mac]" in result  # the salvageable dict hit still rendered

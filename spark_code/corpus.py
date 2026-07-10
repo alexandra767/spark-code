@@ -37,8 +37,14 @@ import hashlib
 import json
 import os
 import re
+import threading
 
 DEFAULT_CORPUS_DIR = "~/training-corpus/spark-code"
+
+# Serializes the append below so two sessions ending near-simultaneously (e.g.
+# a headless run and an interactive one sharing the same corpus dir) can't
+# interleave partial writes into the same JSONL line.
+_APPEND_LOCK = threading.Lock()
 
 # API-key/token/credential-shaped strings. Aggressively pattern-based rather
 # than exhaustive: this is a *record of behavior* for training, not a
@@ -68,6 +74,19 @@ _SECRET_PATTERNS = [
     # Generic "Bearer <opaque>" auth header — whole match redacted (drops the
     # token; the literal word "Bearer" going too is harmless).
     re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{20,}"),
+    # PEM private-key blocks — the exact shape of an Apple ASC .p8 signing key
+    # ("BEGIN PRIVATE KEY") and any RSA/EC/OPENSSH variant. DOTALL so the
+    # multi-line base64 body between the markers is swallowed whole. Also
+    # catches the value of a Play service-account JSON `private_key` (whose
+    # BEGIN/END markers survive whether the newlines are real or backslash-n
+    # escaped) — without this a .p8 or SA JSON pasted into a session survived
+    # into the training-corpus export intact.
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+               re.DOTALL),
+    # Belt-and-suspenders for the JSON form specifically: redact the whole
+    # `"private_key": "..."` field even if its BEGIN/END markers were stripped
+    # or truncated before this ran.
+    re.compile(r'"private_key"\s*:\s*"[^"]*"'),
     re.compile(r"\b[A-Fa-f0-9]{32,}\b"),  # long hex strings (tokens/hashes-as-secrets)
 ]
 
@@ -200,6 +219,7 @@ def export_session(context, path_dir: str, meta: dict) -> str | None:
     expanded_dir = os.path.expanduser(path_dir or DEFAULT_CORPUS_DIR)
     os.makedirs(expanded_dir, exist_ok=True)
     out_path = os.path.join(expanded_dir, "spark-code-sessions.jsonl")
-    with open(out_path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    line = json.dumps(record, ensure_ascii=False) + "\n"
+    with _APPEND_LOCK, open(out_path, "a", encoding="utf-8") as f:
+        f.write(line)
     return out_path

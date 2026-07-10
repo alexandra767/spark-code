@@ -15,7 +15,11 @@ import httpx
 
 from .base import Tool
 
-ORRERY_URL = os.environ.get("ORRERY_URL", "http://spark-4a54.local:4200")
+# Default to the Spark's tailnet (tailscale) hostname, not its .local mDNS
+# name: the .local name only resolves on the same LAN, so an off-LAN (nomad)
+# session would silently fail to reach Orrery. The tailnet name resolves
+# everywhere the tailnet is up. Override with ORRERY_URL if it ever changes.
+ORRERY_URL = os.environ.get("ORRERY_URL", "http://spark-4a54.tailcade53.ts.net:4200")
 
 SECTIONS = ("applications", "routines", "memory", "skills")
 
@@ -148,13 +152,25 @@ class StackInfoTool(Tool):
                             fresp = await client.get(f"{ORRERY_URL}/api/files/search", params={"q": query})
                             if fresp.status_code == 200:
                                 fdata = fresp.json()
-                                hits = fdata.get("hits", [])[:20]
-                                if hits:
+                                hits = fdata.get("hits", [])
+                                if not isinstance(hits, list):
+                                    hits = []
+                                file_lines = "\n".join(
+                                    f"- [{h.get('host', '?')}] {h.get('path', '?')}"
+                                    for h in hits[:20] if isinstance(h, dict)
+                                )
+                                if file_lines:
                                     trunc = " (truncated)" if fdata.get("truncated") else ""
-                                    file_lines = "\n".join(f"- [{h['host']}] {h['path']}" for h in hits)
                                     text += f"\n\nFile matches{trunc}:\n{file_lines}"
-                        except httpx.HTTPError:
-                            pass  # file index is a bonus here — a search still stands without it
+                        except (httpx.HTTPError, ValueError, KeyError, TypeError):
+                            # The file index is a best-effort bonus. A transport
+                            # error, a non-JSON 200 (fresp.json() → ValueError),
+                            # or a shape drift must NOT escape to the outer
+                            # handler and get mis-reported as "Orrery is not
+                            # running" while it IS — that would discard the
+                            # stack matches already gathered in `text`. Degrade
+                            # to a note and return what we have.
+                            text += "\n\n(file search unavailable)"
                     return text
 
                 # Default: the overview.

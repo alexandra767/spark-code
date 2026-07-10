@@ -221,6 +221,29 @@ async def test_code_search_tool_disabled_never_calls_network():
     assert "unavailable" in out.lower()
 
 
+@pytest.mark.asyncio
+async def test_code_search_tool_surfaces_real_error_on_http_500():
+    """Fix 8: a 500 from the service is NOT 'never indexed' — surface the real
+    error rather than misdiagnosing the user with the bare re-index nudge."""
+    tool = CodeSearchTool(cwd="/tmp/some-project", transport=_search_transport([], status=500))
+    out = await tool.execute(query="anything")
+    assert "500" in out
+    assert "unavailable" in out.lower()
+
+
+@pytest.mark.asyncio
+async def test_code_search_tool_surfaces_transport_error_detail():
+    def handler(request):
+        raise httpx.ConnectError("no route to host")
+
+    tool = CodeSearchTool(cwd="/tmp/some-project", transport=httpx.MockTransport(handler))
+    out = await tool.execute(query="anything")
+    # The transport detail is surfaced (distinguishes service-down from
+    # never-indexed) while still hinting /index.
+    assert "route" in out.lower()
+    assert "/index" in out
+
+
 def test_code_search_tool_metadata():
     tool = CodeSearchTool(cwd="/tmp/some-project")
     assert tool.name == "code_search"
@@ -358,6 +381,31 @@ async def test_index_project_non_200_health_returns_error(tmp_path):
     result = await index_project(str(tmp_path), service_url="http://fake",
                                  transport=httpx.MockTransport(handler))
     assert "error" in result
+
+
+@pytest.mark.asyncio
+async def test_index_project_health_probe_runs_before_file_walk(tmp_path, monkeypatch):
+    """Fix 7: an unreachable service must fail fast — the (potentially large)
+    tree walk + per-file _is_binary probes must NOT happen before /health."""
+    import spark_code.codesearch as cs
+
+    (tmp_path / "real.py").write_text("x = 1\n")
+    walked = []
+    orig = cs._iter_source_files
+
+    def spy(root):
+        walked.append(root)
+        return orig(root)
+
+    monkeypatch.setattr(cs, "_iter_source_files", spy)
+
+    def handler(request):
+        raise httpx.ConnectError("no route to host")  # health probe fails
+
+    result = await index_project(str(tmp_path), service_url="http://fake",
+                                 transport=httpx.MockTransport(handler))
+    assert "error" in result
+    assert walked == []  # never walked the tree — failed fast on health
 
 
 @pytest.mark.asyncio

@@ -224,7 +224,9 @@ PROVIDERS = {
         "needs_key": False,
     },
     "sglang": {
-        "base_url": "http://spark-4a54.local:30000",
+        # Tailscale hostname (not .local mDNS) so the default resolves off-LAN
+        # too — matches the migration of every user-facing provider endpoint.
+        "base_url": "http://spark-4a54.tailcade53.ts.net:30000",
         "api_path": "/v1/chat/completions",
         "needs_key": False,
     },
@@ -239,6 +241,37 @@ PROVIDERS = {
         "needs_key": True,
     },
 }
+
+
+# PRECISE overflow phrases only. Earlier this set included the generic
+# "input_tokens" and "context length", which also appear in unrelated 400s
+# (e.g. a schema-validation error that happens to echo the field name
+# "input_tokens", or any message mentioning a "context length" limit that
+# isn't an overflow). Those false matches hijacked the error into a silent
+# max_tokens halving + retry, burying the real error text. Every phrase here
+# is a verified vLLM/OpenAI *overflow* message fragment:
+#   - "maximum context length"          OpenAI + vLLM openai-serving validator
+#   - "maximum model length"            vLLM engine ValueError ("...maximum
+#                                        model length of N")
+#   - "max_model_len"                   vLLM config field named in some errors
+#   - "reduce the length of the messages" tail of the OpenAI/vLLM overflow msg
+_OVERFLOW_MARKERS = ("maximum context length", "maximum model length",
+                     "max_model_len", "reduce the length of the messages")
+
+# Context-overflow halving budget — INDEPENDENT of the transient 429/5xx retry
+# budget (self.max_retries). A too-long prompt+completion 400 is deterministic:
+# retrying the same request unchanged can't help, only lowering max_tokens can,
+# and it needs no backoff. We halve the completion budget down to a floor,
+# capped at a small number of halvings so a genuinely-too-long PROMPT (which no
+# amount of completion-halving can fix) can't spin.
+_MAX_OVERFLOW_HALVINGS = 5
+_OVERFLOW_MIN_TOKENS = 256
+
+
+def _looks_like_context_overflow(text: str) -> bool:
+    """True for 400s complaining the prompt+completion exceed the model ctx."""
+    t = (text or "").lower()
+    return any(m in t for m in _OVERFLOW_MARKERS)
 
 
 class ModelClient:
@@ -349,13 +382,23 @@ class ModelClient:
         Retries only happen *before the first chunk is yielded*: once partial
         output has streamed, replaying the request would duplicate text in the
         conversation, so an interruption is surfaced as an error instead.
+
+        Two independent retry budgets, so one can't starve the other:
+          * TRANSIENT (429/5xx + connection errors): up to ``self.max_retries``
+            attempts with exponential backoff (1s, 2s, ...).
+          * CONTEXT-OVERFLOW (400 whose body matches _OVERFLOW_MARKERS): a
+            deterministic max_tokens halving on its OWN budget
+            (_MAX_OVERFLOW_HALVINGS, floor _OVERFLOW_MIN_TOKENS) with NO
+            backoff sleep — the server's answer won't change with time, only
+            with a smaller completion budget. Every computed halving is
+            actually SENT before the loop can exit (the earlier version halved
+            once more than it resent, so the final — often fitting — value was
+            written into the payload but never tried).
         """
         last_error = None
-        for attempt in range(self.max_retries):
-            if attempt > 0:
-                delay = 2 ** (attempt - 1)  # 1s, 2s
-                logger.info("Retry %d/%d after %ds", attempt + 1, self.max_retries, delay)
-                await asyncio.sleep(delay)
+        transient_attempts = 0   # 429/5xx + connection retries (backoff budget)
+        overflow_halvings = 0    # context-overflow max_tokens halvings
+        while True:
             yielded = False
             try:
                 async for chunk in self._stream_request_inner(payload):
@@ -369,13 +412,37 @@ class ModelClient:
                            "content": f"[stream error after partial output: {e}]"}
                     yield {"type": "done", "usage": {}}
                     return
+                # 2026-07-10 (found by eval Part 2): a long session can push
+                # prompt+max_tokens one breath past the model context and the
+                # server 400s, killing the run. Halve the completion budget and
+                # resend — deterministic, no backoff, on its own bounded budget.
+                if (e.status_code == 400 and _looks_like_context_overflow(e.text)
+                        and overflow_halvings < _MAX_OVERFLOW_HALVINGS):
+                    cur = int(payload.get("max_tokens") or self.max_tokens or 4096)
+                    if cur > _OVERFLOW_MIN_TOKENS:
+                        payload["max_tokens"] = max(_OVERFLOW_MIN_TOKENS, cur // 2)
+                        overflow_halvings += 1
+                        last_error = e
+                        logger.warning("Context overflow: retrying with max_tokens=%d",
+                                       payload["max_tokens"])
+                        continue  # no backoff sleep for a deterministic retry
+                    # Already at the floor and still overflowing: the PROMPT
+                    # itself doesn't fit, so halving completion can't help —
+                    # fall through and surface it rather than spin.
                 if e.status_code not in _RETRYABLE_STATUSES:
                     yield {"type": "error", "recoverable": True,
                            "content": f"API error ({e.status_code}): {e.text[:500]}"}
                     yield {"type": "done", "usage": {}}
                     return
                 last_error = e
-                logger.warning("Retryable error %d: %s", e.status_code, str(e)[:200])
+                transient_attempts += 1
+                if transient_attempts >= self.max_retries:
+                    break
+                delay = 2 ** (transient_attempts - 1)  # 1s, 2s, ...
+                logger.warning("Retryable error %d: %s — retry %d/%d after %ds",
+                               e.status_code, str(e)[:200], transient_attempts,
+                               self.max_retries, delay)
+                await asyncio.sleep(delay)
             except (httpx.ConnectError, httpx.ReadError, httpx.WriteError,
                     httpx.TimeoutException, httpx.RemoteProtocolError) as e:
                 if yielded:
@@ -385,10 +452,17 @@ class ModelClient:
                     yield {"type": "done", "usage": {}}
                     return
                 last_error = e
-                logger.warning("Connection error (attempt %d): %s", attempt + 1, str(e)[:200])
+                transient_attempts += 1
+                if transient_attempts >= self.max_retries:
+                    break
+                delay = 2 ** (transient_attempts - 1)  # 1s, 2s, ...
+                logger.warning("Connection error (attempt %d/%d): %s — retry after %ds",
+                               transient_attempts, self.max_retries,
+                               str(e)[:200], delay)
+                await asyncio.sleep(delay)
 
-        # Exhausted retries with no content yielded — a recoverable failure a
-        # fallback chain can retry on another provider.
+        # Exhausted transient retries with no content yielded — a recoverable
+        # failure a fallback chain can retry on another provider.
         yield {"type": "error", "recoverable": True,
                "content": f"API error after {self.max_retries} retries: {last_error}"}
         yield {"type": "done", "usage": {}}

@@ -9,6 +9,43 @@ import os
 from datetime import datetime
 
 
+def sanitize_branch_name(name: str) -> str:
+    """Normalize a branch name into a safe single-segment filename stem.
+
+    Branch state is persisted as ``<name>.json`` inside a per-project dir, so a
+    raw name straight from the user is a hazard on two fronts:
+
+    * a path separator ("feature/login") points ``open`` at a non-existent
+      sub-directory → ``FileNotFoundError`` (a crash, not a friendly error);
+    * a traversal ("../x", "..") escapes the project's branch dir entirely.
+
+    Slugify separators to ``-`` so any name is a single filename segment, and
+    reject empty / traversal / hidden names outright. Sanitizing is idempotent
+    (an already-clean name is returned unchanged), so every entry point can
+    call it and a name saved as "feature/login" is still loadable/deletable by
+    passing "feature/login" again — both resolve to the same "feature-login".
+
+    Raises ``ValueError`` (with a user-facing message) on an unusable name so
+    callers surface a friendly error instead of a traceback.
+    """
+    raw = (name or "").strip()
+    if not raw:
+        raise ValueError("Branch name cannot be empty")
+    # Reject traversal before slugifying, checking each path segment (so
+    # "a/../b" and a bare ".." are both caught, but a literal "..foo" isn't
+    # treated as traversal — it's rejected below as a hidden name instead).
+    segments = raw.replace("\\", "/").split("/")
+    if any(seg == ".." for seg in segments):
+        raise ValueError(f"Invalid branch name (path traversal): {name!r}")
+    if raw.startswith("."):
+        raise ValueError(f"Branch name cannot start with '.': {name!r}")
+    slug = raw.replace("\\", "-").replace("/", "-")
+    # Defense in depth: the slug must never reintroduce a separator.
+    if os.sep in slug or (os.altsep and os.altsep in slug):
+        raise ValueError(f"Invalid branch name: {name!r}")
+    return slug
+
+
 class BranchManager:
     """Manages conversation branches as separate saved states."""
 
@@ -29,7 +66,12 @@ class BranchManager:
         return self._current_branch
 
     def save_branch(self, name: str, context, cwd: str = "") -> str:
-        """Save current conversation as a named branch."""
+        """Save current conversation as a named branch.
+
+        Raises ``ValueError`` on an unusable name (see sanitize_branch_name);
+        the CLI catches it and shows a friendly error.
+        """
+        name = sanitize_branch_name(name)
         branch_path = os.path.join(self.branch_dir, f"{name}.json")
         data = {
             "name": name,
@@ -47,6 +89,10 @@ class BranchManager:
 
     def switch_branch(self, name: str, context) -> tuple[bool, str]:
         """Switch to a named branch, loading its conversation state."""
+        try:
+            name = sanitize_branch_name(name)
+        except ValueError as e:
+            return False, str(e)
         branch_path = os.path.join(self.branch_dir, f"{name}.json")
         if not os.path.exists(branch_path):
             return False, f"Branch '{name}' not found"
@@ -65,7 +111,12 @@ class BranchManager:
             return False, f"Failed to load branch '{name}': {e}"
 
     def create_branch(self, name: str, context, cwd: str = "") -> str:
-        """Create a new branch from current state (saves current first)."""
+        """Create a new branch from current state (saves current first).
+
+        Raises ``ValueError`` on an unusable name — validated up front so an
+        invalid target never triggers the pre-save side effect below.
+        """
+        name = sanitize_branch_name(name)
         # Save current branch state before creating new one
         if self._current_branch:
             self.save_branch(self._current_branch, context, cwd)
@@ -73,6 +124,10 @@ class BranchManager:
 
     def delete_branch(self, name: str) -> tuple[bool, str]:
         """Delete a branch."""
+        try:
+            name = sanitize_branch_name(name)
+        except ValueError as e:
+            return False, str(e)
         if name == self._current_branch:
             return False, "Cannot delete the current branch"
         branch_path = os.path.join(self.branch_dir, f"{name}.json")
@@ -113,6 +168,10 @@ class BranchManager:
         are skipped because splicing them in would break the message sequence
         (an assistant tool_calls turn without its matching tool results).
         """
+        try:
+            source = sanitize_branch_name(source)
+        except ValueError as e:
+            return False, str(e)
         branch_path = os.path.join(self.branch_dir, f"{source}.json")
         if not os.path.exists(branch_path):
             return False, f"Branch '{source}' not found"

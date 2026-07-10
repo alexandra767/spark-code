@@ -230,30 +230,34 @@ async def index_project(cwd: str, service_url: str | None = None,
     service_url = (service_url or resolve_service_url(None)).rstrip("/")
     collection = collection or collection_name_for(root)
 
-    candidates: list[tuple[str, str]] = []
-    skipped = 0
-    for abs_path, rel_path in _iter_source_files(root):
-        try:
-            size = os.path.getsize(abs_path)
-        except OSError:
-            skipped += 1
-            continue
-        if size == 0 or size > max_file_bytes:
-            skipped += 1
-            continue
-        if _is_binary(abs_path):
-            skipped += 1
-            continue
-        candidates.append((abs_path, rel_path))
-
     try:
         async with httpx.AsyncClient(timeout=timeout, transport=transport) as client:
+            # Health-first so an unreachable service fails fast (one request)
+            # instead of walking (and per-file _is_binary-probing) a
+            # potentially large tree first — the docstring's fail-fast promise.
             try:
                 health = await client.get(f"{service_url}/health")
                 if health.status_code != 200:
                     return {"error": f"RAG service at {service_url} returned HTTP {health.status_code}"}
             except Exception as e:
                 return {"error": f"RAG service unreachable at {service_url}: {e}"}
+
+            # Service confirmed reachable — now walk the tree.
+            candidates: list[tuple[str, str]] = []
+            skipped = 0
+            for abs_path, rel_path in _iter_source_files(root):
+                try:
+                    size = os.path.getsize(abs_path)
+                except OSError:
+                    skipped += 1
+                    continue
+                if size == 0 or size > max_file_bytes:
+                    skipped += 1
+                    continue
+                if _is_binary(abs_path):
+                    skipped += 1
+                    continue
+                candidates.append((abs_path, rel_path))
 
             if not candidates:
                 return {"indexed": 0, "skipped": skipped, "collection": collection}
@@ -432,6 +436,18 @@ class CodeSearchTool(Tool):
         results, error = await search_project(
             self._service_url, self._collection, query, k,
             transport=self._transport)
-        if error or not results:
+        if error:
+            # A real service/transport failure (HTTP 5xx, auth, connection
+            # refused, timeout) is NOT the same as "this project was never
+            # indexed" — collapsing every failure to the re-index nudge
+            # misdiagnoses the user (told to run /index when the service is
+            # down). Surface the real error, still with the /index hint in
+            # case it genuinely is unindexed. Never raises.
+            return (f"code search unavailable: {error} "
+                    f"(RAG service at {self._service_url}). "
+                    f"If this project was never indexed, run /index.")
+        if not results:
+            # No error, just no hits — most likely never indexed (or nothing
+            # matched). Keep the clean re-index nudge.
             return unavailable_message(self._service_url)
         return format_code_search_results(results)

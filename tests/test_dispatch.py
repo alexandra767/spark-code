@@ -554,6 +554,105 @@ async def test_dispatch_tool_execute_passes_isolated_through():
         d.run_subagent = orig
 
 
+async def test_worktree_removed_on_cancellation(tmp_path, monkeypatch):
+    """Cleanup lived in `except Exception`, but asyncio.CancelledError is a
+    BaseException (NOT Exception) and bypassed it — so when a cancellation
+    propagates OUT of sub_agent.run (a /loop round's asyncio.wait_for timeout,
+    or a lead Ctrl+C, landing outside Agent.run's own chat-stream cancel
+    handler) the worktree leaked on disk AND in `git worktree list`. The
+    force-remove must fire on the cancel path too, then re-raise.
+
+    The sub-agent's Agent is faked with one whose run() blocks on a raw sleep
+    and does NOT swallow the cancel (unlike the real Agent.run, which absorbs a
+    CancelledError raised inside its chat stream) — this reproduces the exact
+    path the fix guards: CancelledError escaping sub_agent.run into
+    run_subagent's handler."""
+    calls = []
+    monkeypatch.setattr(dispatch, "_run_git", _fake_git_factory(str(tmp_path), calls))
+
+    started = asyncio.Event()
+
+    class _BlockingAgent:
+        MAX_TOOL_ROUNDS = 15
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def run(self, prompt):
+            started.set()               # worktree already exists at this point
+            await asyncio.sleep(3600)   # cancellation propagates straight out
+            return "unreachable"
+
+    monkeypatch.setattr(dispatch, "Agent", _BlockingAgent)
+
+    model = MockModel(_final_text("x"))  # unused by the fake agent
+    task = asyncio.create_task(dispatch.run_subagent(
+        model, "x", "implementer", _cfg(), "auto", isolated=True))
+    await started.wait()          # worktree is created before run() blocks
+    await asyncio.sleep(0.01)     # let the run park on the blocking sleep
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    add_calls = [c for c, _cwd in calls if c[:2] == ["worktree", "add"]]
+    assert len(add_calls) == 1    # the worktree WAS created ...
+    remove_calls = [c for c, _cwd in calls if c[:2] == ["worktree", "remove"]]
+    assert len(remove_calls) == 1  # ... and force-removed on cancel, not leaked
+    assert "--force" in remove_calls[0]
+
+
+# ---------------------------------------------------------------------------
+# BrowseWebTool — routes to the web-driver sub-agent (Gemini vision browser).
+# ---------------------------------------------------------------------------
+
+
+def test_browse_web_instantiation_and_schema():
+    tool = dispatch.BrowseWebTool(model=None, config=_cfg(), lead_mode="auto")
+    assert tool.name == "browse_web"
+    assert tool.requires_permission is True
+    assert tool.is_read_only is False
+    props = tool.parameters["properties"]
+    assert set(tool.parameters["required"]) == {"task"}   # url is optional
+    assert "task" in props and "url" in props
+    # Description must point at the web-driver browser and steer away from reads.
+    desc = tool.description.lower()
+    assert "web-driver" in desc and "web_fetch" in desc
+
+
+async def test_browse_web_routes_to_web_driver(monkeypatch):
+    captured = {}
+
+    async def fake_run(model, prompt, agent_type, config, lead_mode, **kwargs):
+        captured["prompt"] = prompt
+        captured["agent_type"] = agent_type
+        captured["lead_mode"] = lead_mode
+        captured["kwargs"] = kwargs
+        return "browser done"
+
+    monkeypatch.setattr(dispatch, "run_subagent", fake_run)
+    tool = dispatch.BrowseWebTool(model=MockModel(_final_text("x")),
+                                  config=_cfg(), lead_mode="auto")
+    result = await tool.execute(task="click the login button")
+    assert result == "browser done"
+    assert captured["agent_type"] == "web-driver"     # NOT a hallucinated tool
+    assert "click the login button" in captured["prompt"]
+    assert captured["lead_mode"] == "auto"
+
+
+async def test_browse_web_weaves_url_into_prompt(monkeypatch):
+    captured = {}
+
+    async def fake_run(model, prompt, agent_type, config, lead_mode, **kwargs):
+        captured["prompt"] = prompt
+        return "ok"
+
+    monkeypatch.setattr(dispatch, "run_subagent", fake_run)
+    tool = dispatch.BrowseWebTool(model=None, config=_cfg(), lead_mode="auto")
+    await tool.execute(task="fill the form", url="https://example.com/login")
+    assert "https://example.com/login" in captured["prompt"]
+    assert "fill the form" in captured["prompt"]
+
+
 # ---------------------------------------------------------------------------
 # Worktree isolation — real git, real temp repo (no mocking). Exercises the
 # whole lifecycle end to end: creates a worktree, has the sub-agent actually

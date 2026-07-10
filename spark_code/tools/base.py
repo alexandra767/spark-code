@@ -22,6 +22,47 @@ def _temp_dir_candidates() -> tuple[str, ...]:
     return (tempfile.gettempdir(), "/tmp")
 
 
+def protected_credential_realpaths(keys_path_fn) -> set[str]:
+    """Realpaths of files that may hold LITERAL secrets and must never be
+    returned by any content-reading tool (read_file, grep, …).
+
+    Covers the ``/setkey`` store plus the two ``~/.spark`` config files that can
+    carry inline (non-``${ENV}``) credentials — ``config.yaml`` (inline
+    ``api_key:``) and ``mcp.yaml`` (literal ``Authorization``/token headers).
+    ``keys_path_fn`` is injected (each reader does ``from ..keys import
+    keys_path``) so a test can redirect it at the reader's bound reference,
+    matching the existing read_file monkeypatch pattern. Realpath resolution
+    defeats symlink / relative / traversal aliases the same way the write
+    sandbox and the MCP image sentinel do.
+    """
+    spark_dir = os.path.expanduser("~/.spark")
+    candidates = [
+        keys_path_fn(),
+        os.path.join(spark_dir, "config.yaml"),
+        os.path.join(spark_dir, "mcp.yaml"),
+    ]
+    out: set[str] = set()
+    for c in candidates:
+        try:
+            out.add(os.path.realpath(c))
+        except OSError:
+            pass
+    return out
+
+
+def is_protected_credential_file(path: str, keys_path_fn) -> bool:
+    """True if ``path`` resolves to one of the protected credential files.
+
+    Single choke point every content-reader routes through, so a future reader
+    tool can't silently reopen the exfil hole the way ``grep`` did (it had no
+    keys guard while ``read_file`` did, and ``grep`` is always-allowed).
+    """
+    try:
+        return os.path.realpath(path) in protected_credential_realpaths(keys_path_fn)
+    except OSError:
+        return False
+
+
 def _validate_path(file_path: str, cwd: str | None = None,
                    for_write: bool = False,
                    extra_roots: list[str] | None = None) -> str:

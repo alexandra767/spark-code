@@ -759,6 +759,49 @@ class TestFileWatcher:
         assert "/b.py" in changed  # modified
         assert "/c.py" in changed  # new
 
+    async def test_command_timeout_kills_and_reaps_child(self, monkeypatch):
+        # On wait_for timeout the child process must be killed and reaped —
+        # otherwise a hung command orphans a process and every file change
+        # spawns another. (watcher.py finding 8.)
+        from spark_code import watcher as watcher_mod
+        from spark_code.watcher import FileWatcher
+
+        killed = {"kill": False, "waited": False}
+
+        class FakeProc:
+            returncode = None
+
+            async def communicate(self):
+                await asyncio.sleep(10)   # hangs — wait_for times out first
+                return (b"", None)        # unreachable
+
+            def kill(self):
+                killed["kill"] = True
+                self.returncode = -9
+
+            async def wait(self):
+                killed["waited"] = True
+                return -9
+
+        async def fake_create(*a, **kw):
+            return FakeProc()
+
+        monkeypatch.setattr(watcher_mod.asyncio, "create_subprocess_shell",
+                            fake_create)
+        monkeypatch.setattr(watcher_mod, "_COMMAND_TIMEOUT_S", 0.05)
+
+        msgs = []
+
+        class RecConsole:
+            def print(self, *a, **kw):
+                msgs.append(str(a[0]) if a else "")
+
+        fw = FileWatcher("sleep 999", RecConsole())
+        await fw._run_command()
+        assert killed["kill"] is True    # child killed, not orphaned
+        assert killed["waited"] is True  # ...and reaped
+        assert any("timed out" in m.lower() for m in msgs)
+
 
 # ── Tools ────────────────────────────────────────────────────────────────
 
